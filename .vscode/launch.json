@@ -1,0 +1,24 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "C/C++ Runner: Debug Session",
+      "type": "cppdbg",
+      "request": "launch",
+      "args": [],
+      "stopAtEntry": false,
+      "externalConsole": true,
+      "cwd": "c:/Users/mousa/AppData/Roaming/MetaQuotes/Terminal/EBC70E542FD2519E5E0B3CC8F66A5C22/MQL5",
+      "program": "c:/Users/mousa/AppData/Roaming/MetaQuotes/Terminal/EBC70E542FD2519E5E0B3CC8F66A5C22/MQL5/build/Debug/outDebug",
+      "MIMode": "gdb",
+      "miDebuggerPath": "gdb",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ]
+    }
+  ]
+}

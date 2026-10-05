@@ -1,0 +1,33 @@
+# =========================================================
+# AlgoMultiAssetEA - Git Allowlist
+# Ignore EVERYTHING by default
+# =========================================================
+
+*
+
+# Keep .gitignore itself
+!.gitignore
+
+# =========================================================
+# AlgoMultiAssetEA source
+# =========================================================
+
+!MQL5/
+!MQL5/Experts/
+!MQL5/Experts/AlgoMultiAssetEA.mq5
+
+!MQL5/Include/
+!MQL5/Include/AlgoSystem/
+!MQL5/Include/AlgoSystem/**
+
+# =========================================================
+# Project instructions / configuration
+# =========================================================
+
+!AGENTS.md
+
+!.github/
+!.github/**
+
+!.vscode/
+!.vscode/**
