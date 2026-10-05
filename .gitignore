@@ -1,15 +1,25 @@
 # =========================================================
 # AlgoMultiAssetEA - Git Allowlist
-# Ignore EVERYTHING by default
+# Ignore everything by default
 # =========================================================
 
 *
 
-# Keep .gitignore itself
+# ---------------------------------------------------------
+# Git / project metadata
+# ---------------------------------------------------------
+
 !.gitignore
+!AGENTS.md
+
+!.github/
+!.github/**
+
+!.vscode/
+!.vscode/**
 
 # =========================================================
-# AlgoMultiAssetEA source
+# CASE A: Repository root = MT5 Data Folder
 # =========================================================
 
 !MQL5/
@@ -21,13 +31,12 @@
 !MQL5/Include/AlgoSystem/**
 
 # =========================================================
-# Project instructions / configuration
+# CASE B: Repository root = MQL5 folder
 # =========================================================
 
-!AGENTS.md
+!Experts/
+!Experts/AlgoMultiAssetEA.mq5
 
-!.github/
-!.github/**
-
-!.vscode/
-!.vscode/**
+!Include/
+!Include/AlgoSystem/
+!Include/AlgoSystem/**
