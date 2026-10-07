@@ -217,7 +217,7 @@ private:
         }
 
       ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_CORNER,CORNER_RIGHT_UPPER);
-      ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_XDISTANCE,10);
+      ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_XDISTANCE,250);
       ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_YDISTANCE,30);
       ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_XSIZE,240);
       ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_YSIZE,288);
