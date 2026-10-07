@@ -64,6 +64,32 @@ input double InpConflictThreshold=5.0;
 input bool   InpEnableMeanReversion=false;
 input bool   InpEnableRelativeValue=false;
 
+input group "PROFILE STRATEGY POLICY"
+input bool   InpScalpTrendEnabled=true;
+input bool   InpScalpBreakoutEnabled=true;
+input bool   InpScalpMomentumEnabled=true;
+input bool   InpScalpMeanReversionEnabled=true;
+input bool   InpDayTrendEnabled=true;
+input bool   InpDayBreakoutEnabled=true;
+input bool   InpDayMomentumEnabled=true;
+input bool   InpDayMeanReversionEnabled=true;
+input bool   InpSwingTrendEnabled=true;
+input bool   InpSwingBreakoutEnabled=true;
+input bool   InpSwingMomentumEnabled=true;
+input bool   InpSwingMeanReversionEnabled=true;
+input double InpScalpTrendMinimumScore=-1.0;
+input double InpScalpBreakoutMinimumScore=-1.0;
+input double InpScalpMomentumMinimumScore=-1.0;
+input double InpScalpMeanReversionMinimumScore=-1.0;
+input double InpDayTrendMinimumScore=-1.0;
+input double InpDayBreakoutMinimumScore=-1.0;
+input double InpDayMomentumMinimumScore=-1.0;
+input double InpDayMeanReversionMinimumScore=-1.0;
+input double InpSwingTrendMinimumScore=-1.0;
+input double InpSwingBreakoutMinimumScore=-1.0;
+input double InpSwingMomentumMinimumScore=-1.0;
+input double InpSwingMeanReversionMinimumScore=-1.0;
+
 input group "FEATURES"
 input int InpEMA_Fast=20;
 input int InpEMA_Slow=50;
@@ -114,6 +140,78 @@ input int    InpMaxHoldingMinutes=240;
 
 input group "EXECUTION"
 input ulong InpDeviationPoints=20;
+
+bool ProfileStrategyEnabled(const ENUM_TRADING_PROFILE profile,
+                            const ENUM_STRATEGY_ID strategy)
+  {
+   if(profile==PROFILE_SCALP)
+     {
+      if(strategy==STRATEGY_TREND_PULLBACK) return InpScalpTrendEnabled;
+      if(strategy==STRATEGY_BREAKOUT) return InpScalpBreakoutEnabled;
+      if(strategy==STRATEGY_MOMENTUM) return InpScalpMomentumEnabled;
+      if(strategy==STRATEGY_MEAN_REVERSION) return InpScalpMeanReversionEnabled;
+     }
+   else if(profile==PROFILE_SWING)
+     {
+      if(strategy==STRATEGY_TREND_PULLBACK) return InpSwingTrendEnabled;
+      if(strategy==STRATEGY_BREAKOUT) return InpSwingBreakoutEnabled;
+      if(strategy==STRATEGY_MOMENTUM) return InpSwingMomentumEnabled;
+      if(strategy==STRATEGY_MEAN_REVERSION) return InpSwingMeanReversionEnabled;
+     }
+   else
+     {
+      if(strategy==STRATEGY_TREND_PULLBACK) return InpDayTrendEnabled;
+      if(strategy==STRATEGY_BREAKOUT) return InpDayBreakoutEnabled;
+      if(strategy==STRATEGY_MOMENTUM) return InpDayMomentumEnabled;
+      if(strategy==STRATEGY_MEAN_REVERSION) return InpDayMeanReversionEnabled;
+     }
+
+   return false;
+  }
+
+double ProfileSignalScoreOverride(const ENUM_TRADING_PROFILE profile,
+                                  const ENUM_STRATEGY_ID strategy)
+  {
+   if(profile==PROFILE_SCALP)
+     {
+      if(strategy==STRATEGY_TREND_PULLBACK) return InpScalpTrendMinimumScore;
+      if(strategy==STRATEGY_BREAKOUT) return InpScalpBreakoutMinimumScore;
+      if(strategy==STRATEGY_MOMENTUM) return InpScalpMomentumMinimumScore;
+      if(strategy==STRATEGY_MEAN_REVERSION) return InpScalpMeanReversionMinimumScore;
+     }
+   else if(profile==PROFILE_SWING)
+     {
+      if(strategy==STRATEGY_TREND_PULLBACK) return InpSwingTrendMinimumScore;
+      if(strategy==STRATEGY_BREAKOUT) return InpSwingBreakoutMinimumScore;
+      if(strategy==STRATEGY_MOMENTUM) return InpSwingMomentumMinimumScore;
+      if(strategy==STRATEGY_MEAN_REVERSION) return InpSwingMeanReversionMinimumScore;
+     }
+   else
+     {
+      if(strategy==STRATEGY_TREND_PULLBACK) return InpDayTrendMinimumScore;
+      if(strategy==STRATEGY_BREAKOUT) return InpDayBreakoutMinimumScore;
+      if(strategy==STRATEGY_MOMENTUM) return InpDayMomentumMinimumScore;
+      if(strategy==STRATEGY_MEAN_REVERSION) return InpDayMeanReversionMinimumScore;
+     }
+
+   return -1.0;
+  }
+
+double MinimumSignalScoreFor(const ENUM_TRADING_PROFILE profile,
+                             const ENUM_STRATEGY_ID strategy)
+  {
+   double score_override=
+      ProfileSignalScoreOverride(profile,strategy);
+   return (score_override<0.0 ?
+           InpMinimumSignalScore :
+           score_override);
+  }
+
+bool ValidSignalScoreOverride(const double score)
+  {
+   return score==-1.0 ||
+          (score>=0.0 && score<=100.0);
+  }
 
 //==================================================================
 // Runtime context
@@ -255,7 +353,9 @@ public:
          1.50,
          0.20,
          InpMinRR,
-         InpMinimumSignalScore,
+         MinimumSignalScoreFor(
+            InpProfile,
+            STRATEGY_TREND_PULLBACK),
          InpADXTrendThreshold);
 
       breakout.SetParameters(
@@ -272,7 +372,9 @@ public:
          InpBreakoutStopATR,
          InpBreakoutStructureBufferATR,
          InpBreakoutRR,
-         InpMinimumSignalScore);
+         MinimumSignalScoreFor(
+            InpProfile,
+            STRATEGY_BREAKOUT));
 
       if(!trend.Initialize())
         {
@@ -286,14 +388,20 @@ public:
          return false;
         }
 
-      momentum.SetMinimumSignalScore(InpMinimumSignalScore);
+      momentum.SetMinimumSignalScore(
+         MinimumSignalScoreFor(
+            InpProfile,
+            STRATEGY_MOMENTUM));
       if(!momentum.Initialize())
         {
          last_failure="MomentumStrategy.Initialize failed";
          return false;
         }
 
-      mean_reversion.SetMinimumSignalScore(InpMinimumSignalScore);
+      mean_reversion.SetMinimumSignalScore(
+         MinimumSignalScoreFor(
+            InpProfile,
+            STRATEGY_MEAN_REVERSION));
       if(!mean_reversion.Initialize())
         {
          last_failure="MeanReversionStrategy.Initialize failed";
@@ -366,6 +474,20 @@ void SelectProfileTimeframes(ENUM_TRADING_PROFILE profile,
 
 bool ValidInputSet()
   {
+   if(!ValidSignalScoreOverride(InpScalpTrendMinimumScore) ||
+      !ValidSignalScoreOverride(InpScalpBreakoutMinimumScore) ||
+      !ValidSignalScoreOverride(InpScalpMomentumMinimumScore) ||
+      !ValidSignalScoreOverride(InpScalpMeanReversionMinimumScore) ||
+      !ValidSignalScoreOverride(InpDayTrendMinimumScore) ||
+      !ValidSignalScoreOverride(InpDayBreakoutMinimumScore) ||
+      !ValidSignalScoreOverride(InpDayMomentumMinimumScore) ||
+      !ValidSignalScoreOverride(InpDayMeanReversionMinimumScore) ||
+      !ValidSignalScoreOverride(InpSwingTrendMinimumScore) ||
+      !ValidSignalScoreOverride(InpSwingBreakoutMinimumScore) ||
+      !ValidSignalScoreOverride(InpSwingMomentumMinimumScore) ||
+      !ValidSignalScoreOverride(InpSwingMeanReversionMinimumScore))
+      return false;
+
    if(InpRiskPercent<=0.0 ||
       InpDailyLossLimit<=0.0 ||
       InpMonthlyLossLimit<=0.0 ||
@@ -779,6 +901,9 @@ int EvaluateRuntimeStrategies(CSymbolRuntime &runtime,
    int candidate_count=0;
 
    if(context.trading_allowed &&
+      ProfileStrategyEnabled(
+         InpProfile,
+         STRATEGY_TREND_PULLBACK) &&
       StructureCompatible(
          STRATEGY_TREND_PULLBACK,
          signal_regime,
@@ -793,6 +918,9 @@ int EvaluateRuntimeStrategies(CSymbolRuntime &runtime,
      }
 
    if(context.trading_allowed &&
+      ProfileStrategyEnabled(
+         InpProfile,
+         STRATEGY_BREAKOUT) &&
       StructureCompatible(
          STRATEGY_BREAKOUT,
          signal_regime,
@@ -807,6 +935,9 @@ int EvaluateRuntimeStrategies(CSymbolRuntime &runtime,
      }
 
    if(context.trading_allowed &&
+      ProfileStrategyEnabled(
+         InpProfile,
+         STRATEGY_MOMENTUM) &&
       StructureCompatible(
          STRATEGY_MOMENTUM,
          signal_regime,
@@ -822,6 +953,9 @@ int EvaluateRuntimeStrategies(CSymbolRuntime &runtime,
 
    if(context.trading_allowed &&
       InpEnableMeanReversion &&
+      ProfileStrategyEnabled(
+         InpProfile,
+         STRATEGY_MEAN_REVERSION) &&
       StructureCompatible(
          STRATEGY_MEAN_REVERSION,
          signal_regime,
