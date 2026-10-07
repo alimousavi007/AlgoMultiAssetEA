@@ -11,6 +11,9 @@ private:
    long   m_chart_id;
    string m_bg_name;
    string m_text_name;
+   string m_last_signal_text;
+   string m_last_risk_text;
+   bool   m_has_evaluation;
 
    string TimeframeText(const ENUM_TIMEFRAMES tf) const
      {
@@ -38,6 +41,53 @@ private:
          return "BLOCK";
 
       return "WAIT";
+     }
+
+   void Render(const MarketSnapshot &market,
+               const FeatureSet &features,
+               const ENUM_REGIME_TYPE regime,
+               const string signal_text,
+               const string risk_text,
+               const PortfolioState &portfolio)
+     {
+      string chart_tf=TimeframeText((ENUM_TIMEFRAMES)ChartPeriod(0));
+      string analysis_tf=TimeframeText(market.timeframe);
+
+      string title_line=
+         m_title+" | "+market.symbol+
+         " | "+chart_tf+"/"+analysis_tf;
+
+      string line1=
+         "P "+DoubleToString(market.bid,market.properties.digits)+
+         "/"+DoubleToString(market.ask,market.properties.digits)+
+         " | Spr "+DoubleToString(market.spread_points,1);
+
+      string line2=
+         "R "+EnumToString(regime)+
+         " | ATR "+DoubleToString(features.atr,market.properties.digits)+
+         " | ADX "+DoubleToString(features.adx,1)+
+         " | RSI "+DoubleToString(features.rsi,1);
+
+      string line3=
+         "S "+signal_text+
+         " | Risk "+risk_text;
+
+      string line4=
+         "Eq "+DoubleToString(portfolio.equity,2)+
+         " | Pos "+IntegerToString(portfolio.total_positions)+
+         " | D "+DoubleToString(portfolio.daily_loss_percent,1)+"%"+
+         " | M "+DoubleToString(portfolio.monthly_loss_percent,1)+"%";
+
+      string line5=
+         "Lock "+(portfolio.trading_locked ? "ON" : "OFF");
+
+      SetText(
+         title_line+"\n"+
+         line1+"\n"+
+         line2+"\n"+
+         line3+"\n"+
+         line4+"\n"+
+         line5);
      }
 
    bool EnsureObjects()
@@ -116,6 +166,9 @@ public:
       m_chart_id=0;
       m_bg_name="";
       m_text_name="";
+      m_last_signal_text="NONE";
+      m_last_risk_text="WAIT";
+      m_has_evaluation=false;
      }
 
    void Enable(const bool enabled)
@@ -147,7 +200,10 @@ public:
       if(!m_enabled)
          return;
 
-      SetText(m_title+" | "+status);
+      SetText(
+         m_title+" | "+status+"\n"+
+         "S "+(m_has_evaluation ? m_last_signal_text : "NONE")+
+         " | Risk "+(m_has_evaluation ? m_last_risk_text : "WAIT"));
      }
 
    void Update(const MarketSnapshot &market,
@@ -165,44 +221,39 @@ public:
       if(chart_symbol!="" && market.symbol!=chart_symbol)
          return;
 
-      string chart_tf=TimeframeText((ENUM_TIMEFRAMES)ChartPeriod(0));
-      string analysis_tf=TimeframeText(market.timeframe);
+      m_last_signal_text=SignalText(signal);
+      m_last_risk_text=RiskText(risk);
+      m_has_evaluation=true;
 
-      string title_line=
-         m_title+" | "+market.symbol+
-         " | "+chart_tf+"/"+analysis_tf;
+      Render(
+         market,
+         features,
+         regime,
+         m_last_signal_text,
+         m_last_risk_text,
+         portfolio);
+     }
 
-      string line1=
-         "P "+DoubleToString(market.bid,market.properties.digits)+
-         "/"+DoubleToString(market.ask,market.properties.digits)+
-         " | Spr "+DoubleToString(market.spread_points,1);
+   void UpdateMarket(const MarketSnapshot &market,
+                     const FeatureSet &features,
+                     const ENUM_REGIME_TYPE regime,
+                     const PortfolioState &portfolio)
+     {
+      if(!m_enabled)
+         return;
 
-      string line2=
-         "R "+EnumToString(regime)+
-         " | ATR "+DoubleToString(features.atr,market.properties.digits)+
-         " | ADX "+DoubleToString(features.adx,1)+
-         " | RSI "+DoubleToString(features.rsi,1);
+      // The dashboard belongs only to the chart symbol.
+      string chart_symbol=ChartSymbol(0);
+      if(chart_symbol!="" && market.symbol!=chart_symbol)
+         return;
 
-      string line3=
-         "S "+SignalText(signal)+
-         " | Risk "+RiskText(risk);
-
-      string line4=
-         "Eq "+DoubleToString(portfolio.equity,2)+
-         " | Pos "+IntegerToString(portfolio.total_positions)+
-         " | D "+DoubleToString(portfolio.daily_loss_percent,1)+"%"+
-         " | M "+DoubleToString(portfolio.monthly_loss_percent,1)+"%";
-
-      string line5=
-         "Lock "+(portfolio.trading_locked ? "ON" : "OFF");
-
-      SetText(
-         title_line+"\n"+
-         line1+"\n"+
-         line2+"\n"+
-         line3+"\n"+
-         line4+"\n"+
-         line5);
+      Render(
+         market,
+         features,
+         regime,
+         m_has_evaluation ? m_last_signal_text : "NONE",
+         m_has_evaluation ? m_last_risk_text : "WAIT",
+         portfolio);
      }
   };
 

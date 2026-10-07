@@ -82,7 +82,8 @@
     "-Wno-unknown-directives",
     "-Wno-language-extension-token",
     "-Ic:/Users/mousa/AppData/Roaming/MetaQuotes/Terminal/EBC70E542FD2519E5E0B3CC8F66A5C22/MQL5",
-    "-Ic:/Users/mousa/AppData/Roaming/MetaQuotes/Terminal/EBC70E542FD2519E5E0B3CC8F66A5C22/MQL5/Include"
+    "-Ic:/Users/mousa/AppData/Roaming/MetaQuotes/Terminal/EBC70E542FD2519E5E0B3CC8F66A5C22/MQL5/Include",
+    "-IC:/Users/mousa/AppData/Local/mql-clangd/mirror/C/Users/mousa/AppData/Roaming/MetaQuotes/Terminal/EBC70E542FD2519E5E0B3CC8F66A5C22/MQL5/Include"
   ],
   "files.associations": {
     "*.mqh": "cpp",

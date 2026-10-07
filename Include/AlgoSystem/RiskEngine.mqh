@@ -249,11 +249,6 @@ public:
       decision.symbol=signal.symbol;
       decision.risk_percent=m_risk_percent;
 
-      return Reject(
-         decision,
-         m_external_lock_reason_code,
-         m_external_lock_reason);
-
       if(!signal.valid)
          return Reject(
             decision,
@@ -263,7 +258,7 @@ public:
       if(m_external_lock)
          return Reject(
             decision,
-            REJECT_DAILY_LOSS,
+            m_external_lock_reason_code,
             m_external_lock_reason);
 
       if(!IsDirectionAllowed(
