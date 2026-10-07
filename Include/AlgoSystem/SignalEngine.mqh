@@ -9,7 +9,6 @@
 //|                                                                  |
 //| Responsibility:                                                 |
 //| - validate strategy signals                                     |
-//| - remove duplicates                                              |
 //| - reject incompatible regime/strategy combinations               |
 //| - resolve same-direction candidates                              |
 //| - resolve opposite-direction conflicts                           |
@@ -96,32 +95,6 @@ private:
       if(signal.strategy==STRATEGY_RELATIVE_VALUE)
          return
             signal.regime!=REGIME_UNCERTAIN;
-
-      return false;
-     }
-
-   //+----------------------------------------------------------------+
-   //| Check duplicate signal ID                                      |
-   //+----------------------------------------------------------------+
-   bool IsDuplicate(
-      const StrategySignal &candidate,
-      const StrategySignal &signals[],
-      const int processed_count) const
-     {
-      if(candidate.signal_id=="")
-         return false;
-
-      for(int i=0;
-          i<processed_count;
-          i++)
-        {
-         if(!signals[i].valid)
-            continue;
-
-         if(signals[i].signal_id==
-            candidate.signal_id)
-            return true;
-        }
 
       return false;
      }
