@@ -8,6 +8,7 @@ class CAlgoStateManager : public IStateManager
 private:
    PortfolioState m_state;
    datetime       m_last_reconstruct;
+   bool           m_state_valid;
 
    void Reset()
      {
@@ -23,6 +24,7 @@ private:
       m_state.daily_lock=false;
       m_state.monthly_lock=false;
       m_state.trading_locked=false;
+      m_state_valid=false;
      }
       bool IsManagedMagic(const long magic) const
         {
@@ -54,73 +56,103 @@ private:
       return StructToTime(dt);
      }
 
-   double DealNetResult(const ulong ticket) const
+   bool DealNetResult(const ulong ticket,double &net) const
      {
-      return HistoryDealGetDouble(ticket,DEAL_PROFIT)+
-             HistoryDealGetDouble(ticket,DEAL_SWAP)+
-             HistoryDealGetDouble(ticket,DEAL_COMMISSION)+
-             HistoryDealGetDouble(ticket,DEAL_FEE);
+      double profit=0.0;
+      double swap=0.0;
+      double commission=0.0;
+      double fee=0.0;
+
+      if(!HistoryDealGetDouble(ticket,DEAL_PROFIT,profit) ||
+         !HistoryDealGetDouble(ticket,DEAL_SWAP,swap) ||
+         !HistoryDealGetDouble(ticket,DEAL_COMMISSION,commission) ||
+         !HistoryDealGetDouble(ticket,DEAL_FEE,fee))
+         return false;
+
+      net=profit+swap+commission+fee;
+      return MathIsValidNumber(net);
      }
 
-   double NetDealsSince(const datetime from,const datetime to) const
+   bool NetDealsSince(const datetime from,
+                      const datetime to,
+                      double &net) const
      {
+      net=0.0;
       if(!HistorySelect(from,to))
-         return 0.0;
+         return false;
 
       int total=HistoryDealsTotal();
-      double net=0.0;
+      if(total<0)
+         return false;
 
       for(int i=0;i<total;i++)
         {
          ulong ticket=HistoryDealGetTicket(i);
          if(ticket==0)
-            continue;
+            return false;
 
-         long type=HistoryDealGetInteger(ticket,DEAL_TYPE);
+         long type=0;
+         if(!HistoryDealGetInteger(ticket,DEAL_TYPE,type))
+            return false;
+
          if(type==DEAL_TYPE_BALANCE || type==DEAL_TYPE_CREDIT)
             continue;
 
-         net+=DealNetResult(ticket);
+         double deal_net=0.0;
+         if(!DealNetResult(ticket,deal_net))
+            return false;
+
+         net+=deal_net;
         }
 
-      return net;
+      return MathIsValidNumber(net);
      }
 
-   int ConsecutiveLosses() const
+   bool ConsecutiveLosses(int &losses) const
      {
+      losses=0;
       datetime now=TimeCurrent();
       datetime from=now-(datetime)365*86400;
 
       if(!HistorySelect(from,now))
-         return 0;
+         return false;
 
       int total=HistoryDealsTotal();
-      int losses=0;
+      if(total<0)
+         return false;
 
       for(int i=total-1;i>=0;i--)
         {
          ulong ticket=HistoryDealGetTicket(i);
-         long magic=
-            HistoryDealGetInteger(
-               ticket,
-               DEAL_MAGIC);
+         if(ticket==0)
+            return false;
+
+         long magic=0;
+         if(!HistoryDealGetInteger(ticket,DEAL_MAGIC,magic))
+            return false;
       
          if(!IsManagedMagic(magic))
-         continue;
-         if(ticket==0)
             continue;
 
-         long entry=HistoryDealGetInteger(ticket,DEAL_ENTRY);
+         long entry=0;
+         if(!HistoryDealGetInteger(ticket,DEAL_ENTRY,entry))
+            return false;
+
          if(entry!=DEAL_ENTRY_OUT &&
             entry!=DEAL_ENTRY_OUT_BY &&
             entry!=DEAL_ENTRY_INOUT)
             continue;
 
-         long type=HistoryDealGetInteger(ticket,DEAL_TYPE);
+         long type=0;
+         if(!HistoryDealGetInteger(ticket,DEAL_TYPE,type))
+            return false;
+
          if(type==DEAL_TYPE_BALANCE || type==DEAL_TYPE_CREDIT)
             continue;
 
-         double result=DealNetResult(ticket);
+         double result=0.0;
+         if(!DealNetResult(ticket,result))
+            return false;
 
          if(result<0.0)
             losses++;
@@ -129,7 +161,7 @@ private:
         }
 
 
-      return losses;
+      return true;
      }
 
 public:
@@ -155,8 +187,23 @@ public:
       m_state.equity=AccountInfoDouble(ACCOUNT_EQUITY);
       m_state.balance=AccountInfoDouble(ACCOUNT_BALANCE);
 
-      double day_net=NetDealsSince(day_start,now);
-      double month_net=NetDealsSince(month_start,now);
+      if(!MathIsValidNumber(m_state.equity) ||
+         !MathIsValidNumber(m_state.balance) ||
+         m_state.equity<=0.0 ||
+         m_state.balance<=0.0)
+         return false;
+
+      double day_net=0.0;
+      if(!NetDealsSince(day_start,now,day_net))
+         return false;
+
+      double month_net=0.0;
+      if(!NetDealsSince(month_start,now,month_net))
+         return false;
+
+      int consecutive_losses=0;
+      if(!ConsecutiveLosses(consecutive_losses))
+         return false;
 
       // Reference values are reconstructed from current balance and
       // realized trading results. Floating P/L is reflected through
@@ -167,37 +214,73 @@ public:
       m_state.monthly_start_equity=
          m_state.balance-month_net;
 
-      RefreshCurrentMetrics();
+      if(!MathIsValidNumber(m_state.daily_start_equity) ||
+         !MathIsValidNumber(m_state.monthly_start_equity) ||
+         m_state.daily_start_equity<=0.0 ||
+         m_state.monthly_start_equity<=0.0)
+         return false;
 
-      m_state.consecutive_losses=ConsecutiveLosses();
+      m_state.consecutive_losses=consecutive_losses;
+
+      if(!RefreshCurrentMetrics())
+         return false;
+
       m_last_reconstruct=now;
 
       return true;
      }
 
-   void RefreshCurrentMetrics()
+   bool RefreshCurrentMetrics()
      {
       m_state.equity=AccountInfoDouble(ACCOUNT_EQUITY);
       m_state.balance=AccountInfoDouble(ACCOUNT_BALANCE);
+
+      if(!MathIsValidNumber(m_state.equity) ||
+         !MathIsValidNumber(m_state.balance) ||
+         m_state.equity<=0.0 ||
+         m_state.balance<=0.0 ||
+         m_state.daily_start_equity<=0.0 ||
+         m_state.monthly_start_equity<=0.0)
+        {
+         m_state_valid=false;
+         m_state.trading_locked=true;
+         return false;
+        }
+
       m_state.total_positions=ManagedPositions();
 
-      if(m_state.daily_start_equity>0.0)
-         m_state.daily_loss_percent=
-            MathMax(0.0,
-                    (m_state.daily_start_equity-m_state.equity)/
-                    m_state.daily_start_equity*100.0);
+      m_state.daily_loss_percent=
+         MathMax(0.0,
+                 (m_state.daily_start_equity-m_state.equity)/
+                 m_state.daily_start_equity*100.0);
 
-      if(m_state.monthly_start_equity>0.0)
-         m_state.monthly_loss_percent=
-            MathMax(0.0,
-                    (m_state.monthly_start_equity-m_state.equity)/
-                    m_state.monthly_start_equity*100.0);
+      m_state.monthly_loss_percent=
+         MathMax(0.0,
+                 (m_state.monthly_start_equity-m_state.equity)/
+                 m_state.monthly_start_equity*100.0);
+
+      if(!MathIsValidNumber(m_state.daily_loss_percent) ||
+         !MathIsValidNumber(m_state.monthly_loss_percent))
+        {
+         m_state_valid=false;
+         m_state.trading_locked=true;
+         return false;
+        }
+
+      m_state_valid=true;
+      return true;
      }
 
    void ApplyLocks(const double daily_limit,
                    const double monthly_limit,
                    const int max_consecutive_losses)
      {
+      if(!m_state_valid)
+        {
+         m_state.trading_locked=true;
+         return;
+        }
+
       m_state.daily_lock=(daily_limit>0.0 &&
                           m_state.daily_loss_percent>=daily_limit);
 
@@ -215,6 +298,9 @@ public:
 
    virtual bool GetPortfolioState(PortfolioState &state) override
      {
+      if(!m_state_valid)
+         return false;
+
       state=m_state;
       return true;
      }

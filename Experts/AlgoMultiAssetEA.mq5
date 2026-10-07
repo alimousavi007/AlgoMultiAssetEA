@@ -286,12 +286,14 @@ public:
          return false;
         }
 
+      momentum.SetMinimumSignalScore(InpMinimumSignalScore);
       if(!momentum.Initialize())
         {
          last_failure="MomentumStrategy.Initialize failed";
          return false;
         }
 
+      mean_reversion.SetMinimumSignalScore(InpMinimumSignalScore);
       if(!mean_reversion.Initialize())
         {
          last_failure="MeanReversionStrategy.Initialize failed";
@@ -590,7 +592,12 @@ void UpdateDashboardForChart()
             features);
 
       PortfolioState portfolio;
-      g_state.GetPortfolioState(portfolio);
+      if(!g_state.GetPortfolioState(portfolio))
+        {
+         g_dashboard.ShowStatus(
+            "RISK STATE UNAVAILABLE | ENTRY BLOCKED");
+         return;
+        }
 
       g_dashboard.UpdateMarket(
          market,
@@ -714,7 +721,7 @@ bool PrepareRuntimeAnalysis(CSymbolRuntime &runtime,
    return true;
   }
 
-void BuildRuntimeStrategyContext(CSymbolRuntime &runtime,
+bool BuildRuntimeStrategyContext(CSymbolRuntime &runtime,
                                  const MarketSnapshot &signal_market,
                                  const FeatureSet &signal_features,
                                  const ENUM_REGIME_TYPE signal_regime,
@@ -724,13 +731,25 @@ void BuildRuntimeStrategyContext(CSymbolRuntime &runtime,
    context.market=signal_market;
    context.features=signal_features;
    context.regime=signal_regime;
-   context.trading_allowed=true;
+   context.trading_allowed=false;
    context.rejection_reason="";
 
-   g_state.GetPortfolioState(portfolio_state);
+   if(!g_state.GetPortfolioState(portfolio_state))
+     {
+      context.rejection_reason="Portfolio risk state unavailable";
+      g_logger.Event(
+         LOG_ERROR,"RISK","RISK_STATE_UNAVAILABLE",
+         runtime.symbol,EnumToString(runtime.signal_tf),"","","REJECT",
+         "RISK_STATE","Portfolio state is unavailable; entry blocked");
+      ShowRuntimeGateStatus(
+         runtime,
+         "BLOCKED: RISK STATE UNAVAILABLE");
+      return false;
+     }
 
    LogRiskLockTransition(portfolio_state);
 
+   context.trading_allowed=true;
    if(portfolio_state.trading_locked)
      {
       context.trading_allowed=false;
@@ -741,6 +760,8 @@ void BuildRuntimeStrategyContext(CSymbolRuntime &runtime,
          runtime.symbol,EnumToString(runtime.signal_tf),"","","REJECT",
          "RISK_LOCK","Trading locked by portfolio state");
      }
+
+   return true;
   }
 
 int EvaluateRuntimeStrategies(CSymbolRuntime &runtime,
@@ -1010,7 +1031,15 @@ void ProcessRuntimeCandidates(CSymbolRuntime &runtime,
      }
 
    g_logger.Trade(result);
-   g_state.UpdateAfterTrade(result);
+   if(!g_state.UpdateAfterTrade(result))
+      g_logger.Event(
+         LOG_ERROR,"STATE","STATE_RECONSTRUCT_FAILED",
+         selected_signal.symbol,
+         EnumToString(selected_signal.timeframe),
+         EnumToString(selected_signal.strategy),
+         selected_signal.signal_id,
+         "FAIL","HISTORY_OR_ACCOUNT_STATE",
+         "Post-trade state reconstruction failed; new entries blocked");
   }
 
 void ProcessRuntime(CSymbolRuntime &runtime)
@@ -1065,13 +1094,14 @@ void ProcessRuntime(CSymbolRuntime &runtime)
 
    StrategyContext context;
    PortfolioState portfolio_state;
-   BuildRuntimeStrategyContext(
+   if(!BuildRuntimeStrategyContext(
       runtime,
       signal_market,
       signal_features,
       signal_regime,
       context,
-      portfolio_state);
+      portfolio_state))
+      return;
 
    StrategySignal candidates[5];
    int candidate_count=
@@ -1213,7 +1243,9 @@ ENUM_SYSTEM_INIT_STATUS InitializeSystemWhenReady()
    if(!g_state.Initialize())
      {
       g_initialization_started=false;
-      InitFailure("StateManager.Initialize");
+      InitFailure(
+         "StateManager.Initialize",
+         "Risk state reconstruction failed; history or account metrics are unavailable");
       return SYSTEM_INIT_FAILED;
      }
 
@@ -1355,7 +1387,9 @@ ENUM_SYSTEM_INIT_STATUS InitializeSystemWhenReady()
    if(!g_state.Reconstruct())
      {
       g_initialization_started=false;
-      InitFailure("StateManager.Reconstruct");
+      InitFailure(
+         "StateManager.Reconstruct",
+         "Risk state reconstruction failed; trading remains disabled");
       return SYSTEM_INIT_FAILED;
      }
 
@@ -1452,17 +1486,22 @@ int OnInit()
 //==================================================================
 // OnTick
 //==================================================================
-void RefreshTradingState()
+bool RefreshTradingState()
   {
-   g_state.RefreshCurrentMetrics();
+   if(!g_state.RefreshCurrentMetrics())
+      return false;
+
    g_state.ApplyLocks(
       InpDailyLossLimit,
       InpMonthlyLossLimit,
       InpMaxConsecutiveLosses);
 
    PortfolioState current_state;
-   g_state.GetPortfolioState(current_state);
+   if(!g_state.GetPortfolioState(current_state))
+      return false;
+
    LogRiskLockTransition(current_state);
+   return true;
   }
 
 void OnTick()
@@ -1470,13 +1509,16 @@ void OnTick()
    if(!g_system_ready)
       return;
 
-   RefreshTradingState();
+   bool risk_state_ready=RefreshTradingState();
 
    g_logger.MaybeWriteSummary(false);
 
    // Position management runs tick-by-tick independently of signal
    // generation.
    g_position_manager.Update();
+
+   if(!risk_state_ready)
+      return;
 
    for(int i=0;i<3;i++)
       ProcessRuntime(g_runtime[i]);
@@ -1506,13 +1548,16 @@ void OnTimer()
         }
      }
 
-   RefreshTradingState();
+   bool risk_state_ready=RefreshTradingState();
 
    // Refresh the chart-bound dashboard independently from signal-bar logic.
    UpdateDashboardForChart();
 
    // Multi-symbol runtime must not depend on the chart symbol's ticks.
    g_position_manager.Update();
+
+   if(!risk_state_ready)
+      return;
 
    for(int i=0;i<3;i++)
       ProcessRuntime(g_runtime[i]);

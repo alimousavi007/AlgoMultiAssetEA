@@ -473,6 +473,12 @@ public:
       m_initialized=false;
      }
 
+   void SetMinimumSignalScore(const double score)
+     {
+      m_min_signal_score=score;
+      m_initialized=false;
+     }
+
    virtual bool Initialize() override
      {
       if(!ValidateParameters())
