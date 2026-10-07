@@ -13,6 +13,10 @@ private:
    string m_text_name;
    string m_last_signal_text;
    string m_last_risk_text;
+   string m_last_evaluation_symbol;
+   string m_last_status;
+   ENUM_TIMEFRAMES m_last_evaluation_tf;
+   datetime m_last_evaluation_time;
    bool   m_has_evaluation;
 
    string TimeframeText(const ENUM_TIMEFRAMES tf) const
@@ -38,16 +42,14 @@ private:
          return "OK V="+DoubleToString(risk.calculated_volume,4);
 
       if(risk.decision==RISK_REJECTED)
-         return "BLOCK";
+         return "rejected";
 
-      return "WAIT";
+      return "not evaluated";
      }
 
    void Render(const MarketSnapshot &market,
                const FeatureSet &features,
                const ENUM_REGIME_TYPE regime,
-               const string signal_text,
-               const string risk_text,
                const PortfolioState &portfolio)
      {
       string chart_tf=TimeframeText((ENUM_TIMEFRAMES)ChartPeriod(0));
@@ -55,39 +57,68 @@ private:
 
       string title_line=
          m_title+" | "+market.symbol+
-         " | "+chart_tf+"/"+analysis_tf;
+         " | "+chart_tf+" > "+analysis_tf;
 
       string line1=
-         "P "+DoubleToString(market.bid,market.properties.digits)+
-         "/"+DoubleToString(market.ask,market.properties.digits)+
-         " | Spr "+DoubleToString(market.spread_points,1);
+         "Bid "+DoubleToString(market.bid,market.properties.digits)+
+         "  Ask "+DoubleToString(market.ask,market.properties.digits)+
+         "  Spread "+DoubleToString(market.spread_points,1);
 
       string line2=
-         "R "+EnumToString(regime)+
-         " | ATR "+DoubleToString(features.atr,market.properties.digits)+
-         " | ADX "+DoubleToString(features.adx,1)+
-         " | RSI "+DoubleToString(features.rsi,1);
+         "Regime "+EnumToString(regime)+
+         "  ATR "+DoubleToString(features.atr,market.properties.digits)+
+         "  ADX "+DoubleToString(features.adx,1);
 
-      string line3=
-         "S "+signal_text+
-         " | Risk "+risk_text;
+      string evaluation_tf=
+         TimeframeText(m_last_evaluation_tf);
+      string evaluation_time=
+         TimeToString(m_last_evaluation_time,TIME_DATE|TIME_MINUTES);
+      string signal_line="Signal: not evaluated  Risk: not evaluated";
+      string evaluation_line="Evaluation: not yet available";
+      if(m_has_evaluation)
+        {
+         signal_line=
+            "Last signal: "+m_last_signal_text+
+            "  Risk: "+m_last_risk_text;
+         evaluation_line=
+            "Last evaluation: "+m_last_evaluation_symbol+
+            " "+evaluation_tf+" @ "+evaluation_time;
+        }
 
-      string line4=
-         "Eq "+DoubleToString(portfolio.equity,2)+
-         " | Pos "+IntegerToString(portfolio.total_positions)+
-         " | D "+DoubleToString(portfolio.daily_loss_percent,1)+"%"+
-         " | M "+DoubleToString(portfolio.monthly_loss_percent,1)+"%";
+      string portfolio_line=
+         "Equity "+DoubleToString(portfolio.equity,2)+
+         "  Positions "+IntegerToString(portfolio.total_positions);
 
-      string line5=
-         "Lock "+(portfolio.trading_locked ? "ON" : "OFF");
+      string risk_state_line=
+         "Loss D "+DoubleToString(portfolio.daily_loss_percent,1)+"%"+
+         "  M "+DoubleToString(portfolio.monthly_loss_percent,1)+"%"+
+         "  Trading lock "+(portfolio.trading_locked ? "ON" : "OFF");
 
-      SetText(
-         title_line+"\n"+
-         line1+"\n"+
-         line2+"\n"+
-         line3+"\n"+
-         line4+"\n"+
-         line5);
+      string text=title_line;
+      if(m_last_status!="")
+         text+="\nStatus: "+m_last_status;
+
+      text+="\n"+line1+
+            "\n"+line2+
+            "\n"+signal_line+
+            "\n"+evaluation_line+
+            "\n"+portfolio_line+
+            "\n"+risk_state_line;
+
+      SetText(text);
+     }
+
+   string EvaluationStatusText() const
+     {
+      if(!m_has_evaluation)
+         return "Last signal: not evaluated\nLast risk: not evaluated";
+
+      return "Last signal: "+m_last_signal_text+
+             "  Risk: "+m_last_risk_text+
+             "\nLast evaluation: "+m_last_evaluation_symbol+
+             " "+TimeframeText(m_last_evaluation_tf)+
+             " @ "+
+             TimeToString(m_last_evaluation_time,TIME_DATE|TIME_MINUTES);
      }
 
    bool EnsureObjects()
@@ -112,39 +143,39 @@ private:
         {
          if(!ObjectCreate(m_chart_id,m_bg_name,OBJ_RECTANGLE_LABEL,0,0,0))
             return false;
-
-         ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_CORNER,CORNER_RIGHT_LOWER);
-         ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_XDISTANCE,8);
-         ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_YDISTANCE,8);
-         ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_XSIZE,300);
-         ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_YSIZE,122);
-         ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_BGCOLOR,clrBlack);
-         ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_COLOR,clrDimGray);
-         ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_BORDER_TYPE,BORDER_FLAT);
-         ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_SELECTABLE,false);
-         ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_SELECTED,false);
-         ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_HIDDEN,true);
-         ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_BACK,false);
-         ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_ZORDER,0);
         }
+
+      ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_CORNER,CORNER_RIGHT_LOWER);
+      ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_XDISTANCE,8);
+      ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_YDISTANCE,8);
+      ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_XSIZE,380);
+      ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_YSIZE,142);
+      ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_BGCOLOR,clrBlack);
+      ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_COLOR,clrDimGray);
+      ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_BORDER_TYPE,BORDER_FLAT);
+      ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_SELECTABLE,false);
+      ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_SELECTED,false);
+      ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_HIDDEN,true);
+      ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_BACK,false);
+      ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_ZORDER,0);
 
       if(ObjectFind(m_chart_id,m_text_name)<0)
         {
          if(!ObjectCreate(m_chart_id,m_text_name,OBJ_LABEL,0,0,0))
             return false;
-
-         ObjectSetInteger(m_chart_id,m_text_name,OBJPROP_CORNER,CORNER_RIGHT_LOWER);
-         ObjectSetInteger(m_chart_id,m_text_name,OBJPROP_ANCHOR,ANCHOR_RIGHT_LOWER);
-         ObjectSetInteger(m_chart_id,m_text_name,OBJPROP_XDISTANCE,18);
-         ObjectSetInteger(m_chart_id,m_text_name,OBJPROP_YDISTANCE,17);
-         ObjectSetInteger(m_chart_id,m_text_name,OBJPROP_COLOR,clrWhite);
-         ObjectSetInteger(m_chart_id,m_text_name,OBJPROP_FONTSIZE,8);
-         ObjectSetString(m_chart_id,m_text_name,OBJPROP_FONT,"Consolas");
-         ObjectSetInteger(m_chart_id,m_text_name,OBJPROP_SELECTABLE,false);
-         ObjectSetInteger(m_chart_id,m_text_name,OBJPROP_SELECTED,false);
-         ObjectSetInteger(m_chart_id,m_text_name,OBJPROP_HIDDEN,true);
-         ObjectSetInteger(m_chart_id,m_text_name,OBJPROP_ZORDER,1);
         }
+
+      ObjectSetInteger(m_chart_id,m_text_name,OBJPROP_CORNER,CORNER_RIGHT_LOWER);
+      ObjectSetInteger(m_chart_id,m_text_name,OBJPROP_ANCHOR,ANCHOR_RIGHT_LOWER);
+      ObjectSetInteger(m_chart_id,m_text_name,OBJPROP_XDISTANCE,18);
+      ObjectSetInteger(m_chart_id,m_text_name,OBJPROP_YDISTANCE,17);
+      ObjectSetInteger(m_chart_id,m_text_name,OBJPROP_COLOR,clrWhite);
+      ObjectSetInteger(m_chart_id,m_text_name,OBJPROP_FONTSIZE,9);
+      ObjectSetString(m_chart_id,m_text_name,OBJPROP_FONT,"Consolas");
+      ObjectSetInteger(m_chart_id,m_text_name,OBJPROP_SELECTABLE,false);
+      ObjectSetInteger(m_chart_id,m_text_name,OBJPROP_SELECTED,false);
+      ObjectSetInteger(m_chart_id,m_text_name,OBJPROP_HIDDEN,true);
+      ObjectSetInteger(m_chart_id,m_text_name,OBJPROP_ZORDER,1);
 
       return true;
      }
@@ -166,8 +197,12 @@ public:
       m_chart_id=0;
       m_bg_name="";
       m_text_name="";
-      m_last_signal_text="NONE";
-      m_last_risk_text="WAIT";
+      m_last_signal_text="";
+      m_last_risk_text="";
+      m_last_evaluation_symbol="";
+      m_last_status="";
+      m_last_evaluation_tf=PERIOD_CURRENT;
+      m_last_evaluation_time=0;
       m_has_evaluation=false;
      }
 
@@ -200,10 +235,8 @@ public:
       if(!m_enabled)
          return;
 
-      SetText(
-         m_title+" | "+status+"\n"+
-         "S "+(m_has_evaluation ? m_last_signal_text : "NONE")+
-         " | Risk "+(m_has_evaluation ? m_last_risk_text : "WAIT"));
+      m_last_status=status;
+      SetText(m_title+" | "+status+"\n"+EvaluationStatusText());
      }
 
    void Update(const MarketSnapshot &market,
@@ -223,14 +256,16 @@ public:
 
       m_last_signal_text=SignalText(signal);
       m_last_risk_text=RiskText(risk);
+      m_last_evaluation_symbol=market.symbol;
+      m_last_evaluation_tf=market.timeframe;
+      m_last_evaluation_time=market.closed_bar_time;
+      m_last_status="";
       m_has_evaluation=true;
 
       Render(
          market,
          features,
          regime,
-         m_last_signal_text,
-         m_last_risk_text,
          portfolio);
      }
 
@@ -247,12 +282,11 @@ public:
       if(chart_symbol!="" && market.symbol!=chart_symbol)
          return;
 
+      m_last_status="";
       Render(
          market,
          features,
          regime,
-         m_has_evaluation ? m_last_signal_text : "NONE",
-         m_has_evaluation ? m_last_risk_text : "WAIT",
          portfolio);
      }
   };
