@@ -331,6 +331,7 @@ bool g_initialization_started=false;
 bool g_initialization_failed=false;
 string g_sync_wait_symbols="";
 bool g_last_trading_locked=false;
+string g_last_runtime_dashboard_status="";
 
 //==================================================================
 // Helpers
@@ -547,6 +548,7 @@ void UpdateDashboardForChart()
    if(!g_system_ready || !InpDashboard)
       return;
 
+   g_last_runtime_dashboard_status="";
    string chart_symbol=ChartSymbol(0);
 
    for(int i=0;i<3;i++)
@@ -603,25 +605,61 @@ void UpdateDashboardForChart()
       "CHART SYMBOL NOT CONFIGURED | "+chart_symbol);
   }
 
+void ShowRuntimeGateStatus(CSymbolRuntime &runtime,
+                           const string status)
+  {
+   if(!InpDashboard ||
+      runtime.symbol!=ChartSymbol(0))
+      return;
+
+   string signal_tf=EnumToString(runtime.signal_tf);
+   string entry_tf=EnumToString(runtime.entry_tf);
+   StringReplace(signal_tf,"PERIOD_","");
+   StringReplace(entry_tf,"PERIOD_","");
+
+   string dashboard_status=
+      status+
+      " | "+signal_tf+"/"+entry_tf;
+
+   if(dashboard_status==g_last_runtime_dashboard_status)
+      return;
+
+   g_last_runtime_dashboard_status=dashboard_status;
+   g_dashboard.ShowStatus(dashboard_status);
+  }
+
 void ProcessRuntime(CSymbolRuntime &runtime)
   {
    if(!runtime.valid || !g_system_ready)
       return;
 
    if(!g_session_filter.IsAllowed(TimeCurrent()))
+     {
+      ShowRuntimeGateStatus(runtime,"BLOCKED: SESSION FILTER");
       return;
+     }
 
    // Execution evaluation is synchronized to entry bars first,
    // then to a new signal bar. This prevents repeated evaluation.
    if(!runtime.market_entry.IsNewClosedBar(
          runtime.symbol,
          runtime.entry_tf))
+     {
+      ShowRuntimeGateStatus(
+         runtime,
+         "WAITING: ENTRY BAR");
       return;
+     }
 
    if(!runtime.market_signal.IsNewClosedBar(
          runtime.symbol,
          runtime.signal_tf))
+     {
+      ShowRuntimeGateStatus(
+         runtime,
+         "WAITING: SIGNAL BAR");
       return;
+     }
 
    MarketSnapshot signal_market;
    MarketSnapshot structure_market;
