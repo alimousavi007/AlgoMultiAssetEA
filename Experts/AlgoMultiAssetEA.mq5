@@ -628,42 +628,14 @@ void ShowRuntimeGateStatus(CSymbolRuntime &runtime,
    g_dashboard.ShowStatus(dashboard_status);
   }
 
-void ProcessRuntime(CSymbolRuntime &runtime)
+bool PrepareRuntimeAnalysis(CSymbolRuntime &runtime,
+                           MarketSnapshot &signal_market,
+                           MarketSnapshot &structure_market,
+                           FeatureSet &signal_features,
+                           FeatureSet &structure_features,
+                           ENUM_REGIME_TYPE &signal_regime,
+                           ENUM_REGIME_TYPE &structure_regime)
   {
-   if(!runtime.valid || !g_system_ready)
-      return;
-
-   if(!g_session_filter.IsAllowed(TimeCurrent()))
-     {
-      ShowRuntimeGateStatus(runtime,"BLOCKED: SESSION FILTER");
-      return;
-     }
-
-   // Execution evaluation is synchronized to entry bars first,
-   // then to a new signal bar. This prevents repeated evaluation.
-   if(!runtime.market_entry.IsNewClosedBar(
-         runtime.symbol,
-         runtime.entry_tf))
-     {
-      ShowRuntimeGateStatus(
-         runtime,
-         "WAITING: ENTRY BAR");
-      return;
-     }
-
-   if(!runtime.market_signal.IsNewClosedBar(
-         runtime.symbol,
-         runtime.signal_tf))
-     {
-      ShowRuntimeGateStatus(
-         runtime,
-         "WAITING: SIGNAL BAR");
-      return;
-     }
-
-   MarketSnapshot signal_market;
-   MarketSnapshot structure_market;
-
    ResetLastError();
    if(!runtime.market_signal.GetSnapshot(
          runtime.symbol,
@@ -675,7 +647,7 @@ void ProcessRuntime(CSymbolRuntime &runtime)
          runtime.symbol,EnumToString(runtime.signal_tf),"","","FAIL",
          "SIGNAL_SNAPSHOT","Market signal snapshot failed",GetLastError());
       ResetLastError();
-      return;
+      return false;
      }
 
    ResetLastError();
@@ -689,11 +661,8 @@ void ProcessRuntime(CSymbolRuntime &runtime)
          runtime.symbol,EnumToString(runtime.structure_tf),"","","FAIL",
          "STRUCTURE_SNAPSHOT","Market structure snapshot failed",GetLastError());
       ResetLastError();
-      return;
+      return false;
      }
-
-   FeatureSet signal_features;
-   FeatureSet structure_features;
 
    ResetLastError();
    if(!runtime.feature_signal.Calculate(
@@ -705,7 +674,7 @@ void ProcessRuntime(CSymbolRuntime &runtime)
          runtime.symbol,EnumToString(runtime.signal_tf),"","","FAIL",
          "SIGNAL_FEATURES","Signal feature calculation failed",GetLastError());
       ResetLastError();
-      return;
+      return false;
      }
 
    ResetLastError();
@@ -718,15 +687,15 @@ void ProcessRuntime(CSymbolRuntime &runtime)
          runtime.symbol,EnumToString(runtime.structure_tf),"","","FAIL",
          "STRUCTURE_FEATURES","Structure feature calculation failed",GetLastError());
       ResetLastError();
-      return;
+      return false;
      }
 
-   ENUM_REGIME_TYPE signal_regime=
+   signal_regime=
       runtime.regime_engine.Detect(
          signal_market,
          signal_features);
 
-   ENUM_REGIME_TYPE structure_regime=
+   structure_regime=
       runtime.regime_engine.Detect(
          structure_market,
          structure_features);
@@ -742,14 +711,22 @@ void ProcessRuntime(CSymbolRuntime &runtime)
       signal_features.atr,
       signal_features.rsi);
 
-   StrategyContext context;
+   return true;
+  }
+
+void BuildRuntimeStrategyContext(CSymbolRuntime &runtime,
+                                 const MarketSnapshot &signal_market,
+                                 const FeatureSet &signal_features,
+                                 const ENUM_REGIME_TYPE signal_regime,
+                                 StrategyContext &context,
+                                 PortfolioState &portfolio_state)
+  {
    context.market=signal_market;
    context.features=signal_features;
    context.regime=signal_regime;
    context.trading_allowed=true;
    context.rejection_reason="";
 
-   PortfolioState portfolio_state;
    g_state.GetPortfolioState(portfolio_state);
 
    LogRiskLockTransition(portfolio_state);
@@ -764,8 +741,14 @@ void ProcessRuntime(CSymbolRuntime &runtime)
          runtime.symbol,EnumToString(runtime.signal_tf),"","","REJECT",
          "RISK_LOCK","Trading locked by portfolio state");
      }
+  }
 
-   StrategySignal candidates[5];
+int EvaluateRuntimeStrategies(CSymbolRuntime &runtime,
+                              const StrategyContext &context,
+                              const ENUM_REGIME_TYPE signal_regime,
+                              const ENUM_REGIME_TYPE structure_regime,
+                              StrategySignal &candidates[])
+  {
    for(int i=0;i<5;i++)
      {
       candidates[i].valid=false;
@@ -864,6 +847,17 @@ void ProcessRuntime(CSymbolRuntime &runtime)
       candidate_count>0 ? "CANDIDATE_FOUND" : "NO_CANDIDATE",
       "candidate_count="+IntegerToString(candidate_count));
 
+   return candidate_count;
+  }
+
+void ProcessRuntimeCandidates(CSymbolRuntime &runtime,
+                              const StrategySignal &candidates[],
+                              const int candidate_count,
+                              const MarketSnapshot &signal_market,
+                              const FeatureSet &signal_features,
+                              const ENUM_REGIME_TYPE signal_regime,
+                              const PortfolioState &portfolio_state)
+  {
    StrategySignal selected_signal;
    selected_signal.valid=false;
 
@@ -1017,6 +1011,85 @@ void ProcessRuntime(CSymbolRuntime &runtime)
 
    g_logger.Trade(result);
    g_state.UpdateAfterTrade(result);
+  }
+
+void ProcessRuntime(CSymbolRuntime &runtime)
+  {
+   if(!runtime.valid || !g_system_ready)
+      return;
+
+   if(!g_session_filter.IsAllowed(TimeCurrent()))
+     {
+      ShowRuntimeGateStatus(runtime,"BLOCKED: SESSION FILTER");
+      return;
+     }
+
+   // Execution evaluation is synchronized to entry bars first,
+   // then to a new signal bar. This prevents repeated evaluation.
+   if(!runtime.market_entry.IsNewClosedBar(
+         runtime.symbol,
+         runtime.entry_tf))
+     {
+      ShowRuntimeGateStatus(
+         runtime,
+         "WAITING: ENTRY BAR");
+      return;
+     }
+
+   if(!runtime.market_signal.IsNewClosedBar(
+         runtime.symbol,
+         runtime.signal_tf))
+     {
+      ShowRuntimeGateStatus(
+         runtime,
+         "WAITING: SIGNAL BAR");
+      return;
+     }
+
+   MarketSnapshot signal_market;
+   MarketSnapshot structure_market;
+   FeatureSet signal_features;
+   FeatureSet structure_features;
+   ENUM_REGIME_TYPE signal_regime;
+   ENUM_REGIME_TYPE structure_regime;
+
+   if(!PrepareRuntimeAnalysis(
+         runtime,
+         signal_market,
+         structure_market,
+         signal_features,
+         structure_features,
+         signal_regime,
+         structure_regime))
+      return;
+
+   StrategyContext context;
+   PortfolioState portfolio_state;
+   BuildRuntimeStrategyContext(
+      runtime,
+      signal_market,
+      signal_features,
+      signal_regime,
+      context,
+      portfolio_state);
+
+   StrategySignal candidates[5];
+   int candidate_count=
+      EvaluateRuntimeStrategies(
+         runtime,
+         context,
+         signal_regime,
+         structure_regime,
+         candidates);
+
+   ProcessRuntimeCandidates(
+      runtime,
+      candidates,
+      candidate_count,
+      signal_market,
+      signal_features,
+      signal_regime,
+      portfolio_state);
   }
 
 //==================================================================
@@ -1379,11 +1452,8 @@ int OnInit()
 //==================================================================
 // OnTick
 //==================================================================
-void OnTick()
+void RefreshTradingState()
   {
-   if(!g_system_ready)
-      return;
-
    g_state.RefreshCurrentMetrics();
    g_state.ApplyLocks(
       InpDailyLossLimit,
@@ -1393,6 +1463,14 @@ void OnTick()
    PortfolioState current_state;
    g_state.GetPortfolioState(current_state);
    LogRiskLockTransition(current_state);
+  }
+
+void OnTick()
+  {
+   if(!g_system_ready)
+      return;
+
+   RefreshTradingState();
 
    g_logger.MaybeWriteSummary(false);
 
@@ -1428,15 +1506,7 @@ void OnTimer()
         }
      }
 
-   g_state.RefreshCurrentMetrics();
-   g_state.ApplyLocks(
-      InpDailyLossLimit,
-      InpMonthlyLossLimit,
-      InpMaxConsecutiveLosses);
-
-   PortfolioState current_state;
-   g_state.GetPortfolioState(current_state);
-   LogRiskLockTransition(current_state);
+   RefreshTradingState();
 
    // Refresh the chart-bound dashboard independently from signal-bar logic.
    UpdateDashboardForChart();
