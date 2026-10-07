@@ -327,6 +327,9 @@ CTesterFitness      g_tester_fitness;
 COptimizationController g_optimizer;
 
 bool g_system_ready=false;
+bool g_initialization_started=false;
+bool g_initialization_failed=false;
+string g_sync_wait_symbols="";
 bool g_last_trading_locked=false;
 
 //==================================================================
@@ -587,20 +590,10 @@ void UpdateDashboardForChart()
       PortfolioState portfolio;
       g_state.GetPortfolioState(portfolio);
 
-      StrategySignal no_signal;
-      no_signal.valid=false;
-      no_signal.direction=SIGNAL_NONE;
-
-      RiskDecision no_risk;
-      no_risk.decision=RISK_UNDEFINED;
-      no_risk.reason="Waiting for strategy evaluation";
-
-      g_dashboard.Update(
+      g_dashboard.UpdateMarket(
          market,
          features,
          regime,
-         no_signal,
-         no_risk,
          portfolio);
 
       return;
@@ -1034,17 +1027,246 @@ bool ValidateConfiguredSymbol(const string role,const string symbol)
       return false;
      }
 
-   ResetLastError();
-   if(!SymbolIsSynchronized(symbol))
+   g_logger.Event(
+      LOG_INFO,"INIT","INIT_SYMBOL_SELECTED",
+      symbol,"",role,"","OK","SYMBOL_SELECTED",
+      "Configured symbol is selected; synchronization is checked asynchronously");
+   return true;
+  }
+
+enum ENUM_SYSTEM_INIT_STATUS
+  {
+   SYSTEM_INIT_FAILED=-1,
+   SYSTEM_INIT_WAITING=0,
+   SYSTEM_INIT_READY=1
+  };
+
+ENUM_SYSTEM_INIT_STATUS InitializeSystemWhenReady()
+  {
+   if(g_system_ready)
+      return SYSTEM_INIT_READY;
+
+   if(g_initialization_started)
+      return SYSTEM_INIT_WAITING;
+
+   string symbols[3];
+   symbols[0]=InpGoldSymbol;
+   symbols[1]=InpSilverSymbol;
+   symbols[2]=InpBitcoinSymbol;
+
+   string waiting_symbols="";
+   for(int i=0;i<ArraySize(symbols);i++)
      {
-      InitFailure(role,"SymbolIsSynchronized=false symbol="+symbol);
-      return false;
+      if(symbols[i]=="" || SymbolIsSynchronized(symbols[i]))
+         continue;
+
+      if(waiting_symbols!="")
+         waiting_symbols+=", ";
+      waiting_symbols+=symbols[i];
      }
 
+   if(waiting_symbols!="")
+     {
+      if(waiting_symbols!=g_sync_wait_symbols)
+        {
+         g_sync_wait_symbols=waiting_symbols;
+         g_logger.Event(
+            LOG_INFO,"INIT","INIT_SYMBOLS_WAITING",
+            "","","","","WAIT","SYMBOL_SYNC",
+            "Waiting for symbol synchronization: "+waiting_symbols);
+        }
+
+      g_dashboard.ShowStatus(
+         "WAITING FOR SYMBOL SYNC | "+waiting_symbols);
+      return SYSTEM_INIT_WAITING;
+     }
+
+   g_sync_wait_symbols="";
+   g_initialization_started=true;
+
+   ENUM_TIMEFRAMES structure_tf;
+   ENUM_TIMEFRAMES signal_tf;
+   ENUM_TIMEFRAMES entry_tf;
+
+   SelectProfileTimeframes(
+      InpProfile,
+      structure_tf,
+      signal_tf,
+      entry_tf);
+
+   g_session_filter.Set(
+      InpSessionFilter,
+      InpSessionStartHour,
+      InpSessionEndHour);
+
+   if(!g_state.Initialize())
+     {
+      g_initialization_started=false;
+      InitFailure("StateManager.Initialize");
+      return SYSTEM_INIT_FAILED;
+     }
+
+   g_state.ApplyLocks(
+      InpDailyLossLimit,
+      InpMonthlyLossLimit,
+      InpMaxConsecutiveLosses);
+
+   g_risk_engine.SetParameters(
+      InpRiskPercent,
+      InpMinRR,
+      InpMarginSafetyFraction);
+
+   if(!g_risk_engine.Initialize())
+     {
+      g_initialization_started=false;
+      InitFailure("RiskEngine.Initialize");
+      return SYSTEM_INIT_FAILED;
+     }
+
+   g_portfolio_risk.SetParameters(
+      InpMaxPortfolioRisk,
+      InpMaxPositionsTotal,
+      InpMaxPositionsPerSymbol,
+      InpMaxPositionsPerStrategy,
+      InpMaxPreciousMetalsRisk,
+      InpGoldSymbol,
+      InpSilverSymbol);
+
+   if(!g_portfolio_risk.Initialize())
+     {
+      g_initialization_started=false;
+      InitFailure("PortfolioRisk.Initialize");
+      return SYSTEM_INIT_FAILED;
+     }
+
+   g_executor.SetDeviationPoints(
+      InpDeviationPoints);
+
+   if(!g_executor.Initialize())
+     {
+      g_initialization_started=false;
+      InitFailure("TradeExecutor.Initialize");
+      return SYSTEM_INIT_FAILED;
+     }
+
+   g_position_manager.SetExecutor(
+      &g_executor);
+
+   g_position_manager.SetBreakEven(
+      InpBreakEven,
+      InpBreakEvenTriggerR,
+      InpBreakEvenOffsetPoints);
+
+   g_position_manager.SetTrailing(
+      InpTrailing,
+      InpTrailingTF,
+      InpTrailingATRPeriod,
+      InpTrailingATRMultiplier);
+
+   g_position_manager.SetTimeExit(
+      InpTimeExit,
+      InpMaxHoldingMinutes);
+
+   if(!g_position_manager.Initialize())
+     {
+      g_initialization_started=false;
+      InitFailure("PositionManager.Initialize");
+      return SYSTEM_INIT_FAILED;
+     }
+
+   g_signal_engine.SetParameters(
+      InpConflictThreshold,
+      0.0);
+
+   if(!g_signal_engine.Initialize())
+     {
+      g_initialization_started=false;
+      InitFailure("SignalEngine.Initialize");
+      return SYSTEM_INIT_FAILED;
+     }
+
+   int runtime_count=0;
+
+   if(InpGoldSymbol!="")
+     {
+      if(!g_runtime[runtime_count].Initialize(
+            InpGoldSymbol,
+            structure_tf,
+            signal_tf,
+            entry_tf))
+        {
+         g_initialization_started=false;
+         InitFailure("Runtime.GOLD",InpGoldSymbol);
+         return SYSTEM_INIT_FAILED;
+        }
+      runtime_count++;
+     }
+
+   if(InpSilverSymbol!="" &&
+      runtime_count<3)
+     {
+      if(!g_runtime[runtime_count].Initialize(
+            InpSilverSymbol,
+            structure_tf,
+            signal_tf,
+            entry_tf))
+        {
+         g_initialization_started=false;
+         InitFailure("Runtime.SILVER",InpSilverSymbol);
+         return SYSTEM_INIT_FAILED;
+        }
+      runtime_count++;
+     }
+
+   if(InpBitcoinSymbol!="" &&
+      runtime_count<3)
+     {
+      if(!g_runtime[runtime_count].Initialize(
+            InpBitcoinSymbol,
+            structure_tf,
+            signal_tf,
+            entry_tf))
+        {
+         g_initialization_started=false;
+         InitFailure("Runtime.BITCOIN",InpBitcoinSymbol);
+         return SYSTEM_INIT_FAILED;
+        }
+      runtime_count++;
+     }
+
+   if(runtime_count<=0)
+     {
+      g_initialization_started=false;
+      InitFailure("RuntimeCount","No configured runtime initialized");
+      return SYSTEM_INIT_FAILED;
+     }
+
+   if(!g_state.Reconstruct())
+     {
+      g_initialization_started=false;
+      InitFailure("StateManager.Reconstruct");
+      return SYSTEM_INIT_FAILED;
+     }
+
+   g_state.ApplyLocks(
+      InpDailyLossLimit,
+      InpMonthlyLossLimit,
+      InpMaxConsecutiveLosses);
+
+   g_initialization_started=false;
+   g_initialization_failed=false;
+   g_system_ready=true;
+
    g_logger.Event(
-      LOG_INFO,"INIT","INIT_SYMBOL_OK",
-      symbol,"",role,"","OK","SYMBOL_READY","Configured symbol is ready");
-   return true;
+      LOG_INFO,"SYSTEM","SYSTEM_READY",
+      _Symbol,EnumToString((ENUM_TIMEFRAMES)_Period),"","",
+      "READY","INIT_COMPLETE",
+      "AlgoMultiAssetEA initialized version="+ALGO_SYSTEM_VERSION+
+      " mode="+IntegerToString((int)InpMode)+
+      " runtimes="+IntegerToString(runtime_count));
+
+   UpdateDashboardForChart();
+   return SYSTEM_INIT_READY;
   }
 
 //==================================================================
@@ -1090,16 +1312,6 @@ int OnInit()
       return INIT_PARAMETERS_INCORRECT;
      }
 
-   ENUM_TIMEFRAMES structure_tf;
-   ENUM_TIMEFRAMES signal_tf;
-   ENUM_TIMEFRAMES entry_tf;
-
-   SelectProfileTimeframes(
-      InpProfile,
-      structure_tf,
-      signal_tf,
-      entry_tf);
-
    if(!ValidateConfiguredSymbol("GOLD",InpGoldSymbol))
       return INIT_FAILED;
 
@@ -1109,155 +1321,7 @@ int OnInit()
    if(!ValidateConfiguredSymbol("BITCOIN",InpBitcoinSymbol))
       return INIT_FAILED;
 
-   g_session_filter.Set(
-      InpSessionFilter,
-      InpSessionStartHour,
-      InpSessionEndHour);
-
-   if(!g_state.Initialize())
-     {
-      InitFailure("StateManager.Initialize");
-      return INIT_FAILED;
-     }
-
-   g_state.ApplyLocks(
-      InpDailyLossLimit,
-      InpMonthlyLossLimit,
-      InpMaxConsecutiveLosses);
-
-   g_risk_engine.SetParameters(
-      InpRiskPercent,
-      InpMinRR,
-      InpMarginSafetyFraction);
-
-   if(!g_risk_engine.Initialize())
-     {
-      InitFailure("RiskEngine.Initialize");
-      return INIT_FAILED;
-     }
-
-   g_portfolio_risk.SetParameters(
-      InpMaxPortfolioRisk,
-      InpMaxPositionsTotal,
-      InpMaxPositionsPerSymbol,
-      InpMaxPositionsPerStrategy,
-      InpMaxPreciousMetalsRisk,
-      InpGoldSymbol,
-      InpSilverSymbol);
-
-   if(!g_portfolio_risk.Initialize())
-     {
-      InitFailure("PortfolioRisk.Initialize");
-      return INIT_FAILED;
-     }
-
-   g_executor.SetDeviationPoints(
-      InpDeviationPoints);
-
-   if(!g_executor.Initialize())
-     {
-      InitFailure("TradeExecutor.Initialize");
-      return INIT_FAILED;
-     }
-
-   g_position_manager.SetExecutor(
-      &g_executor);
-
-   g_position_manager.SetBreakEven(
-      InpBreakEven,
-      InpBreakEvenTriggerR,
-      InpBreakEvenOffsetPoints);
-
-   g_position_manager.SetTrailing(
-      InpTrailing,
-      InpTrailingTF,
-      InpTrailingATRPeriod,
-      InpTrailingATRMultiplier);
-
-   g_position_manager.SetTimeExit(
-      InpTimeExit,
-      InpMaxHoldingMinutes);
-
-   if(!g_position_manager.Initialize())
-     {
-      InitFailure("PositionManager.Initialize");
-      return INIT_FAILED;
-     }
-
-   g_signal_engine.SetParameters(
-      InpConflictThreshold,
-      0.0);
-
-   if(!g_signal_engine.Initialize())
-     {
-      InitFailure("SignalEngine.Initialize");
-      return INIT_FAILED;
-     }
-
    g_dashboard.Enable(InpDashboard);
-
-   int runtime_count=0;
-
-   if(InpGoldSymbol!="")
-     {
-      if(!g_runtime[runtime_count].Initialize(
-            InpGoldSymbol,
-            structure_tf,
-            signal_tf,
-            entry_tf))
-        {
-         InitFailure("Runtime.GOLD",InpGoldSymbol);
-         return INIT_FAILED;
-        }
-      runtime_count++;
-     }
-
-   if(InpSilverSymbol!="" &&
-      runtime_count<3)
-     {
-      if(!g_runtime[runtime_count].Initialize(
-            InpSilverSymbol,
-            structure_tf,
-            signal_tf,
-            entry_tf))
-        {
-         InitFailure("Runtime.SILVER",InpSilverSymbol);
-         return INIT_FAILED;
-        }
-      runtime_count++;
-     }
-
-   if(InpBitcoinSymbol!="" &&
-      runtime_count<3)
-     {
-      if(!g_runtime[runtime_count].Initialize(
-            InpBitcoinSymbol,
-            structure_tf,
-            signal_tf,
-            entry_tf))
-        {
-         InitFailure("Runtime.BITCOIN",InpBitcoinSymbol);
-         return INIT_FAILED;
-        }
-      runtime_count++;
-     }
-
-   if(runtime_count<=0)
-     {
-      InitFailure("RuntimeCount","No configured runtime initialized");
-      return INIT_FAILED;
-     }
-
-   if(!g_state.Reconstruct())
-     {
-      InitFailure("StateManager.Reconstruct");
-      return INIT_FAILED;
-     }
-
-   g_state.ApplyLocks(
-      InpDailyLossLimit,
-      InpMonthlyLossLimit,
-      InpMaxConsecutiveLosses);
 
    ResetLastError();
    if(!EventSetTimer(5))
@@ -1266,19 +1330,10 @@ int OnInit()
       return INIT_FAILED;
      }
 
-   g_system_ready=true;
-
-   g_logger.Event(
-      LOG_INFO,"SYSTEM","SYSTEM_READY",
-      _Symbol,EnumToString((ENUM_TIMEFRAMES)_Period),"","",
-      "READY","INIT_COMPLETE",
-      "AlgoMultiAssetEA initialized version="+ALGO_SYSTEM_VERSION+
-      " mode="+IntegerToString((int)InpMode)+
-      " runtimes="+IntegerToString(runtime_count));
-
-   // Dashboard must render immediately after initialization instead of
-   // waiting for the next signal bar.
-   UpdateDashboardForChart();
+   ENUM_SYSTEM_INIT_STATUS init_status=
+      InitializeSystemWhenReady();
+   if(init_status==SYSTEM_INIT_FAILED)
+      return INIT_FAILED;
 
    return INIT_SUCCEEDED;
   }
@@ -1317,7 +1372,23 @@ void OnTick()
 void OnTimer()
   {
    if(!g_system_ready)
-      return;
+     {
+      if(g_initialization_failed)
+         return;
+
+      ENUM_SYSTEM_INIT_STATUS init_status=
+         InitializeSystemWhenReady();
+      if(init_status==SYSTEM_INIT_WAITING)
+         return;
+
+      if(init_status==SYSTEM_INIT_FAILED)
+        {
+         g_initialization_failed=true;
+         g_initialization_started=false;
+         g_dashboard.ShowStatus("SYSTEM INITIALIZATION FAILED");
+         return;
+        }
+     }
 
    g_state.RefreshCurrentMetrics();
    g_state.ApplyLocks(
