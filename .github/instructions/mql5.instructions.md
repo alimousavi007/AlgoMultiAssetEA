@@ -2,93 +2,111 @@
 applyTo: "**/*.mq5,**/*.mqh"
 ---
 
-# MQL5 File Instructions
+# AlgoMultiAssetEA — MQL5 Instructions
 
-These rules apply when working with MQL5 source files.
+These rules apply to MQL5 source files in this repository.
 
-## Before Editing
+## Before editing
 
-Inspect:
+Inspect only what is relevant to the change:
 
-- the current file
+- current file
 - related includes
-- callers
-- dependent types
+- callers/dependencies when needed
 - configuration
-- runtime flow
+- relevant runtime flow
 
-Do not rewrite existing logic without understanding its current behavior.
+Do not rewrite existing logic without understanding current behavior.
 
-## Compiler Safety
+## Compiler safety
 
-Before changing a function call:
+Before changing a function call, inspect the actual:
 
-- inspect the actual function signature
-- inspect argument count
-- inspect argument types
-- inspect return type
-- inspect overloads if any
+- signature
+- argument count
+- argument types
+- return type
+- overloads
 
-Do not guess signatures.
+Never guess an MQL5 API.
 
-## Market Data
+## Market data
 
 Always guard:
 
 - insufficient bars
 - unsynchronized series
 - stale data
-- invalid handles
+- invalid indicator handles
 - CopyBuffer failures
 - CopyRates failures
 - invalid shifts
 - invalid prices
 
-## Multi-Symbol
+Use closed-bar data for signal generation by default.
 
-Do not assume chart OnTick automatically services all managed symbols.
+## Multi-symbol
 
+The EA is multi-symbol.
+
+Do not assume chart OnTick automatically services every managed symbol.
 Consider:
 
 - OnTimer
-- symbol-specific processing
+- per-symbol scheduling
 - synchronization
 - freshness
 - runtime state
+- closed-bar timing
 
-## Trading
+## Trading and execution
 
-Normalize:
-
-- prices
-- volume
-
-against the actual symbol specification.
+Normalize prices and volumes against the actual symbol specification.
 
 Respect:
 
-- minimum volume
-- maximum volume
-- volume step
+- minimum/maximum/step volume
 - digits
 - tick size
 - stops level
 - freeze level
+- trade mode
+- netting/hedging
 
-Inspect actual trade retcodes.
-
-Do not interpret a successful function call as proof that a trade was successfully executed.
+Inspect actual trade retcodes. A successful function return is not, by itself, proof that a trade was executed successfully.
 
 ## Risk
 
-If a required risk value cannot be calculated safely:
+A signal never authorizes execution.
 
-NO-TRADE.
+Never bypass:
 
-Never bypass risk logic to make a signal executable.
+- RiskEngine
+- PortfolioRisk
+- TradeExecutor
+- loss limits
+- position limits
+- execution checks
+- stop/target validation
+
+If required risk cannot be calculated safely:
+
+NO-TRADE
+
+Never introduce martingale, uncontrolled averaging-down, implicit leverage escalation or loss-recovery sizing.
+
+## Research / optimization
+
+Detailed strategy-design, backtest, optimization, OOS and robustness rules live in:
+
+`.github/skills/algo-multiasset-ea/SKILL.md`
+
+For MQL5 source changes, follow that Skill when the task is related to strategy or risk research.
+
+Do not add an indicator or parameter merely because one historical pass improves.
 
 ## Testing
 
-Do not claim successful compilation or runtime verification without evidence.
+Do not claim compile, runtime, backtest, optimization or OOS success without actual evidence.
 
-Static reasoning must be clearly separated from actual execution evidence.
+Keep execution evidence separate from static reasoning.
