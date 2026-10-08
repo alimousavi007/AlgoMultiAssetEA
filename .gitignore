@@ -12,11 +12,9 @@
 !.gitignore
 !AGENTS.md
 
-!.github/
-!.github/**
-
-!.vscode/
-!.vscode/**
+# Never track local/editor/AI configuration
+.github/
+.vscode/
 
 # =========================================================
 # CASE A: Repository root = MT5 Data Folder
