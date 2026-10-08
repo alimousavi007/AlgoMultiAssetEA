@@ -19,6 +19,14 @@ private:
    ulong m_deviation_points;
 
    bool m_initialized;
+   string m_last_validation_reason;
+
+   bool RejectOpenValidation(string &reason,
+                             const string detail) const
+     {
+      reason=detail;
+      return false;
+     }
 
    //+----------------------------------------------------------------+
    //| Check account trade permission                                 |
@@ -145,15 +153,17 @@ private:
       const ENUM_ORDER_TYPE order_type,
       const double sl,
       const double tp,
-      const MqlTick &tick) const
+      const MqlTick &tick,
+      string &reason) const
      {
+      reason="";
       if(sl<=0.0 ||
          tp<=0.0)
-         return false;
+         return RejectOpenValidation(reason,"Stop or target is not positive");
          
       if(!IsTickAligned(symbol,sl) ||
          !IsTickAligned(symbol,tp))
-         return false;
+         return RejectOpenValidation(reason,"Stop or target is not aligned to symbol tick size");
 
       double point=
          SymbolInfoDouble(
@@ -161,7 +171,7 @@ private:
             SYMBOL_POINT);
 
       if(point<=0.0)
-         return false;
+         return RejectOpenValidation(reason,"Symbol point size is invalid");
 
       long stops_level=0;
       long freeze_level=0;
@@ -170,13 +180,13 @@ private:
             symbol,
             SYMBOL_TRADE_STOPS_LEVEL,
             stops_level))
-         return false;
+         return RejectOpenValidation(reason,"Unable to read symbol stops level");
 
       if(!SymbolInfoInteger(
             symbol,
             SYMBOL_TRADE_FREEZE_LEVEL,
             freeze_level))
-         return false;
+         return RejectOpenValidation(reason,"Unable to read symbol freeze level");
 
       double minimum_distance=
          (double)MathMax(
@@ -186,39 +196,39 @@ private:
       if(order_type==ORDER_TYPE_BUY)
         {
          if(sl>=tick.bid)
-            return false;
+            return RejectOpenValidation(reason,"Long stop is not below current bid");
 
          if(tp<=tick.bid)
-            return false;
+            return RejectOpenValidation(reason,"Long target is not above current bid");
 
          if(minimum_distance>0.0)
            {
             if(tick.bid-sl<
                minimum_distance)
-               return false;
+               return RejectOpenValidation(reason,"Long stop violates symbol stop/freeze distance");
 
             if(tp-tick.bid<
                minimum_distance)
-               return false;
+               return RejectOpenValidation(reason,"Long target violates symbol stop/freeze distance");
            }
         }
       else
         {
          if(sl<=tick.ask)
-            return false;
+            return RejectOpenValidation(reason,"Short stop is not above current ask");
 
          if(tp>=tick.ask)
-            return false;
+            return RejectOpenValidation(reason,"Short target is not below current ask");
 
          if(minimum_distance>0.0)
            {
             if(sl-tick.ask<
                minimum_distance)
-               return false;
+               return RejectOpenValidation(reason,"Short stop violates symbol stop/freeze distance");
 
             if(tick.ask-tp<
                minimum_distance)
-               return false;
+               return RejectOpenValidation(reason,"Short target violates symbol stop/freeze distance");
            }
         }
 
@@ -229,16 +239,18 @@ private:
    //| Validate request                                               |
    //+----------------------------------------------------------------+
    bool ValidateOpen(
-      const ExecutionRequest &request) const
+      const ExecutionRequest &request,
+      string &reason) const
      {
+      reason="";
       if(!IsAccountTradingAllowed())
-         return false;
+         return RejectOpenValidation(reason,"Account or expert trading permission is disabled");
 
       if(!IsSymbolReady(request.symbol))
-         return false;
+         return RejectOpenValidation(reason,"Symbol is missing, unselected or unsynchronized");
 
       if(request.volume<=0.0)
-         return false;
+         return RejectOpenValidation(reason,"Requested volume is not positive");
 
       ENUM_ORDER_TYPE order_type;
 
@@ -247,34 +259,35 @@ private:
       else if(request.intent==ORDER_INTENT_OPEN_SHORT)
          order_type=ORDER_TYPE_SELL;
       else
-         return false;
+         return RejectOpenValidation(reason,"Unsupported order intent");
 
       if(!IsOpenDirectionAllowed(
             request.symbol,
             order_type))
-         return false;
+         return RejectOpenValidation(reason,"Requested direction is disabled for this symbol");
 
       MqlTick tick;
 
       if(!SymbolInfoTick(
             request.symbol,
             tick))
-         return false;
+         return RejectOpenValidation(reason,"Unable to read current symbol tick");
 
       if(tick.bid<=0.0 ||
          tick.ask<=0.0)
-         return false;
+         return RejectOpenValidation(reason,"Current bid or ask is invalid");
 
       if(request.stop_loss<=0.0 ||
          request.take_profit<=0.0)
-         return false;
+         return RejectOpenValidation(reason,"Requested stop or target is not positive");
 
       if(!ValidateOpenLevels(
             request.symbol,
             order_type,
             request.stop_loss,
             request.take_profit,
-            tick))
+            tick,
+            reason))
          return false;
 
       //--- Broker volume constraints
@@ -296,11 +309,11 @@ private:
       if(volume_min<=0.0 ||
          volume_max<=0.0 ||
          volume_step<=0.0)
-         return false;
+         return RejectOpenValidation(reason,"Symbol volume constraints are invalid");
 
       if(request.volume<volume_min ||
          request.volume>volume_max)
-         return false;
+         return RejectOpenValidation(reason,"Requested volume is outside symbol limits");
 
       double steps=
          request.volume/volume_step;
@@ -309,7 +322,7 @@ private:
          MathRound(steps);
 
       if(MathAbs(steps-nearest)>0.000001)
-         return false;
+         return RejectOpenValidation(reason,"Requested volume is not aligned to volume step");
 
       //--- Margin check
       double execution_price;
@@ -327,17 +340,17 @@ private:
             request.volume,
             execution_price,
             margin))
-         return false;
+         return RejectOpenValidation(reason,"OrderCalcMargin failed");
 
       double free_margin=
          AccountInfoDouble(
             ACCOUNT_MARGIN_FREE);
 
       if(free_margin<=0.0)
-         return false;
+         return RejectOpenValidation(reason,"Free margin is not positive");
 
       if(margin>free_margin)
-         return false;
+         return RejectOpenValidation(reason,"Required margin exceeds free margin");
 
       return true;
      }
@@ -548,6 +561,7 @@ public:
      {
       m_deviation_points=20;
       m_initialized=false;
+      m_last_validation_reason="";
      }
 
    //+----------------------------------------------------------------+
@@ -581,12 +595,18 @@ public:
    virtual bool Validate(
       const ExecutionRequest &request) override
      {
+      m_last_validation_reason="";
       if(!m_initialized)
+        {
+         m_last_validation_reason="Trade executor is not initialized";
          return false;
+        }
 
       if(request.intent==ORDER_INTENT_OPEN_LONG ||
          request.intent==ORDER_INTENT_OPEN_SHORT)
-         return ValidateOpen(request);
+         return ValidateOpen(
+            request,
+            m_last_validation_reason);
 
       if(request.intent==ORDER_INTENT_CLOSE)
          return ValidateClose(request);
@@ -620,8 +640,9 @@ public:
 
       if(!Validate(request))
         {
-         result.message=
-            "Execution validation failed";
+         result.message="Execution validation failed";
+         if(m_last_validation_reason!="")
+            result.message+=": "+m_last_validation_reason;
 
          return false;
         }

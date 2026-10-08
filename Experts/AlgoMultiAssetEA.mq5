@@ -65,6 +65,7 @@ input bool   InpEnableMeanReversion=false;
 input bool   InpEnableRelativeValue=false;
 
 input group "PROFILE STRATEGY POLICY"
+input bool   InpUseProfileSignalScoreOverrides=false;
 input bool   InpScalpTrendEnabled=true;
 input bool   InpScalpBreakoutEnabled=true;
 input bool   InpScalpMomentumEnabled=true;
@@ -77,18 +78,18 @@ input bool   InpSwingTrendEnabled=true;
 input bool   InpSwingBreakoutEnabled=true;
 input bool   InpSwingMomentumEnabled=true;
 input bool   InpSwingMeanReversionEnabled=true;
-input double InpScalpTrendMinimumScore=-1.0;
-input double InpScalpBreakoutMinimumScore=-1.0;
-input double InpScalpMomentumMinimumScore=-1.0;
-input double InpScalpMeanReversionMinimumScore=-1.0;
-input double InpDayTrendMinimumScore=-1.0;
-input double InpDayBreakoutMinimumScore=-1.0;
-input double InpDayMomentumMinimumScore=-1.0;
-input double InpDayMeanReversionMinimumScore=-1.0;
-input double InpSwingTrendMinimumScore=-1.0;
-input double InpSwingBreakoutMinimumScore=-1.0;
-input double InpSwingMomentumMinimumScore=-1.0;
-input double InpSwingMeanReversionMinimumScore=-1.0;
+input double InpScalpTrendMinimumScore=70.0;
+input double InpScalpBreakoutMinimumScore=70.0;
+input double InpScalpMomentumMinimumScore=70.0;
+input double InpScalpMeanReversionMinimumScore=70.0;
+input double InpDayTrendMinimumScore=70.0;
+input double InpDayBreakoutMinimumScore=70.0;
+input double InpDayMomentumMinimumScore=70.0;
+input double InpDayMeanReversionMinimumScore=70.0;
+input double InpSwingTrendMinimumScore=70.0;
+input double InpSwingBreakoutMinimumScore=70.0;
+input double InpSwingMomentumMinimumScore=70.0;
+input double InpSwingMeanReversionMinimumScore=70.0;
 
 input group "FEATURES"
 input int InpEMA_Fast=20;
@@ -200,6 +201,9 @@ double ProfileSignalScoreOverride(const ENUM_TRADING_PROFILE profile,
 double MinimumSignalScoreFor(const ENUM_TRADING_PROFILE profile,
                              const ENUM_STRATEGY_ID strategy)
   {
+   if(!InpUseProfileSignalScoreOverrides)
+      return InpMinimumSignalScore;
+
    double score_override=
       ProfileSignalScoreOverride(profile,strategy);
    return (score_override<0.0 ?
@@ -572,6 +576,66 @@ bool StructureCompatible(const ENUM_STRATEGY_ID strategy,
              structure_regime==REGIME_LOW_VOLATILITY;
 
    return false;
+  }
+
+bool NormalizeSignalStopsToTick(StrategySignal &signal,
+                               string &reason)
+  {
+   reason="";
+
+   if(!signal.valid ||
+      (signal.direction!=SIGNAL_LONG &&
+       signal.direction!=SIGNAL_SHORT))
+     {
+      reason="Invalid signal direction";
+      return false;
+     }
+
+   double tick_size=
+      SymbolInfoDouble(
+         signal.symbol,
+         SYMBOL_TRADE_TICK_SIZE);
+   long digits=0;
+
+   if(tick_size<=0.0 ||
+      !SymbolInfoInteger(signal.symbol,SYMBOL_DIGITS,digits))
+     {
+      reason="Symbol tick size or digits unavailable";
+      return false;
+     }
+
+   bool stop_round_up=
+      (signal.direction==SIGNAL_SHORT);
+   bool target_round_up=
+      (signal.direction==SIGNAL_LONG);
+
+   double stop=
+      CAlgoUtils::NormalizePriceToTick(
+         signal.stop,
+         tick_size,
+         stop_round_up,
+         (int)digits);
+   double target=
+      CAlgoUtils::NormalizePriceToTick(
+         signal.target,
+         tick_size,
+         target_round_up,
+         (int)digits);
+
+   if(stop<=0.0 ||
+      target<=0.0 ||
+      (signal.direction==SIGNAL_LONG &&
+       (stop>=signal.entry || target<=signal.entry)) ||
+      (signal.direction==SIGNAL_SHORT &&
+       (stop<=signal.entry || target>=signal.entry)))
+     {
+      reason="Tick normalization invalidated stop/target levels";
+      return false;
+     }
+
+   signal.stop=stop;
+   signal.target=target;
+   return true;
   }
 
 bool BuildExecutionRequest(const StrategySignal &signal,
@@ -1041,10 +1105,50 @@ void ProcessRuntimeCandidates(CSymbolRuntime &runtime,
       return;
      }
 
+   StrategySignal normalized_candidates[5];
+   int normalized_count=0;
+   for(int i=0;i<candidate_count;i++)
+     {
+      StrategySignal candidate=candidates[i];
+      string normalization_failure="";
+
+      if(!NormalizeSignalStopsToTick(
+            candidate,
+            normalization_failure))
+        {
+         g_logger.Event(
+            LOG_WARNING,"SIGNAL","SIGNAL_LEVELS_REJECTED",
+            candidate.symbol,
+            EnumToString(candidate.timeframe),
+            EnumToString(candidate.strategy),
+            candidate.signal_id,
+            "REJECT","INVALID_TICK_LEVELS",
+            normalization_failure);
+         continue;
+        }
+
+      normalized_candidates[normalized_count]=candidate;
+      normalized_count++;
+     }
+
+   if(normalized_count<=0)
+     {
+      RiskDecision empty_risk;
+      empty_risk.decision=RISK_UNDEFINED;
+      g_dashboard.Update(
+         signal_market,
+         signal_features,
+         signal_regime,
+         selected_signal,
+         empty_risk,
+         portfolio_state);
+      return;
+     }
+
    ResetLastError();
    if(!g_signal_engine.Evaluate(
-         candidates,
-         candidate_count,
+         normalized_candidates,
+         normalized_count,
          selected_signal))
      {
       g_logger.Event(
