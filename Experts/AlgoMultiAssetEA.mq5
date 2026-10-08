@@ -1329,36 +1329,6 @@ ENUM_SYSTEM_INIT_STATUS InitializeSystemWhenReady()
    symbols[1]=InpSilverSymbol;
    symbols[2]=InpBitcoinSymbol;
 
-   string waiting_symbols="";
-   for(int i=0;i<ArraySize(symbols);i++)
-     {
-      if(symbols[i]=="" || SymbolIsSynchronized(symbols[i]))
-         continue;
-
-      if(waiting_symbols!="")
-         waiting_symbols+=", ";
-      waiting_symbols+=symbols[i];
-     }
-
-   if(waiting_symbols!="")
-     {
-      if(waiting_symbols!=g_sync_wait_symbols)
-        {
-         g_sync_wait_symbols=waiting_symbols;
-         g_logger.Event(
-            LOG_INFO,"INIT","INIT_SYMBOLS_WAITING",
-            "","","","","WAIT","SYMBOL_SYNC",
-            "Waiting for symbol synchronization: "+waiting_symbols);
-        }
-
-      g_dashboard.ShowStatus(
-         "WAITING FOR SYMBOL SYNC | "+waiting_symbols);
-      return SYSTEM_INIT_WAITING;
-     }
-
-   g_sync_wait_symbols="";
-   g_initialization_started=true;
-
    ENUM_TIMEFRAMES structure_tf;
    ENUM_TIMEFRAMES signal_tf;
    ENUM_TIMEFRAMES entry_tf;
@@ -1368,6 +1338,82 @@ ENUM_SYSTEM_INIT_STATUS InitializeSystemWhenReady()
       structure_tf,
       signal_tf,
       entry_tf);
+
+   ENUM_TIMEFRAMES timeframes[3];
+   timeframes[0]=structure_tf;
+   timeframes[1]=signal_tf;
+   timeframes[2]=entry_tf;
+
+   string waiting_symbols="";
+   string waiting_details="";
+   for(int i=0;i<ArraySize(symbols);i++)
+     {
+      if(symbols[i]=="")
+         continue;
+
+      if(SymbolIsSynchronized(symbols[i]))
+         continue;
+
+      string request_details="";
+      for(int timeframe_index=0;
+          timeframe_index<ArraySize(timeframes);
+          timeframe_index++)
+        {
+         MqlRates rates[1];
+         ResetLastError();
+         int copied=CopyRates(
+            symbols[i],
+            timeframes[timeframe_index],
+            0,
+            1,
+            rates);
+         int request_error=GetLastError();
+
+         if(copied!=1)
+           {
+            if(request_details!="")
+               request_details+=", ";
+
+            request_details+=
+               EnumToString(timeframes[timeframe_index])+
+               " copied="+IntegerToString(copied)+
+               " error="+IntegerToString(request_error);
+           }
+        }
+
+      if(waiting_symbols!="")
+         waiting_symbols+=", ";
+      waiting_symbols+=symbols[i];
+
+      if(waiting_details!="")
+         waiting_details+="; ";
+
+      waiting_details+=symbols[i]+" ";
+      waiting_details+=request_details=="" ?
+                       "history requests accepted" :
+                       request_details;
+     }
+
+   if(waiting_symbols!="")
+     {
+      string waiting_state=waiting_symbols+" | "+waiting_details;
+      if(waiting_state!=g_sync_wait_symbols)
+        {
+         g_sync_wait_symbols=waiting_state;
+         g_logger.Event(
+            LOG_INFO,"INIT","INIT_SYMBOLS_WAITING",
+            "","","","","WAIT","SYMBOL_SYNC",
+            "Waiting for symbol synchronization: "+waiting_symbols+
+            " | "+waiting_details);
+        }
+
+      g_dashboard.ShowStatus(
+         "WAITING FOR SYMBOL SYNC | "+waiting_symbols);
+      return SYSTEM_INIT_WAITING;
+     }
+
+   g_sync_wait_symbols="";
+   g_initialization_started=true;
 
    g_session_filter.Set(
       InpSessionFilter,
