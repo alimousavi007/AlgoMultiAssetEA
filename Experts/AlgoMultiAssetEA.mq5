@@ -439,7 +439,8 @@ COptimizationController g_optimizer;
 bool g_system_ready=false;
 bool g_initialization_started=false;
 bool g_initialization_failed=false;
-string g_sync_wait_symbols="";
+string g_runtime_wait_state[3];
+string g_runtime_init_failure[3];
 bool g_last_trading_locked=false;
 string g_last_runtime_dashboard_status="";
 
@@ -474,6 +475,11 @@ void SelectProfileTimeframes(ENUM_TRADING_PROFILE profile,
 
 bool ValidInputSet()
   {
+   if(InpGoldSymbol=="" &&
+      InpSilverSymbol=="" &&
+      InpBitcoinSymbol=="")
+      return false;
+
    if(!ValidSignalScoreOverride(InpScalpTrendMinimumScore) ||
       !ValidSignalScoreOverride(InpScalpBreakoutMinimumScore) ||
       !ValidSignalScoreOverride(InpScalpMomentumMinimumScore) ||
@@ -1291,15 +1297,13 @@ bool ValidateConfiguredSymbol(const string role,const string symbol)
    ResetLastError();
    if(!SymbolExist(symbol,custom))
      {
-      InitFailure(role,"SymbolExist=false symbol="+symbol);
-      return false;
+      return true;
      }
 
    ResetLastError();
    if(!SymbolSelect(symbol,true))
      {
-      InitFailure(role,"SymbolSelect=false symbol="+symbol);
-      return false;
+      return true;
      }
 
    g_logger.Event(
@@ -1316,23 +1320,21 @@ enum ENUM_SYSTEM_INIT_STATUS
    SYSTEM_INIT_READY=1
   };
 
-ENUM_SYSTEM_INIT_STATUS InitializeSystemWhenReady()
+int InitializePendingRuntimes()
   {
-   if(g_system_ready)
-      return SYSTEM_INIT_READY;
-
-   if(g_initialization_started)
-      return SYSTEM_INIT_WAITING;
-
    string symbols[3];
    symbols[0]=InpGoldSymbol;
    symbols[1]=InpSilverSymbol;
    symbols[2]=InpBitcoinSymbol;
 
+   string roles[3];
+   roles[0]="GOLD";
+   roles[1]="SILVER";
+   roles[2]="BITCOIN";
+
    ENUM_TIMEFRAMES structure_tf;
    ENUM_TIMEFRAMES signal_tf;
    ENUM_TIMEFRAMES entry_tf;
-
    SelectProfileTimeframes(
       InpProfile,
       structure_tf,
@@ -1344,75 +1346,158 @@ ENUM_SYSTEM_INIT_STATUS InitializeSystemWhenReady()
    timeframes[1]=signal_tf;
    timeframes[2]=entry_tf;
 
-   string waiting_symbols="";
-   string waiting_details="";
+   bool tester_single_symbol=
+      (MQLInfoInteger(MQL_TESTER)!=0);
+   int runtime_count=0;
+
    for(int i=0;i<ArraySize(symbols);i++)
      {
       if(symbols[i]=="")
          continue;
 
-      if(SymbolIsSynchronized(symbols[i]))
-         continue;
-
-      string request_details="";
-      for(int timeframe_index=0;
-          timeframe_index<ArraySize(timeframes);
-          timeframe_index++)
+      if(tester_single_symbol &&
+         symbols[i]!=_Symbol)
         {
-         MqlRates rates[1];
-         ResetLastError();
-         int copied=CopyRates(
-            symbols[i],
-            timeframes[timeframe_index],
-            0,
-            1,
-            rates);
-         int request_error=GetLastError();
-
-         if(copied!=1)
+         if(g_runtime_wait_state[i]!="TESTER_SKIPPED")
            {
-            if(request_details!="")
-               request_details+=", ";
-
-            request_details+=
-               EnumToString(timeframes[timeframe_index])+
-               " copied="+IntegerToString(copied)+
-               " error="+IntegerToString(request_error);
+            g_logger.Event(
+               LOG_INFO,"INIT","INIT_TESTER_SYMBOL_SKIPPED",
+               symbols[i],"",roles[i],"","SKIP",
+               "TESTER_SINGLE_SYMBOL",
+               "Tester evaluates the chart symbol only");
+            g_runtime_wait_state[i]="TESTER_SKIPPED";
            }
+         continue;
         }
 
-      if(waiting_symbols!="")
-         waiting_symbols+=", ";
-      waiting_symbols+=symbols[i];
-
-      if(waiting_details!="")
-         waiting_details+="; ";
-
-      waiting_details+=symbols[i]+" ";
-      waiting_details+=request_details=="" ?
-                       "history requests accepted" :
-                       request_details;
-     }
-
-   if(waiting_symbols!="")
-     {
-      string waiting_state=waiting_symbols+" | "+waiting_details;
-      if(waiting_state!=g_sync_wait_symbols)
+      bool custom_symbol=false;
+      if(!SymbolExist(symbols[i],custom_symbol))
         {
-         g_sync_wait_symbols=waiting_state;
-         g_logger.Event(
-            LOG_INFO,"INIT","INIT_SYMBOLS_WAITING",
-            "","","","","WAIT","SYMBOL_SYNC",
-            "Waiting for symbol synchronization: "+waiting_symbols+
-            " | "+waiting_details);
+         if(g_runtime_wait_state[i]!="SYMBOL_MISSING")
+           {
+            g_runtime_wait_state[i]="SYMBOL_MISSING";
+            g_logger.Event(
+               LOG_WARNING,"INIT","INIT_SYMBOL_UNAVAILABLE",
+               symbols[i],"",roles[i],"","SKIP",
+               "SYMBOL_MISSING",
+               "Configured symbol is unavailable; other symbols remain active");
+           }
+         continue;
         }
 
-      g_dashboard.ShowStatus(
-         "WAITING FOR SYMBOL SYNC | "+waiting_symbols);
-      return SYSTEM_INIT_WAITING;
+      ResetLastError();
+      if(!SymbolSelect(symbols[i],true))
+        {
+         int select_error=GetLastError();
+         string select_state=
+            "SYMBOL_SELECT_FAILED_"+IntegerToString(select_error);
+         if(g_runtime_wait_state[i]!=select_state)
+           {
+            g_runtime_wait_state[i]=select_state;
+            g_logger.Event(
+               LOG_WARNING,"INIT","INIT_SYMBOL_UNAVAILABLE",
+               symbols[i],"",roles[i],"","WAIT",
+               "SYMBOL_SELECT",
+               "Unable to select configured symbol; other symbols remain active",
+               select_error);
+           }
+         ResetLastError();
+         continue;
+        }
+
+      if(g_runtime[i].valid)
+        {
+         runtime_count++;
+         continue;
+        }
+
+      if(!SymbolIsSynchronized(symbols[i]))
+        {
+         string request_details="";
+         for(int timeframe_index=0;
+             timeframe_index<ArraySize(timeframes);
+             timeframe_index++)
+           {
+            MqlRates rates[1];
+            ResetLastError();
+            int copied=CopyRates(
+               symbols[i],
+               timeframes[timeframe_index],
+               0,
+               1,
+               rates);
+            int request_error=GetLastError();
+
+            if(copied!=1)
+              {
+               if(request_details!="")
+                  request_details+=", ";
+
+               request_details+=
+                  EnumToString(timeframes[timeframe_index])+
+                  " copied="+IntegerToString(copied)+
+                  " error="+IntegerToString(request_error);
+              }
+           }
+
+         string wait_state=request_details;
+         if(wait_state=="")
+            wait_state="history requests accepted";
+
+         if(wait_state!=g_runtime_wait_state[i])
+           {
+            g_runtime_wait_state[i]=wait_state;
+            g_logger.Event(
+               LOG_INFO,"INIT","INIT_SYMBOL_WAITING",
+               symbols[i],"",roles[i],"","WAIT",
+               "SYMBOL_SYNC",
+               "Waiting for this symbol only: "+wait_state);
+           }
+         continue;
+        }
+
+      g_runtime_wait_state[i]="";
+      if(!g_runtime[i].Initialize(
+            symbols[i],
+            structure_tf,
+            signal_tf,
+            entry_tf))
+        {
+         string failure=g_runtime[i].last_failure;
+         if(failure!=g_runtime_init_failure[i])
+           {
+            g_runtime_init_failure[i]=failure;
+            g_logger.Event(
+               LOG_WARNING,"INIT","INIT_RUNTIME_PENDING",
+               symbols[i],"",roles[i],"","WAIT",
+               "RUNTIME_INIT",
+               "Runtime initialization failed; other symbols remain active: "+
+               failure,
+               GetLastError());
+            ResetLastError();
+           }
+         continue;
+        }
+
+      g_runtime_init_failure[i]="";
+      runtime_count++;
+      g_logger.Event(
+         LOG_INFO,"INIT","INIT_RUNTIME_READY",
+         symbols[i],"",roles[i],"","READY",
+         "RUNTIME_INIT","Symbol runtime initialized");
      }
 
-   g_sync_wait_symbols="";
+   return runtime_count;
+  }
+
+ENUM_SYSTEM_INIT_STATUS InitializeSystemWhenReady()
+  {
+   if(g_system_ready)
+      return SYSTEM_INIT_READY;
+
+   if(g_initialization_started)
+      return SYSTEM_INIT_WAITING;
+
    g_initialization_started=true;
 
    g_session_filter.Set(
@@ -1508,61 +1593,7 @@ ENUM_SYSTEM_INIT_STATUS InitializeSystemWhenReady()
       return SYSTEM_INIT_FAILED;
      }
 
-   int runtime_count=0;
-
-   if(InpGoldSymbol!="")
-     {
-      if(!g_runtime[runtime_count].Initialize(
-            InpGoldSymbol,
-            structure_tf,
-            signal_tf,
-            entry_tf))
-        {
-         g_initialization_started=false;
-         InitFailure("Runtime.GOLD",InpGoldSymbol);
-         return SYSTEM_INIT_FAILED;
-        }
-      runtime_count++;
-     }
-
-   if(InpSilverSymbol!="" &&
-      runtime_count<3)
-     {
-      if(!g_runtime[runtime_count].Initialize(
-            InpSilverSymbol,
-            structure_tf,
-            signal_tf,
-            entry_tf))
-        {
-         g_initialization_started=false;
-         InitFailure("Runtime.SILVER",InpSilverSymbol);
-         return SYSTEM_INIT_FAILED;
-        }
-      runtime_count++;
-     }
-
-   if(InpBitcoinSymbol!="" &&
-      runtime_count<3)
-     {
-      if(!g_runtime[runtime_count].Initialize(
-            InpBitcoinSymbol,
-            structure_tf,
-            signal_tf,
-            entry_tf))
-        {
-         g_initialization_started=false;
-         InitFailure("Runtime.BITCOIN",InpBitcoinSymbol);
-         return SYSTEM_INIT_FAILED;
-        }
-      runtime_count++;
-     }
-
-   if(runtime_count<=0)
-     {
-      g_initialization_started=false;
-      InitFailure("RuntimeCount","No configured runtime initialized");
-      return SYSTEM_INIT_FAILED;
-     }
+   int runtime_count=InitializePendingRuntimes();
 
    if(!g_state.Reconstruct())
      {
@@ -1588,7 +1619,7 @@ ENUM_SYSTEM_INIT_STATUS InitializeSystemWhenReady()
       "READY","INIT_COMPLETE",
       "AlgoMultiAssetEA initialized version="+ALGO_SYSTEM_VERSION+
       " mode="+IntegerToString((int)InpMode)+
-      " runtimes="+IntegerToString(runtime_count));
+      " runtimes_ready="+IntegerToString(runtime_count));
 
    UpdateDashboardForChart();
    return SYSTEM_INIT_READY;
@@ -1727,6 +1758,8 @@ void OnTimer()
          return;
         }
      }
+
+   InitializePendingRuntimes();
 
    bool risk_state_ready=RefreshTradingState();
 
