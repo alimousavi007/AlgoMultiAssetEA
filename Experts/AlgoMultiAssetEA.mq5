@@ -234,6 +234,7 @@ public:
 
    CFeatureEngine feature_structure;
    CFeatureEngine feature_signal;
+   CFeatureEngine feature_entry;
    CRegimeEngine  regime_engine;
 
    CTrendPullbackStrategy trend;
@@ -243,6 +244,9 @@ public:
 
    bool valid;
    string last_failure;
+   ENUM_REGIME_TYPE entry_regime;
+   datetime entry_regime_bar_time;
+   bool entry_regime_valid;
 
    CSymbolRuntime()
      {
@@ -252,6 +256,9 @@ public:
       entry_tf=PERIOD_CURRENT;
       valid=false;
       last_failure="";
+      entry_regime=REGIME_UNCERTAIN;
+      entry_regime_bar_time=0;
+      entry_regime_valid=false;
      }
 
    bool Initialize(const string in_symbol,
@@ -307,6 +314,19 @@ public:
          InpROC_Period,
          InpVolume_Period);
 
+      feature_entry.SetParameters(
+         InpEMA_Fast,
+         InpEMA_Slow,
+         InpEMA_Long,
+         InpADX_Period,
+         InpATR_Period,
+         InpRSI_Period,
+         InpMACD_Fast,
+         InpMACD_Slow,
+         InpMACD_Signal,
+         InpROC_Period,
+         InpVolume_Period);
+
       ResetLastError();
       if(!feature_structure.InitializeFor(
             symbol,
@@ -323,6 +343,16 @@ public:
             signal_tf))
         {
          last_failure="FeatureSignal.InitializeFor failed LastError="+IntegerToString(GetLastError());
+         ResetLastError();
+         return false;
+        }
+
+      ResetLastError();
+      if(!feature_entry.InitializeFor(
+            symbol,
+            entry_tf))
+        {
+         last_failure="FeatureEntry.InitializeFor failed LastError="+IntegerToString(GetLastError());
          ResetLastError();
          return false;
         }
@@ -904,11 +934,82 @@ bool PrepareRuntimeAnalysis(CSymbolRuntime &runtime,
       runtime.symbol,EnumToString(runtime.signal_tf),"","","OK",
       "REGIME",
       "signal="+EnumToString(signal_regime)+
+      " entry="+EnumToString(runtime.entry_regime)+
       " structure="+EnumToString(structure_regime),
       0,0,
       signal_features.adx,
       signal_features.atr,
       signal_features.rsi);
+
+   return true;
+  }
+
+bool UpdateRuntimeEntryRegime(CSymbolRuntime &runtime)
+  {
+   MarketSnapshot entry_market;
+   FeatureSet entry_features;
+
+   ResetLastError();
+   if(!runtime.market_entry.GetSnapshot(
+         runtime.symbol,
+         runtime.entry_tf,
+         entry_market))
+     {
+      g_logger.Event(
+         LOG_ERROR,"MARKET","MARKET_SNAPSHOT_FAILED",
+         runtime.symbol,EnumToString(runtime.entry_tf),"","","FAIL",
+         "ENTRY_REGIME_SNAPSHOT",
+         "Market entry-regime snapshot failed",GetLastError());
+      ResetLastError();
+      runtime.entry_regime_valid=false;
+      return false;
+     }
+
+   ResetLastError();
+   if(!runtime.feature_entry.Calculate(
+         entry_market,
+         entry_features))
+     {
+      g_logger.Event(
+         LOG_ERROR,"FEATURE","FEATURE_CALC_FAILED",
+         runtime.symbol,EnumToString(runtime.entry_tf),"","","FAIL",
+         "ENTRY_REGIME_FEATURES",
+         "Entry-regime feature calculation failed",GetLastError());
+      ResetLastError();
+      runtime.entry_regime_valid=false;
+      return false;
+     }
+
+   ENUM_REGIME_TYPE previous_regime=
+      runtime.entry_regime;
+   bool had_previous_regime=
+      runtime.entry_regime_valid;
+
+   runtime.entry_regime=
+      runtime.regime_engine.Detect(
+         entry_market,
+         entry_features);
+   runtime.entry_regime_bar_time=
+      entry_market.closed_bar_time;
+   runtime.entry_regime_valid=true;
+
+   if(!had_previous_regime ||
+      previous_regime!=runtime.entry_regime)
+     {
+      string previous=
+         had_previous_regime ?
+         EnumToString(previous_regime) :
+         "UNINITIALIZED";
+      g_logger.Event(
+         LOG_INFO,"REGIME","REGIME_STATE_CHANGED",
+         runtime.symbol,EnumToString(runtime.entry_tf),"","","UPDATE",
+         "ENTRY_TIMEFRAME_REGIME",
+         previous+" -> "+EnumToString(runtime.entry_regime),
+         0,0,
+         entry_features.adx,
+         entry_features.atr,
+         entry_features.rsi);
+     }
 
    return true;
   }
@@ -1297,8 +1398,8 @@ void ProcessRuntime(CSymbolRuntime &runtime)
       return;
      }
 
-   // Execution evaluation is synchronized to entry bars first,
-   // then to a new signal bar. This prevents repeated evaluation.
+   // Refresh the regime on each closed entry bar. Strategy evaluation
+   // remains synchronized to a new closed signal bar.
    if(!runtime.market_entry.IsNewClosedBar(
          runtime.symbol,
          runtime.entry_tf))
@@ -1306,6 +1407,14 @@ void ProcessRuntime(CSymbolRuntime &runtime)
       ShowRuntimeGateStatus(
          runtime,
          "WAITING: ENTRY BAR");
+      return;
+     }
+
+   if(!UpdateRuntimeEntryRegime(runtime))
+     {
+      ShowRuntimeGateStatus(
+         runtime,
+         "BLOCKED: ENTRY REGIME DATA");
       return;
      }
 
@@ -1336,13 +1445,22 @@ void ProcessRuntime(CSymbolRuntime &runtime)
          structure_regime))
       return;
 
+   if(!runtime.entry_regime_valid ||
+      runtime.entry_regime_bar_time<=0)
+     {
+      ShowRuntimeGateStatus(
+         runtime,
+         "BLOCKED: ENTRY REGIME UNAVAILABLE");
+      return;
+     }
+
    StrategyContext context;
    PortfolioState portfolio_state;
    if(!BuildRuntimeStrategyContext(
       runtime,
       signal_market,
       signal_features,
-      signal_regime,
+      runtime.entry_regime,
       context,
       portfolio_state))
       return;
@@ -1352,7 +1470,7 @@ void ProcessRuntime(CSymbolRuntime &runtime)
       EvaluateRuntimeStrategies(
          runtime,
          context,
-         signal_regime,
+         runtime.entry_regime,
          structure_regime,
          candidates);
 
@@ -1362,7 +1480,7 @@ void ProcessRuntime(CSymbolRuntime &runtime)
       candidate_count,
       signal_market,
       signal_features,
-      signal_regime,
+      runtime.entry_regime,
       portfolio_state);
   }
 
