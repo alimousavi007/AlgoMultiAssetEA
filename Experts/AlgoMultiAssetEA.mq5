@@ -608,6 +608,25 @@ bool StructureCompatible(const ENUM_STRATEGY_ID strategy,
    return false;
   }
 
+string StrategyRegimeRejection(const ENUM_STRATEGY_ID strategy,
+                               const ENUM_REGIME_TYPE signal_regime,
+                               const ENUM_REGIME_TYPE structure_regime)
+  {
+   if(signal_regime==REGIME_UNCERTAIN)
+      return "SIGNAL_REGIME_UNCERTAIN";
+
+   if(structure_regime==REGIME_UNCERTAIN)
+      return "STRUCTURE_REGIME_UNCERTAIN";
+
+   if(!StructureCompatible(
+         strategy,
+         signal_regime,
+         structure_regime))
+      return "REGIME_PAIR_INCOMPATIBLE";
+
+   return "";
+  }
+
 bool NormalizeSignalStopsToTick(StrategySignal &signal,
                                string &reason)
   {
@@ -1061,7 +1080,8 @@ int EvaluateRuntimeStrategies(CSymbolRuntime &runtime,
                               const StrategyContext &context,
                               const ENUM_REGIME_TYPE signal_regime,
                               const ENUM_REGIME_TYPE structure_regime,
-                              StrategySignal &candidates[])
+                              StrategySignal &candidates[],
+                              string &diagnostics)
   {
    for(int i=0;i<5;i++)
      {
@@ -1069,75 +1089,112 @@ int EvaluateRuntimeStrategies(CSymbolRuntime &runtime,
       candidates[i].direction=SIGNAL_NONE;
      }
 
+   diagnostics="";
    int candidate_count=0;
 
-   if(context.trading_allowed &&
+   bool trend_enabled=ProfileStrategyEnabled(
+      InpProfile,
+      STRATEGY_TREND_PULLBACK);
+   bool breakout_enabled=ProfileStrategyEnabled(
+      InpProfile,
+      STRATEGY_BREAKOUT);
+   bool momentum_enabled=ProfileStrategyEnabled(
+      InpProfile,
+      STRATEGY_MOMENTUM);
+   bool mean_reversion_enabled=
+      InpEnableMeanReversion &&
       ProfileStrategyEnabled(
          InpProfile,
-         STRATEGY_TREND_PULLBACK) &&
-      StructureCompatible(
-         STRATEGY_TREND_PULLBACK,
-         signal_regime,
-         structure_regime))
+         STRATEGY_MEAN_REVERSION);
+
+   string trend_status=
+      !context.trading_allowed ?
+      "RISK_LOCK" :
+      (!trend_enabled ?
+       "DISABLED" :
+       StrategyRegimeRejection(
+          STRATEGY_TREND_PULLBACK,
+          signal_regime,
+          structure_regime));
+   if(trend_status=="")
      {
       StrategySignal signal;
       if(runtime.trend.Evaluate(context,signal) && signal.valid)
         {
          candidates[candidate_count]=signal;
          candidate_count++;
+         trend_status="CANDIDATE";
         }
+      else
+         trend_status="NO_SIGNAL_RETURNED";
      }
 
-   if(context.trading_allowed &&
-      ProfileStrategyEnabled(
-         InpProfile,
-         STRATEGY_BREAKOUT) &&
-      StructureCompatible(
-         STRATEGY_BREAKOUT,
-         signal_regime,
-         structure_regime))
+   string breakout_status=
+      !context.trading_allowed ?
+      "RISK_LOCK" :
+      (!breakout_enabled ?
+       "DISABLED" :
+       StrategyRegimeRejection(
+          STRATEGY_BREAKOUT,
+          signal_regime,
+          structure_regime));
+   if(breakout_status=="")
      {
       StrategySignal signal;
       if(runtime.breakout.Evaluate(context,signal) && signal.valid)
         {
          candidates[candidate_count]=signal;
          candidate_count++;
+         breakout_status="CANDIDATE";
         }
+      else
+         breakout_status="NO_SIGNAL_RETURNED";
      }
 
-   if(context.trading_allowed &&
-      ProfileStrategyEnabled(
-         InpProfile,
-         STRATEGY_MOMENTUM) &&
-      StructureCompatible(
-         STRATEGY_MOMENTUM,
-         signal_regime,
-         structure_regime))
+   string momentum_status=
+      !context.trading_allowed ?
+      "RISK_LOCK" :
+      (!momentum_enabled ?
+       "DISABLED" :
+       StrategyRegimeRejection(
+          STRATEGY_MOMENTUM,
+          signal_regime,
+          structure_regime));
+   if(momentum_status=="")
      {
       StrategySignal signal;
       if(runtime.momentum.Evaluate(context,signal) && signal.valid)
         {
          candidates[candidate_count]=signal;
          candidate_count++;
+         momentum_status="CANDIDATE";
         }
+      else
+         momentum_status="NO_SIGNAL_RETURNED";
      }
 
-   if(context.trading_allowed &&
-      InpEnableMeanReversion &&
-      ProfileStrategyEnabled(
-         InpProfile,
-         STRATEGY_MEAN_REVERSION) &&
-      StructureCompatible(
-         STRATEGY_MEAN_REVERSION,
-         signal_regime,
-         structure_regime))
+   string mean_reversion_status=
+      !context.trading_allowed ?
+      "RISK_LOCK" :
+      (!InpEnableMeanReversion ?
+       "DISABLED_GLOBAL" :
+       (!mean_reversion_enabled ?
+        "DISABLED_PROFILE" :
+        StrategyRegimeRejection(
+           STRATEGY_MEAN_REVERSION,
+           signal_regime,
+           structure_regime)));
+   if(mean_reversion_status=="")
      {
       StrategySignal signal;
       if(runtime.mean_reversion.Evaluate(context,signal) && signal.valid)
         {
          candidates[candidate_count]=signal;
          candidate_count++;
+         mean_reversion_status="CANDIDATE";
         }
+      else
+         mean_reversion_status="NO_SIGNAL_RETURNED";
      }
 
    // Relative Value is multi-leg and is intentionally not converted
@@ -1167,11 +1224,20 @@ int EvaluateRuntimeStrategies(CSymbolRuntime &runtime,
         }
      }
 
-   g_logger.Event(
-      LOG_DEBUG,"STRATEGY","STRATEGY_BATCH_EVALUATED",
-      runtime.symbol,EnumToString(runtime.signal_tf),"","","OK",
-      candidate_count>0 ? "CANDIDATE_FOUND" : "NO_CANDIDATE",
-      "candidate_count="+IntegerToString(candidate_count));
+   diagnostics=
+      "readiness=signal_market:READY,signal_features:READY"+
+      ",entry_market:READY,entry_features:READY"+
+      ",structure_market:READY,structure_features:READY"+
+      " risk_lock="+
+      (context.trading_allowed ? "NO" : "YES")+
+      " enabled=trend:"+(trend_enabled ? "yes" : "no")+
+      ",breakout:"+(breakout_enabled ? "yes" : "no")+
+      ",momentum:"+(momentum_enabled ? "yes" : "no")+
+      ",mean_reversion:"+(mean_reversion_enabled ? "yes" : "no")+
+      " eligibility=trend:"+trend_status+
+      ",breakout:"+breakout_status+
+      ",momentum:"+momentum_status+
+      ",mean_reversion:"+mean_reversion_status;
 
    return candidate_count;
   }
@@ -1182,29 +1248,13 @@ void ProcessRuntimeCandidates(CSymbolRuntime &runtime,
                               const MarketSnapshot &signal_market,
                               const FeatureSet &signal_features,
                               const ENUM_REGIME_TYPE signal_regime,
+                              const ENUM_REGIME_TYPE entry_regime,
+                              const ENUM_REGIME_TYPE structure_regime,
+                              const string strategy_diagnostics,
                               const PortfolioState &portfolio_state)
   {
    StrategySignal selected_signal;
    selected_signal.valid=false;
-
-   if(candidate_count<=0)
-     {
-      g_logger.Event(
-         LOG_DEBUG,"SIGNAL","SIGNAL_NOT_GENERATED",
-         runtime.symbol,EnumToString(runtime.signal_tf),"","","NOOP",
-         "NO_CANDIDATE","No strategy candidate qualified");
-
-      RiskDecision empty_risk;
-      empty_risk.decision=RISK_UNDEFINED;
-      g_dashboard.Update(
-         signal_market,
-         signal_features,
-         signal_regime,
-         selected_signal,
-         empty_risk,
-         portfolio_state);
-      return;
-     }
 
    StrategySignal normalized_candidates[5];
    int normalized_count=0;
@@ -1232,32 +1282,66 @@ void ProcessRuntimeCandidates(CSymbolRuntime &runtime,
       normalized_count++;
      }
 
-   if(normalized_count<=0)
-     {
-      RiskDecision empty_risk;
-      empty_risk.decision=RISK_UNDEFINED;
-      g_dashboard.Update(
-         signal_market,
-         signal_features,
-         signal_regime,
-         selected_signal,
-         empty_risk,
-         portfolio_state);
-      return;
-     }
-
-   ResetLastError();
-   if(!g_signal_engine.Evaluate(
+   int compatible_count=0;
+   string validation_rejections="";
+   bool compatibility_checked=
+      g_signal_engine.CountCompatible(
          normalized_candidates,
          normalized_count,
-         selected_signal))
-     {
-      g_logger.Event(
-         LOG_ERROR,"SIGNAL","SIGNAL_ENGINE_FAILED",
-         runtime.symbol,EnumToString(runtime.signal_tf),"","","FAIL",
-         "SIGNAL_ENGINE","Signal arbitration failed",GetLastError());
-      ResetLastError();
+         compatible_count,
+         validation_rejections);
 
+   bool selected=false;
+   if(compatible_count>0)
+     {
+      ResetLastError();
+      selected=g_signal_engine.Evaluate(
+         normalized_candidates,
+         normalized_count,
+         selected_signal);
+     }
+
+   string pipeline_result="SIGNAL_SELECTED";
+   if(candidate_count<=0)
+      pipeline_result="NO_STRATEGY_CANDIDATE";
+   else if(normalized_count<=0)
+      pipeline_result="INVALID_TICK_LEVELS";
+   else if(!compatibility_checked)
+      pipeline_result="SIGNAL_ENGINE_UNAVAILABLE";
+   else if(compatible_count<=0)
+      pipeline_result="SIGNAL_VALIDATION_REJECTED";
+   else if(!selected)
+      pipeline_result="CONFLICT_OR_ARBITRATION_REJECTED";
+
+   string pipeline_diagnostics=
+      "bar="+TimeToString(
+         signal_market.closed_bar_time,
+         TIME_DATE|TIME_MINUTES|TIME_SECONDS)+
+      " regimes=signal:"+EnumToString(signal_regime)+
+      ",entry:"+EnumToString(entry_regime)+
+      ",structure:"+EnumToString(structure_regime)+
+      " "+strategy_diagnostics+
+      " candidates=raw:"+IntegerToString(candidate_count)+
+      ",normalized:"+IntegerToString(normalized_count)+
+      ",compatible:"+IntegerToString(compatible_count)+
+      ",selected:"+(selected ? "1" : "0")+
+      " validation_rejections="+
+      (validation_rejections=="" ? "none" : validation_rejections);
+
+   g_logger.Event(
+      LOG_INFO,
+      "PIPELINE",
+      "SIGNAL_BAR_DIAGNOSTIC",
+      runtime.symbol,
+      EnumToString(runtime.signal_tf),
+      "",
+      "",
+      selected ? "SIGNAL" : "NO_SIGNAL",
+      pipeline_result,
+      pipeline_diagnostics);
+
+   if(!selected)
+     {
       RiskDecision empty_risk;
       empty_risk.decision=RISK_UNDEFINED;
       g_dashboard.Update(
@@ -1460,19 +1544,21 @@ void ProcessRuntime(CSymbolRuntime &runtime)
       runtime,
       signal_market,
       signal_features,
-      runtime.entry_regime,
+      signal_regime,
       context,
       portfolio_state))
       return;
 
    StrategySignal candidates[5];
+   string strategy_diagnostics="";
    int candidate_count=
       EvaluateRuntimeStrategies(
          runtime,
          context,
-         runtime.entry_regime,
+         signal_regime,
          structure_regime,
-         candidates);
+         candidates,
+         strategy_diagnostics);
 
    ProcessRuntimeCandidates(
       runtime,
@@ -1480,7 +1566,10 @@ void ProcessRuntime(CSymbolRuntime &runtime)
       candidate_count,
       signal_market,
       signal_features,
+      signal_regime,
       runtime.entry_regime,
+      structure_regime,
+      strategy_diagnostics,
       portfolio_state);
   }
 

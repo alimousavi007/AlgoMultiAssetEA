@@ -59,44 +59,56 @@ private:
    //+----------------------------------------------------------------+
    //| Strategy/regime compatibility                                  |
    //+----------------------------------------------------------------+
-   bool IsCompatible(
+   string CompatibilityRejection(
       const StrategySignal &signal) const
      {
       if(!signal.valid)
-         return false;
+         return "INVALID_SIGNAL";
 
       if(signal.direction==SIGNAL_NONE)
-         return false;
+         return "NO_DIRECTION";
 
       if(signal.score<m_min_score)
-         return false;
+         return "SCORE_BELOW_MINIMUM";
 
       if(signal.strategy==STRATEGY_TREND_PULLBACK)
         {
-         return
-            signal.regime==REGIME_TREND_UP ||
-            signal.regime==REGIME_TREND_DOWN;
+         if(signal.regime==REGIME_TREND_UP ||
+            signal.regime==REGIME_TREND_DOWN)
+            return "";
+
+         return "REGIME_INCOMPATIBLE";
         }
 
       if(signal.strategy==STRATEGY_BREAKOUT)
-         return
-            signal.regime==REGIME_BREAKOUT;
+         return signal.regime==REGIME_BREAKOUT ?
+                "" : "REGIME_INCOMPATIBLE";
 
       if(signal.strategy==STRATEGY_MOMENTUM)
-         return
-            signal.regime==REGIME_TREND_UP ||
+        {
+         if(signal.regime==REGIME_TREND_UP ||
             signal.regime==REGIME_TREND_DOWN ||
-            signal.regime==REGIME_BREAKOUT;
+            signal.regime==REGIME_BREAKOUT)
+            return "";
+
+         return "REGIME_INCOMPATIBLE";
+        }
 
       if(signal.strategy==STRATEGY_MEAN_REVERSION)
-         return
-            signal.regime==REGIME_RANGE;
+         return signal.regime==REGIME_RANGE ?
+                "" : "REGIME_INCOMPATIBLE";
 
       if(signal.strategy==STRATEGY_RELATIVE_VALUE)
-         return
-            signal.regime!=REGIME_UNCERTAIN;
+         return signal.regime!=REGIME_UNCERTAIN ?
+                "" : "REGIME_INCOMPATIBLE";
 
-      return false;
+      return "UNSUPPORTED_STRATEGY";
+     }
+
+   bool IsCompatible(
+      const StrategySignal &signal) const
+     {
+      return CompatibilityRejection(signal)=="";
      }
 
    //+----------------------------------------------------------------+
@@ -203,6 +215,38 @@ public:
          return false;
 
       m_initialized=true;
+
+      return true;
+     }
+
+   bool CountCompatible(
+      const StrategySignal &signals[],
+      const int count,
+      int &compatible_count,
+      string &rejection_summary) const
+     {
+      compatible_count=0;
+      rejection_summary="";
+
+      if(!m_initialized ||
+         count<0 ||
+         count>ArraySize(signals))
+         return false;
+
+      for(int i=0;i<count;i++)
+        {
+         string rejection=CompatibilityRejection(signals[i]);
+         if(rejection=="")
+            compatible_count++;
+         else
+           {
+            if(rejection_summary!="")
+               rejection_summary+=",";
+
+            rejection_summary+=
+               EnumToString(signals[i].strategy)+":"+rejection;
+           }
+        }
 
       return true;
      }
