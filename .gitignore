@@ -38,3 +38,23 @@
 !Include/
 !Include/AlgoSystem/
 !Include/AlgoSystem/**
+
+
+# Shared Agent Skills (Kilo + Copilot compatibility)
+!.agents/
+!.agents/skills/
+!.agents/skills/**/
+!.agents/skills/**
+!.agents/skills/*
+
+# Kilo project configuration
+!kilo.jsonc
+
+# Kilo project rules
+!.kilo/
+!.kilo/rules/
+!.kilo/rules/mql5.md
+
+# Kilo project agents (when present)
+!.kilo/agents/
+!.kilo/agents/*.md

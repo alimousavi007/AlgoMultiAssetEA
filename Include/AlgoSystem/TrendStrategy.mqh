@@ -49,33 +49,84 @@ private:
    int m_adx_score_threshold;
    bool m_initialized;
 
-   //+----------------------------------------------------------------+
-   //| Reset signal                                                   |
-   //+----------------------------------------------------------------+
-   void ResetSignal(StrategySignal &signal) const
-     {
-      signal.valid=false;
+//+----------------------------------------------------------------+
+    //| Log diagnostic event                                           |
+    //+----------------------------------------------------------------+
+    void LogDiagnostic(const StrategyContext &context,
+                       const string direction,
+                       const string reason_code,
+                       const double score=0.0,
+                       const double threshold=0.0) const
+      {
+       if(!context.market.valid)
+          return;
 
-      signal.direction=SIGNAL_NONE;
-      signal.strategy=STRATEGY_TREND_PULLBACK;
+       string msg=
+          "symbol="+context.market.symbol+
+          "|tf="+EnumToString(context.market.timeframe)+
+          "|bar="+TimeToString(context.market.closed_bar.time,TIME_DATE|TIME_MINUTES|TIME_SECONDS)+
+          "|strategy=TREND_PULLBACK"+
+          "|direction="+direction+
+          "|regime="+EnumToString(context.regime)+
+          "|outcome=REJECTED"+
+          "|reason="+reason_code;
 
-      signal.symbol="";
-      signal.timeframe=PERIOD_CURRENT;
+       if(score>0.0 || threshold>0.0)
+          msg+="|score="+DoubleToString(score,2)+"|threshold="+DoubleToString(threshold,2);
 
-      signal.regime=REGIME_UNKNOWN;
+       g_logger.Log(LOG_DEBUG,msg);
+      }
 
-      signal.score=0.0;
-      signal.confidence=0.0;
+    //+----------------------------------------------------------------+
+    //| Log candidate produced                                         |
+    //+----------------------------------------------------------------+
+    void LogCandidate(const StrategyContext &context,
+                      const string direction,
+                      const double score) const
+      {
+       if(!context.market.valid)
+          return;
 
-      signal.entry=0.0;
-      signal.stop=0.0;
-      signal.target=0.0;
+       string msg=
+          "symbol="+context.market.symbol+
+          "|tf="+EnumToString(context.market.timeframe)+
+          "|bar="+TimeToString(context.market.closed_bar.time,TIME_DATE|TIME_MINUTES|TIME_SECONDS)+
+          "|strategy=TREND_PULLBACK"+
+          "|direction="+direction+
+          "|regime="+EnumToString(context.regime)+
+          "|outcome=CANDIDATE"+
+          "|score="+DoubleToString(score,2);
 
-      signal.timestamp=0;
+       g_logger.Log(LOG_DEBUG,msg);
+      }
 
-      signal.signal_id="";
-      signal.reason="";
-     }
+    //+----------------------------------------------------------------+
+    //| Reset signal                                                   |
+    //+----------------------------------------------------------------+
+    void ResetSignal(StrategySignal &signal) const
+      {
+       signal.valid=false;
+
+       signal.direction=SIGNAL_NONE;
+       signal.strategy=STRATEGY_TREND_PULLBACK;
+
+       signal.symbol="";
+       signal.timeframe=PERIOD_CURRENT;
+
+       signal.regime=REGIME_UNKNOWN;
+
+       signal.score=0.0;
+       signal.confidence=0.0;
+
+       signal.entry=0.0;
+       signal.stop=0.0;
+       signal.target=0.0;
+
+       signal.timestamp=0;
+
+       signal.signal_id="";
+       signal.reason="";
+      }
 
    //+----------------------------------------------------------------+
    //| Validate configuration                                         |
@@ -132,110 +183,158 @@ private:
       return true;
      }
 
-   //+----------------------------------------------------------------+
-   //| Check long pullback                                            |
-   //+----------------------------------------------------------------+
-   bool IsLongPullback(const StrategyContext &context) const
-     {
-      if(context.regime!=REGIME_TREND_UP)
-         return false;
+//+----------------------------------------------------------------+
+    //| Check long pullback                                            |
+    //+----------------------------------------------------------------+
+    bool IsLongPullback(const StrategyContext &context) const
+      {
+       if(context.regime!=REGIME_TREND_UP)
+         {
+          LogDiagnostic(context,"LONG","REGIME_MISMATCH");
+          return false;
+         }
 
-      if(context.features.atr<=0.0)
-         return false;
+       if(context.features.atr<=0.0)
+         {
+          LogDiagnostic(context,"LONG","INVALID_ATR");
+          return false;
+         }
 
-      if(context.features.ema_fast<=0.0 ||
-         context.features.ema_slow<=0.0 ||
-         context.features.ema_long<=0.0)
-         return false;
+       if(context.features.ema_fast<=0.0 ||
+          context.features.ema_slow<=0.0 ||
+          context.features.ema_long<=0.0)
+         {
+          LogDiagnostic(context,"LONG","INVALID_EMA");
+          return false;
+       }
 
-      // Price must remain structurally above the slow EMA.
-      if(context.market.closed_bar.close<=context.features.ema_slow)
-         return false;
+       // Price must remain structurally above the slow EMA.
+       if(context.market.closed_bar.close<=context.features.ema_slow)
+         {
+          LogDiagnostic(context,"LONG","STRUCTURE_ABOVE_SLOW_FAILED");
+          return false;
+       }
 
-      // Pullback must reach the fast EMA zone.
-      double pullback_upper=
-         context.features.ema_fast+
-         context.features.atr*m_pullback_zone_atr;
+       // Pullback must reach the fast EMA zone.
+       double pullback_upper=
+          context.features.ema_fast+
+          context.features.atr*m_pullback_zone_atr;
 
-      if(context.market.closed_bar.low>pullback_upper)
-         return false;
+       if(context.market.closed_bar.low>pullback_upper)
+         {
+          LogDiagnostic(context,"LONG","PULLBACK_NOT_REACHED");
+          return false;
+       }
 
-      // Candle must reclaim / close above fast EMA.
-      if(context.market.closed_bar.close<
-         context.features.ema_fast)
-         return false;
+       // Candle must reclaim / close above fast EMA.
+       if(context.market.closed_bar.close<
+          context.features.ema_fast)
+         {
+          LogDiagnostic(context,"LONG","RECLAIM_FAILED");
+          return false;
+       }
 
-      // Bullish candle.
-      if(context.market.closed_bar.close<=
-         context.market.closed_bar.open)
-         return false;
+       // Bullish candle.
+       if(context.market.closed_bar.close<=
+          context.market.closed_bar.open)
+         {
+          LogDiagnostic(context,"LONG","CANDLE_NOT_BULLISH");
+          return false;
+       }
 
-      // Avoid excessively extended close.
-      double extension=
-         CAlgoUtils::SafeDivide(
-            context.market.closed_bar.close-
-            context.features.ema_fast,
-            context.features.atr,
-            DBL_MAX);
+       // Avoid excessively extended close.
+       double extension=
+          CAlgoUtils::SafeDivide(
+             context.market.closed_bar.close-
+             context.features.ema_fast,
+             context.features.atr,
+             DBL_MAX);
 
-      if(extension>m_max_reclaim_distance_atr)
-         return false;
+       if(extension>m_max_reclaim_distance_atr)
+         {
+          LogDiagnostic(context,"LONG","PRICE_OVEREXTENDED");
+          return false;
+       }
 
-      return true;
-     }
+       return true;
+      }
 
-   //+----------------------------------------------------------------+
-   //| Check short pullback                                           |
-   //+----------------------------------------------------------------+
-   bool IsShortPullback(const StrategyContext &context) const
-     {
-      if(context.regime!=REGIME_TREND_DOWN)
-         return false;
+//+----------------------------------------------------------------+
+    //| Check short pullback                                           |
+    //+----------------------------------------------------------------+
+    bool IsShortPullback(const StrategyContext &context) const
+      {
+       if(context.regime!=REGIME_TREND_DOWN)
+         {
+          LogDiagnostic(context,"SHORT","REGIME_MISMATCH");
+          return false;
+         }
 
-      if(context.features.atr<=0.0)
-         return false;
+       if(context.features.atr<=0.0)
+         {
+          LogDiagnostic(context,"SHORT","INVALID_ATR");
+          return false;
+         }
 
-      if(context.features.ema_fast<=0.0 ||
-         context.features.ema_slow<=0.0 ||
-         context.features.ema_long<=0.0)
-         return false;
+       if(context.features.ema_fast<=0.0 ||
+          context.features.ema_slow<=0.0 ||
+          context.features.ema_long<=0.0)
+         {
+          LogDiagnostic(context,"SHORT","INVALID_EMA");
+          return false;
+         }
 
-      // Price must remain structurally below the slow EMA.
-      if(context.market.closed_bar.close>=
-         context.features.ema_slow)
-         return false;
+       // Price must remain structurally below the slow EMA.
+       if(context.market.closed_bar.close>=
+          context.features.ema_slow)
+         {
+          LogDiagnostic(context,"SHORT","STRUCTURE_BELOW_SLOW_FAILED");
+          return false;
+         }
 
-      // Pullback must reach the fast EMA zone.
-      double pullback_lower=
-         context.features.ema_fast-
-         context.features.atr*m_pullback_zone_atr;
+       // Pullback must reach the fast EMA zone.
+       double pullback_lower=
+          context.features.ema_fast-
+          context.features.atr*m_pullback_zone_atr;
 
-      if(context.market.closed_bar.high<pullback_lower)
-         return false;
+       if(context.market.closed_bar.high<pullback_lower)
+         {
+          LogDiagnostic(context,"SHORT","PULLBACK_NOT_REACHED");
+          return false;
+         }
 
-      // Candle must reject and close below fast EMA.
-      if(context.market.closed_bar.close>
-         context.features.ema_fast)
-         return false;
+       // Candle must reject and close below fast EMA.
+       if(context.market.closed_bar.close>
+          context.features.ema_fast)
+         {
+          LogDiagnostic(context,"SHORT","RECLAIM_FAILED");
+          return false;
+         }
 
-      // Bearish candle.
-      if(context.market.closed_bar.close>=
-         context.market.closed_bar.open)
-         return false;
+       // Bearish candle.
+       if(context.market.closed_bar.close>=
+          context.market.closed_bar.open)
+         {
+          LogDiagnostic(context,"SHORT","CANDLE_NOT_BEARISH");
+          return false;
+         }
 
-      // Avoid excessively extended close.
-      double extension=
-         CAlgoUtils::SafeDivide(
-            context.features.ema_fast-
-            context.market.closed_bar.close,
-            context.features.atr,
-            DBL_MAX);
+       // Avoid excessively extended close.
+       double extension=
+          CAlgoUtils::SafeDivide(
+             context.features.ema_fast-
+             context.market.closed_bar.close,
+             context.features.atr,
+             DBL_MAX);
 
-      if(extension>m_max_reclaim_distance_atr)
-         return false;
+       if(extension>m_max_reclaim_distance_atr)
+         {
+          LogDiagnostic(context,"SHORT","PRICE_OVEREXTENDED");
+          return false;
+         }
 
-      return true;
-     }
+       return true;
+      }
 
    //+----------------------------------------------------------------+
    //| Score long setup                                               |
@@ -371,107 +470,131 @@ private:
          100.0);
      }
 
-   //+----------------------------------------------------------------+
-   //| Build long SL/TP                                               |
-   //+----------------------------------------------------------------+
-   bool BuildLongLevels(const StrategyContext &context,
-                        double &entry,
-                        double &stop,
-                        double &target) const
-     {
-      entry=context.market.closed_bar.close;
-
-      if(entry<=0.0 ||
-         context.features.atr<=0.0)
-         return false;
-
-      double atr_stop=
-         entry-
-         context.features.atr*m_stop_atr_multiplier;
-
-      double structural_stop=
-         context.market.closed_bar.low-
-         context.features.atr*m_structure_buffer_atr;
-
-      stop=MathMin(
-         atr_stop,
-         structural_stop);
-
-      if(stop<=0.0 ||
-         stop>=entry)
-         return false;
-
-      double distance=entry-stop;
-
-      target=
-         entry+
-         distance*m_target_rr;
-
-      if(target<=entry)
-         return false;
-
-      double actual_rr=
-         CAlgoUtils::SafeDivide(
-            target-entry,
-            entry-stop,
-            0.0);
-
-      if(actual_rr<m_target_rr)
-         return false;
-
-      return true;
-     }
-
-   //+----------------------------------------------------------------+
-   //| Build short SL/TP                                              |
-   //+----------------------------------------------------------------+
-   bool BuildShortLevels(const StrategyContext &context,
+//+----------------------------------------------------------------+
+    //| Build long SL/TP                                               |
+    //+----------------------------------------------------------------+
+    bool BuildLongLevels(const StrategyContext &context,
                          double &entry,
                          double &stop,
                          double &target) const
-     {
-      entry=context.market.closed_bar.close;
+      {
+       entry=context.market.closed_bar.close;
 
-      if(entry<=0.0 ||
-         context.features.atr<=0.0)
-         return false;
+       if(entry<=0.0 ||
+          context.features.atr<=0.0)
+         {
+          LogDiagnostic(context,"LONG","INVALID_ENTRY_OR_ATR");
+          return false;
+         }
 
-      double atr_stop=
-         entry+
-         context.features.atr*m_stop_atr_multiplier;
+       double atr_stop=
+          entry-
+          context.features.atr*m_stop_atr_multiplier;
 
-      double structural_stop=
-         context.market.closed_bar.high+
-         context.features.atr*m_structure_buffer_atr;
+       double structural_stop=
+          context.market.closed_bar.low-
+          context.features.atr*m_structure_buffer_atr;
 
-      stop=MathMax(
-         atr_stop,
-         structural_stop);
+       stop=MathMin(
+          atr_stop,
+          structural_stop);
 
-      if(stop<=entry)
-         return false;
+       if(stop<=0.0 ||
+          stop>=entry)
+         {
+          LogDiagnostic(context,"LONG","INVALID_STOP");
+          return false;
+         }
 
-      double distance=stop-entry;
+       double distance=entry-stop;
 
-      target=
-         entry-
-         distance*m_target_rr;
+       target=
+          entry+
+          distance*m_target_rr;
 
-      if(target<=0.0 ||
-         target>=entry)
-         return false;
+       if(target<=entry)
+         {
+          LogDiagnostic(context,"LONG","INVALID_TARGET");
+          return false;
+         }
 
-      double actual_rr=
-         CAlgoUtils::SafeDivide(
-            entry-target,
-            stop-entry,
-            0.0);
+       double actual_rr=
+          CAlgoUtils::SafeDivide(
+             target-entry,
+             entry-stop,
+             0.0);
 
-      if(actual_rr<m_target_rr)
-         return false;
+       if(actual_rr<m_target_rr)
+         {
+          LogDiagnostic(context,"LONG","RR_TOO_LOW");
+          return false;
+         }
 
-      return true;
-     }
+       return true;
+      }
+
+//+----------------------------------------------------------------+
+    //| Build short SL/TP                                              |
+    //+----------------------------------------------------------------+
+    bool BuildShortLevels(const StrategyContext &context,
+                          double &entry,
+                          double &stop,
+                          double &target) const
+      {
+       entry=context.market.closed_bar.close;
+
+       if(entry<=0.0 ||
+          context.features.atr<=0.0)
+         {
+          LogDiagnostic(context,"SHORT","INVALID_ENTRY_OR_ATR");
+          return false;
+         }
+
+       double atr_stop=
+          entry+
+          context.features.atr*m_stop_atr_multiplier;
+
+       double structural_stop=
+          context.market.closed_bar.high+
+          context.features.atr*m_structure_buffer_atr;
+
+       stop=MathMax(
+          atr_stop,
+          structural_stop);
+
+       if(stop<=entry)
+         {
+          LogDiagnostic(context,"SHORT","INVALID_STOP");
+          return false;
+         }
+
+       double distance=stop-entry;
+
+       target=
+          entry-
+          distance*m_target_rr;
+
+       if(target<=0.0 ||
+          target>=entry)
+         {
+          LogDiagnostic(context,"SHORT","INVALID_TARGET");
+          return false;
+         }
+
+       double actual_rr=
+          CAlgoUtils::SafeDivide(
+             entry-target,
+             stop-entry,
+             0.0);
+
+       if(actual_rr<m_target_rr)
+         {
+          LogDiagnostic(context,"SHORT","RR_TOO_LOW");
+          return false;
+         }
+
+       return true;
+      }
 
    //+----------------------------------------------------------------+
    //| Build deterministic signal ID                                  |
@@ -488,107 +611,115 @@ private:
                 TIME_DATE|TIME_MINUTES|TIME_SECONDS);
      }
 
-   //+----------------------------------------------------------------+
-   //| Finalize long signal                                           |
-   //+----------------------------------------------------------------+
-   bool BuildLongSignal(const StrategyContext &context,
-                        StrategySignal &signal) const
-     {
-      double entry;
-      double stop;
-      double target;
-
-      if(!BuildLongLevels(
-            context,
-            entry,
-            stop,
-            target))
-         return false;
-
-      double score=ScoreLong(context);
-
-      if(score<m_min_signal_score)
-         return false;
-
-      signal.valid=true;
-
-      signal.direction=SIGNAL_LONG;
-      signal.strategy=STRATEGY_TREND_PULLBACK;
-
-      signal.symbol=context.market.symbol;
-      signal.timeframe=context.market.timeframe;
-
-      signal.regime=REGIME_TREND_UP;
-
-      signal.score=score;
-      signal.confidence=score/100.0;
-
-      signal.entry=entry;
-      signal.stop=stop;
-      signal.target=target;
-
-      signal.timestamp=
-         context.market.closed_bar.time;
-
-      signal.signal_id=
-         BuildSignalId(context);
-
-      signal.reason=
-         "TrendUp + Pullback + Reclaim";
-
-      return true;
-     }
-
-   //+----------------------------------------------------------------+
-   //| Finalize short signal                                          |
-   //+----------------------------------------------------------------+
-   bool BuildShortSignal(const StrategyContext &context,
+//+----------------------------------------------------------------+
+    //| Finalize long signal                                           |
+    //+----------------------------------------------------------------+
+    bool BuildLongSignal(const StrategyContext &context,
                          StrategySignal &signal) const
-     {
-      double entry;
-      double stop;
-      double target;
+      {
+       double entry;
+       double stop;
+       double target;
 
-      if(!BuildShortLevels(
-            context,
-            entry,
-            stop,
-            target))
-         return false;
+       if(!BuildLongLevels(
+             context,
+             entry,
+             stop,
+             target))
+          return false;
 
-      double score=ScoreShort(context);
+       double score=ScoreLong(context);
 
-      if(score<m_min_signal_score)
-         return false;
+       if(score<m_min_signal_score)
+         {
+          LogDiagnostic(context,"LONG","SCORE_BELOW_MINIMUM",score,m_min_signal_score);
+          return false;
+         }
 
-      signal.valid=true;
+       signal.valid=true;
 
-      signal.direction=SIGNAL_SHORT;
-      signal.strategy=STRATEGY_TREND_PULLBACK;
+       signal.direction=SIGNAL_LONG;
+       signal.strategy=STRATEGY_TREND_PULLBACK;
 
-      signal.symbol=context.market.symbol;
-      signal.timeframe=context.market.timeframe;
+       signal.symbol=context.market.symbol;
+       signal.timeframe=context.market.timeframe;
 
-      signal.regime=REGIME_TREND_DOWN;
+       signal.regime=REGIME_TREND_UP;
 
-      signal.score=score;
-      signal.confidence=score/100.0;
+       signal.score=score;
+       signal.confidence=score/100.0;
 
-      signal.entry=entry;
-      signal.stop=stop;
-      signal.target=target;
+       signal.entry=entry;
+       signal.stop=stop;
+       signal.target=target;
 
-      signal.timestamp=
-         context.market.closed_bar.time;
+       signal.timestamp=
+          context.market.closed_bar.time;
 
-      signal.signal_id=
-         BuildSignalId(context);
+       signal.signal_id=
+          BuildSignalId(context);
 
-      signal.reason=
-         "TrendDown + Pullback + Reclaim";
+       signal.reason=
+          "TrendUp + Pullback + Reclaim";
 
-      return true;
-     }
+       LogCandidate(context,"LONG",score);
+       return true;
+      }
+
+//+----------------------------------------------------------------+
+    //| Finalize short signal                                          |
+    //+----------------------------------------------------------------+
+    bool BuildShortSignal(const StrategyContext &context,
+                          StrategySignal &signal) const
+      {
+       double entry;
+       double stop;
+       double target;
+
+       if(!BuildShortLevels(
+             context,
+             entry,
+             stop,
+             target))
+          return false;
+
+       double score=ScoreShort(context);
+
+       if(score<m_min_signal_score)
+         {
+          LogDiagnostic(context,"SHORT","SCORE_BELOW_MINIMUM",score,m_min_signal_score);
+          return false;
+         }
+
+       signal.valid=true;
+
+       signal.direction=SIGNAL_SHORT;
+       signal.strategy=STRATEGY_TREND_PULLBACK;
+
+       signal.symbol=context.market.symbol;
+       signal.timeframe=context.market.timeframe;
+
+       signal.regime=REGIME_TREND_DOWN;
+
+       signal.score=score;
+       signal.confidence=score/100.0;
+
+       signal.entry=entry;
+       signal.stop=stop;
+       signal.target=target;
+
+       signal.timestamp=
+          context.market.closed_bar.time;
+
+       signal.signal_id=
+          BuildSignalId(context);
+
+       signal.reason=
+          "TrendDown + Pullback + Reclaim";
+
+       LogCandidate(context,"SHORT",score);
+       return true;
+      }
 
 public:
 
@@ -720,46 +851,59 @@ public:
       return STRATEGY_TREND_PULLBACK;
      }
 
-   virtual bool Evaluate(
-      const StrategyContext &context,
-      StrategySignal &signal) override
-     {
-      ResetSignal(signal);
+virtual bool Evaluate(
+       const StrategyContext &context,
+       StrategySignal &signal) override
+      {
+       ResetSignal(signal);
 
-      if(!m_initialized)
-         return false;
+       if(!m_initialized)
+         {
+          LogDiagnostic(context,"NONE","STRATEGY_NOT_INITIALIZED");
+          return false;
+         }
 
-      if(!context.trading_allowed)
-         return false;
+       if(!context.trading_allowed)
+         {
+          LogDiagnostic(context,"NONE","TRADING_NOT_ALLOWED");
+          return false;
+         }
 
-      if(!context.market.valid)
-         return false;
+       if(!context.market.valid)
+         {
+          LogDiagnostic(context,"NONE","INVALID_MARKET_DATA");
+          return false;
+         }
 
-      if(!context.features.valid)
-         return false;
+       if(!context.features.valid)
+         {
+          LogDiagnostic(context,"NONE","INVALID_FEATURES");
+          return false;
+         }
 
-      if(context.regime==REGIME_TREND_UP)
-        {
-         if(!IsLongPullback(context))
-            return false;
+       if(context.regime==REGIME_TREND_UP)
+         {
+          if(!IsLongPullback(context))
+             return false;
 
-         return BuildLongSignal(
-            context,
-            signal);
-        }
+          return BuildLongSignal(
+             context,
+             signal);
+         }
 
-      if(context.regime==REGIME_TREND_DOWN)
-        {
-         if(!IsShortPullback(context))
-            return false;
+       if(context.regime==REGIME_TREND_DOWN)
+         {
+          if(!IsShortPullback(context))
+             return false;
 
-         return BuildShortSignal(
-            context,
-            signal);
-        }
+          return BuildShortSignal(
+             context,
+             signal);
+         }
 
-      return false;
-     }
+       LogDiagnostic(context,"NONE","REGIME_MISMATCH");
+       return false;
+      }
 
    //+----------------------------------------------------------------+
    //| Status                                                         |

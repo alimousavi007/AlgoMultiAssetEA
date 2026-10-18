@@ -64,48 +64,101 @@ private:
       signal.reason="";
      }
 
-   //+----------------------------------------------------------------+
-   bool ValidateParameters() const
-     {
-      if(m_rsi_long_max<=0.0 ||
-         m_rsi_long_max>=50.0)
-         return false;
+//+----------------------------------------------------------------+
+    bool ValidateParameters() const
+      {
+       if(m_rsi_long_max<=0.0 ||
+          m_rsi_long_max>=50.0)
+          return false;
 
-      if(m_rsi_short_min<=50.0 ||
-         m_rsi_short_min>=100.0)
-         return false;
+       if(m_rsi_short_min<=50.0 ||
+          m_rsi_short_min>=100.0)
+          return false;
 
-      if(m_min_distance_atr<=0.0)
-         return false;
+       if(m_min_distance_atr<=0.0)
+          return false;
 
-      if(m_max_distance_atr<=m_min_distance_atr)
-         return false;
+       if(m_max_distance_atr<=m_min_distance_atr)
+          return false;
 
-      if(m_min_candle_strength<0.0 ||
-         m_min_candle_strength>1.0)
-         return false;
+       if(m_min_candle_strength<0.0 ||
+          m_min_candle_strength>1.0)
+          return false;
 
-      if(m_range_lookback<5)
-         return false;
+       if(m_range_lookback<5)
+          return false;
 
-      if(m_stop_atr_multiplier<=0.0)
-         return false;
+       if(m_stop_atr_multiplier<=0.0)
+          return false;
 
-      if(m_structure_buffer_atr<0.0)
-         return false;
+       if(m_structure_buffer_atr<0.0)
+          return false;
 
-      if(m_target_rr<=0.0)
-         return false;
+       if(m_target_rr<=0.0)
+          return false;
 
-      if(m_min_signal_score<0.0 ||
-         m_min_signal_score>100.0)
-         return false;
+       if(m_min_signal_score<0.0 ||
+          m_min_signal_score>100.0)
+          return false;
 
-      return true;
-     }
+       return true;
+      }
 
-   //+----------------------------------------------------------------+
-   bool GetRange(
+    //+----------------------------------------------------------------+
+    //| Log diagnostic event                                           |
+    //+----------------------------------------------------------------+
+    void LogDiagnostic(const StrategyContext &context,
+                       const string direction,
+                       const string reason_code,
+                       const double score=0.0,
+                       const double threshold=0.0) const
+      {
+       if(!context.market.valid)
+          return;
+
+       string msg=
+          "symbol="+context.market.symbol+
+          "|tf="+EnumToString(context.market.timeframe)+
+          "|bar="+TimeToString(context.market.closed_bar.time,TIME_DATE|TIME_MINUTES|TIME_SECONDS)+
+          "|strategy=MEAN_REVERSION"+
+          "|direction="+direction+
+          "|regime="+EnumToString(context.regime)+
+          "|outcome=REJECTED"+
+          "|reason="+reason_code;
+
+       if(score>0.0 || threshold>0.0)
+          msg+="|score="+DoubleToString(score,2)+"|threshold="+DoubleToString(threshold,2);
+
+       g_logger.Log(LOG_DEBUG,msg);
+      }
+
+    //+----------------------------------------------------------------+
+    //| Log candidate produced                                         |
+    //+----------------------------------------------------------------+
+    void LogCandidate(const StrategyContext &context,
+                      const string direction,
+                      const double score) const
+      {
+       if(!context.market.valid)
+          return;
+
+       string msg=
+          "symbol="+context.market.symbol+
+          "|tf="+EnumToString(context.market.timeframe)+
+          "|bar="+TimeToString(context.market.closed_bar.time,TIME_DATE|TIME_MINUTES|TIME_SECONDS)+
+          "|strategy=MEAN_REVERSION"+
+          "|direction="+direction+
+          "|regime="+EnumToString(context.regime)+
+          "|outcome=CANDIDATE"+ 
+          "|reason=NONE"+
+          "|score="+DoubleToString(score,2)+
+          "|threshold="+DoubleToString(m_min_signal_score,2);
+
+       g_logger.Log(LOG_DEBUG,msg);
+      }
+
+    //+----------------------------------------------------------------+
+    bool GetRange(
       const StrategyContext &context,
       double &range_high,
       double &range_low) const
@@ -494,98 +547,131 @@ public:
       return STRATEGY_MEAN_REVERSION;
      }
 
-   virtual bool Evaluate(
-      const StrategyContext &context,
-      StrategySignal &signal) override
-     {
-      ResetSignal(signal);
+virtual bool Evaluate(
+       const StrategyContext &context,
+       StrategySignal &signal) override
+      {
+       ResetSignal(signal);
 
-      if(!m_initialized ||
-         !context.trading_allowed ||
-         !context.market.valid ||
-         !context.features.valid)
-         return false;
+       if(!m_initialized)
+         {
+          LogDiagnostic(context,"NONE","STRATEGY_NOT_INITIALIZED");
+          return false;
+         }
 
-      if(IsLongSetup(context))
-        {
-         double score=ScoreLong(context);
+       if(!context.trading_allowed)
+         {
+          LogDiagnostic(context,"NONE","TRADING_NOT_ALLOWED");
+          return false;
+         }
 
-         if(score<m_min_signal_score)
-            return false;
+       if(!context.market.valid)
+         {
+          LogDiagnostic(context,"NONE","INVALID_MARKET_DATA");
+          return false;
+         }
 
-         double entry;
-         double stop;
-         double target;
+       if(!context.features.valid)
+         {
+          LogDiagnostic(context,"NONE","INVALID_FEATURES");
+          return false;
+         }
 
-         if(!BuildLongLevels(
-               context,
-               entry,
-               stop,
-               target))
-            return false;
+       if(IsLongSetup(context))
+         {
+          double score=ScoreLong(context);
 
-         signal.valid=true;
-         signal.direction=SIGNAL_LONG;
-         signal.strategy=STRATEGY_MEAN_REVERSION;
-         signal.symbol=context.market.symbol;
-         signal.timeframe=context.market.timeframe;
-         signal.regime=REGIME_RANGE;
-         signal.score=score;
-         signal.confidence=score/100.0;
-         signal.entry=entry;
-         signal.stop=stop;
-         signal.target=target;
-         signal.timestamp=
-            context.market.closed_bar.time;
-         signal.signal_id=
-            BuildSignalId(context);
-         signal.reason=
-            "Range + Oversold + Mean Reversion";
+          if(score<m_min_signal_score)
+            {
+             LogDiagnostic(context,"LONG","SCORE_BELOW_MINIMUM",score,m_min_signal_score);
+             return false;
+            }
 
-         return true;
-        }
+          double entry;
+          double stop;
+          double target;
 
-      if(IsShortSetup(context))
-        {
-         double score=ScoreShort(context);
+          if(!BuildLongLevels(
+                context,
+                entry,
+                stop,
+                target))
+            {
+             LogDiagnostic(context,"LONG","BUILD_LEVELS_FAILED");
+             return false;
+            }
 
-         if(score<m_min_signal_score)
-            return false;
+          signal.valid=true;
+          signal.direction=SIGNAL_LONG;
+          signal.strategy=STRATEGY_MEAN_REVERSION;
+          signal.symbol=context.market.symbol;
+          signal.timeframe=context.market.timeframe;
+          signal.regime=REGIME_RANGE;
+          signal.score=score;
+          signal.confidence=score/100.0;
+          signal.entry=entry;
+          signal.stop=stop;
+          signal.target=target;
+          signal.timestamp=
+             context.market.closed_bar.time;
+          signal.signal_id=
+             BuildSignalId(context);
+          signal.reason=
+             "Range + Oversold + Mean Reversion";
 
-         double entry;
-         double stop;
-         double target;
+          LogCandidate(context,"LONG",score);
+          return true;
+         }
 
-         if(!BuildShortLevels(
-               context,
-               entry,
-               stop,
-               target))
-            return false;
+       if(IsShortSetup(context))
+         {
+          double score=ScoreShort(context);
 
-         signal.valid=true;
-         signal.direction=SIGNAL_SHORT;
-         signal.strategy=STRATEGY_MEAN_REVERSION;
-         signal.symbol=context.market.symbol;
-         signal.timeframe=context.market.timeframe;
-         signal.regime=REGIME_RANGE;
-         signal.score=score;
-         signal.confidence=score/100.0;
-         signal.entry=entry;
-         signal.stop=stop;
-         signal.target=target;
-         signal.timestamp=
-            context.market.closed_bar.time;
-         signal.signal_id=
-            BuildSignalId(context);
-         signal.reason=
-            "Range + Overbought + Mean Reversion";
+          if(score<m_min_signal_score)
+            {
+             LogDiagnostic(context,"SHORT","SCORE_BELOW_MINIMUM",score,m_min_signal_score);
+             return false;
+            }
 
-         return true;
-        }
+          double entry;
+          double stop;
+          double target;
 
-      return false;
-     }
-  };
+          if(!BuildShortLevels(
+                context,
+                entry,
+                stop,
+                target))
+            {
+             LogDiagnostic(context,"SHORT","BUILD_LEVELS_FAILED");
+             return false;
+            }
+
+          signal.valid=true;
+          signal.direction=SIGNAL_SHORT;
+          signal.strategy=STRATEGY_MEAN_REVERSION;
+          signal.symbol=context.market.symbol;
+          signal.timeframe=context.market.timeframe;
+          signal.regime=REGIME_RANGE;
+          signal.score=score;
+          signal.confidence=score/100.0;
+          signal.entry=entry;
+          signal.stop=stop;
+          signal.target=target;
+          signal.timestamp=
+             context.market.closed_bar.time;
+          signal.signal_id=
+             BuildSignalId(context);
+          signal.reason=
+             "Range + Overbought + Mean Reversion";
+
+          LogCandidate(context,"SHORT",score);
+          return true;
+         }
+
+       LogDiagnostic(context,"NONE","NO_SETUP_DETECTED");
+       return false;
+      }
+   };
 
 #endif

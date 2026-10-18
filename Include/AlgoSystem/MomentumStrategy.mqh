@@ -50,33 +50,84 @@ private:
 
    bool m_initialized;
 
-   //+----------------------------------------------------------------+
-   //| Reset signal                                                   |
-   //+----------------------------------------------------------------+
-   void ResetSignal(StrategySignal &signal) const
-     {
-      signal.valid=false;
+//+----------------------------------------------------------------+
+    //| Log diagnostic event                                           |
+    //+----------------------------------------------------------------+
+    void LogDiagnostic(const StrategyContext &context,
+                       const string direction,
+                       const string reason_code,
+                       const double score=0.0,
+                       const double threshold=0.0) const
+      {
+       if(!context.market.valid)
+          return;
 
-      signal.direction=SIGNAL_NONE;
-      signal.strategy=STRATEGY_MOMENTUM;
+       string msg=
+          "symbol="+context.market.symbol+
+          "|tf="+EnumToString(context.market.timeframe)+
+          "|bar="+TimeToString(context.market.closed_bar.time,TIME_DATE|TIME_MINUTES|TIME_SECONDS)+
+          "|strategy=MOMENTUM"+
+          "|direction="+direction+
+          "|regime="+EnumToString(context.regime)+
+          "|outcome=REJECTED"+
+          "|reason="+reason_code;
 
-      signal.symbol="";
-      signal.timeframe=PERIOD_CURRENT;
+       if(score>0.0 || threshold>0.0)
+          msg+="|score="+DoubleToString(score,2)+"|threshold="+DoubleToString(threshold,2);
 
-      signal.regime=REGIME_UNKNOWN;
+       g_logger.Log(LOG_DEBUG,msg);
+      }
 
-      signal.score=0.0;
-      signal.confidence=0.0;
+    //+----------------------------------------------------------------+
+    //| Log candidate produced                                         |
+    //+----------------------------------------------------------------+
+    void LogCandidate(const StrategyContext &context,
+                      const string direction,
+                      const double score) const
+      {
+       if(!context.market.valid)
+          return;
 
-      signal.entry=0.0;
-      signal.stop=0.0;
-      signal.target=0.0;
+       string msg=
+          "symbol="+context.market.symbol+
+          "|tf="+EnumToString(context.market.timeframe)+
+          "|bar="+TimeToString(context.market.closed_bar.time,TIME_DATE|TIME_MINUTES|TIME_SECONDS)+
+          "|strategy=MOMENTUM"+
+          "|direction="+direction+
+          "|regime="+EnumToString(context.regime)+
+          "|outcome=CANDIDATE"+
+          "|score="+DoubleToString(score,2);
 
-      signal.timestamp=0;
+       g_logger.Log(LOG_DEBUG,msg);
+      }
 
-      signal.signal_id="";
-      signal.reason="";
-     }
+    //+----------------------------------------------------------------+
+    //| Reset signal                                                   |
+    //+----------------------------------------------------------------+
+    void ResetSignal(StrategySignal &signal) const
+      {
+       signal.valid=false;
+
+       signal.direction=SIGNAL_NONE;
+       signal.strategy=STRATEGY_MOMENTUM;
+
+       signal.symbol="";
+       signal.timeframe=PERIOD_CURRENT;
+
+       signal.regime=REGIME_UNKNOWN;
+
+       signal.score=0.0;
+       signal.confidence=0.0;
+
+       signal.entry=0.0;
+       signal.stop=0.0;
+       signal.target=0.0;
+
+       signal.timestamp=0;
+
+       signal.signal_id="";
+       signal.reason="";
+      }
 
    //+----------------------------------------------------------------+
    //| Validate parameters                                            |
@@ -128,202 +179,286 @@ private:
       return true;
      }
 
-   //+----------------------------------------------------------------+
-   //| Check directional regime                                      |
-   //+----------------------------------------------------------------+
-   bool IsLongRegime(const StrategyContext &context) const
-     {
-      if(context.regime==REGIME_TREND_UP)
-         return true;
+//+----------------------------------------------------------------+
+    //| Check directional regime                                      |
+    //+----------------------------------------------------------------+
+    bool IsLongRegime(const StrategyContext &context) const
+      {
+       if(context.regime==REGIME_TREND_UP)
+          return true;
 
-      if(context.regime==REGIME_BREAKOUT &&
-         context.features.ema_fast>
-         context.features.ema_slow)
-         return true;
+       if(context.regime==REGIME_BREAKOUT &&
+          context.features.ema_fast>
+          context.features.ema_slow)
+          return true;
 
-      return false;
-     }
+       return false;
+      }
 
-   bool IsShortRegime(const StrategyContext &context) const
-     {
-      if(context.regime==REGIME_TREND_DOWN)
-         return true;
+    bool IsShortRegime(const StrategyContext &context) const
+      {
+       if(context.regime==REGIME_TREND_DOWN)
+          return true;
 
-      if(context.regime==REGIME_BREAKOUT &&
-         context.features.ema_fast<
-         context.features.ema_slow)
-         return true;
+       if(context.regime==REGIME_BREAKOUT &&
+          context.features.ema_fast<
+          context.features.ema_slow)
+          return true;
 
-      return false;
-     }
+       return false;
+      }
 
-   //+----------------------------------------------------------------+
-   //| Candle direction/strength                                      |
-   //+----------------------------------------------------------------+
-   bool IsBullishMomentumCandle(
-      const StrategyContext &context) const
-     {
-      if(context.market.closed_bar.close<=
-         context.market.closed_bar.open)
-         return false;
+    //+----------------------------------------------------------------+
+    //| Candle direction/strength                                      |
+    //+----------------------------------------------------------------+
+    bool IsBullishMomentumCandle(
+       const StrategyContext &context) const
+      {
+       if(context.market.closed_bar.close<=
+          context.market.closed_bar.open)
+         {
+          LogDiagnostic(context,"LONG","CANDLE_NOT_BULLISH");
+          return false;
+         }
 
-      if(context.features.candle_strength<
-         m_min_candle_strength)
-         return false;
+       if(context.features.candle_strength<
+          m_min_candle_strength)
+         {
+          LogDiagnostic(context,"LONG","CANDLE_STRENGTH_LOW");
+          return false;
+         }
 
-      if(context.features.candle_range<=0.0)
-         return false;
+       if(context.features.candle_range<=0.0)
+         {
+          LogDiagnostic(context,"LONG","INVALID_CANDLE_RANGE");
+          return false;
+         }
 
-      double close_position=
-         (context.market.closed_bar.close-
-          context.market.closed_bar.low)/
-         context.features.candle_range;
+       double close_position=
+          (context.market.closed_bar.close-
+           context.market.closed_bar.low)/
+          context.features.candle_range;
 
-      return (close_position>=0.70);
-     }
+       return (close_position>=0.70);
+      }
 
-   bool IsBearishMomentumCandle(
-      const StrategyContext &context) const
-     {
-      if(context.market.closed_bar.close>=
-         context.market.closed_bar.open)
-         return false;
+    bool IsBearishMomentumCandle(
+       const StrategyContext &context) const
+      {
+       if(context.market.closed_bar.close>=
+          context.market.closed_bar.open)
+         {
+          LogDiagnostic(context,"SHORT","CANDLE_NOT_BEARISH");
+          return false;
+         }
 
-      if(context.features.candle_strength<
-         m_min_candle_strength)
-         return false;
+       if(context.features.candle_strength<
+          m_min_candle_strength)
+         {
+          LogDiagnostic(context,"SHORT","CANDLE_STRENGTH_LOW");
+          return false;
+         }
 
-      if(context.features.candle_range<=0.0)
-         return false;
+       if(context.features.candle_range<=0.0)
+         {
+          LogDiagnostic(context,"SHORT","INVALID_CANDLE_RANGE");
+          return false;
+         }
 
-      double close_position=
-         (context.market.closed_bar.high-
-          context.market.closed_bar.close)/
-         context.features.candle_range;
+       double close_position=
+          (context.market.closed_bar.high-
+           context.market.closed_bar.close)/
+          context.features.candle_range;
 
-      return (close_position>=0.70);
-     }
+       return (close_position>=0.70);
+      }
 
-   //+----------------------------------------------------------------+
-   //| Avoid excessive extension                                      |
-   //+----------------------------------------------------------------+
-   bool IsLongTooExtended(
-      const StrategyContext &context) const
-     {
-      if(context.features.atr<=0.0)
-         return true;
+    //+----------------------------------------------------------------+
+    //| Avoid excessive extension                                      |
+    //+----------------------------------------------------------------+
+    bool IsLongTooExtended(
+       const StrategyContext &context) const
+      {
+       if(context.features.atr<=0.0)
+         {
+          LogDiagnostic(context,"LONG","INVALID_ATR");
+          return true;
+         }
 
-      double extension=
-         (context.market.closed_bar.close-
-          context.features.ema_fast)/
-         context.features.atr;
+       double extension=
+          (context.market.closed_bar.close-
+           context.features.ema_fast)/
+          context.features.atr;
 
-      return (extension>m_max_extension_atr);
-     }
+       return (extension>m_max_extension_atr);
+      }
 
-   bool IsShortTooExtended(
-      const StrategyContext &context) const
-     {
-      if(context.features.atr<=0.0)
-         return true;
+    bool IsShortTooExtended(
+       const StrategyContext &context) const
+      {
+       if(context.features.atr<=0.0)
+         {
+          LogDiagnostic(context,"SHORT","INVALID_ATR");
+          return true;
+         }
 
-      double extension=
-         (context.features.ema_fast-
-          context.market.closed_bar.close)/
-         context.features.atr;
+       double extension=
+          (context.features.ema_fast-
+           context.market.closed_bar.close)/
+          context.features.atr;
 
-      return (extension>m_max_extension_atr);
-     }
+       return (extension>m_max_extension_atr);
+      }
 
-   //+----------------------------------------------------------------+
-   //| Long momentum setup                                            |
-   //+----------------------------------------------------------------+
-   bool IsLongSetup(
-      const StrategyContext &context) const
-     {
-      if(!IsLongRegime(context))
-         return false;
+//+----------------------------------------------------------------+
+    //| Long momentum setup                                            |
+    //+----------------------------------------------------------------+
+    bool IsLongSetup(
+       const StrategyContext &context) const
+      {
+       if(!IsLongRegime(context))
+         {
+          LogDiagnostic(context,"LONG","REGIME_MISMATCH");
+          return false;
+         }
 
-      if(context.features.atr<=0.0)
-         return false;
+       if(context.features.atr<=0.0)
+         {
+          LogDiagnostic(context,"LONG","INVALID_ATR");
+          return false;
+         }
 
-      if(context.features.ema_fast<=
-         context.features.ema_slow)
-         return false;
+       if(context.features.ema_fast<=
+          context.features.ema_slow)
+         {
+          LogDiagnostic(context,"LONG","EMA_ALIGNMENT_FAILED");
+          return false;
+         }
 
-      if(context.features.macd_main<=
-         context.features.macd_signal)
-         return false;
+       if(context.features.macd_main<=
+          context.features.macd_signal)
+         {
+          LogDiagnostic(context,"LONG","MACD_ALIGNMENT_FAILED");
+          return false;
+         }
 
-      if(context.features.rsi<m_min_rsi_long ||
-         context.features.rsi>m_max_rsi_long)
-         return false;
+       if(context.features.rsi<m_min_rsi_long ||
+          context.features.rsi>m_max_rsi_long)
+         {
+          LogDiagnostic(context,"LONG","RSI_OUT_OF_RANGE");
+          return false;
+         }
 
-      if(context.features.roc<m_min_roc_long ||
-         context.features.roc>m_max_roc_long)
-         return false;
+       if(context.features.roc<m_min_roc_long ||
+          context.features.roc>m_max_roc_long)
+         {
+          LogDiagnostic(context,"LONG","ROC_OUT_OF_RANGE");
+          return false;
+         }
 
-      if(context.features.volume_ratio<
-         m_min_volume_ratio)
-         return false;
+       if(context.features.volume_ratio<
+          m_min_volume_ratio)
+         {
+          LogDiagnostic(context,"LONG","VOLUME_RATIO_LOW");
+          return false;
+         }
 
-      if(context.features.candle_range<
-         context.features.atr*m_min_range_atr)
-         return false;
+       if(context.features.candle_range<
+          context.features.atr*m_min_range_atr)
+         {
+          LogDiagnostic(context,"LONG","CANDLE_RANGE_INSUFFICIENT");
+          return false;
+         }
 
-      if(!IsBullishMomentumCandle(context))
-         return false;
+       if(!IsBullishMomentumCandle(context))
+         {
+          // LogDiagnostic already called inside
+          return false;
+         }
 
-      if(IsLongTooExtended(context))
-         return false;
+       if(IsLongTooExtended(context))
+         {
+          LogDiagnostic(context,"LONG","PRICE_OVEREXTENDED");
+          return false;
+         }
 
-      return true;
-     }
+       return true;
+      }
 
-   //+----------------------------------------------------------------+
-   //| Short momentum setup                                           |
-   //+----------------------------------------------------------------+
-   bool IsShortSetup(
-      const StrategyContext &context) const
-     {
-      if(!IsShortRegime(context))
-         return false;
+//+----------------------------------------------------------------+
+    //| Short momentum setup                                           |
+    //+----------------------------------------------------------------+
+    bool IsShortSetup(
+       const StrategyContext &context) const
+      {
+       if(!IsShortRegime(context))
+         {
+          LogDiagnostic(context,"SHORT","REGIME_MISMATCH");
+          return false;
+         }
 
-      if(context.features.atr<=0.0)
-         return false;
+       if(context.features.atr<=0.0)
+         {
+          LogDiagnostic(context,"SHORT","INVALID_ATR");
+          return false;
+         }
 
-      if(context.features.ema_fast>=
-         context.features.ema_slow)
-         return false;
+       if(context.features.ema_fast>=
+          context.features.ema_slow)
+         {
+          LogDiagnostic(context,"SHORT","EMA_ALIGNMENT_FAILED");
+          return false;
+         }
 
-      if(context.features.macd_main>=
-         context.features.macd_signal)
-         return false;
+       if(context.features.macd_main>=
+          context.features.macd_signal)
+         {
+          LogDiagnostic(context,"SHORT","MACD_ALIGNMENT_FAILED");
+          return false;
+         }
 
-      if(context.features.rsi<m_min_rsi_short ||
-         context.features.rsi>m_max_rsi_short)
-         return false;
+       if(context.features.rsi<m_min_rsi_short ||
+          context.features.rsi>m_max_rsi_short)
+         {
+          LogDiagnostic(context,"SHORT","RSI_OUT_OF_RANGE");
+          return false;
+         }
 
-      if(context.features.roc<m_min_roc_short ||
-         context.features.roc>m_max_roc_short)
-         return false;
+       if(context.features.roc<m_min_roc_short ||
+          context.features.roc>m_max_roc_short)
+         {
+          LogDiagnostic(context,"SHORT","ROC_OUT_OF_RANGE");
+          return false;
+         }
 
-      if(context.features.volume_ratio<
-         m_min_volume_ratio)
-         return false;
+       if(context.features.volume_ratio<
+          m_min_volume_ratio)
+         {
+          LogDiagnostic(context,"SHORT","VOLUME_RATIO_LOW");
+          return false;
+         }
 
-      if(context.features.candle_range<
-         context.features.atr*m_min_range_atr)
-         return false;
+       if(context.features.candle_range<
+          context.features.atr*m_min_range_atr)
+         {
+          LogDiagnostic(context,"SHORT","CANDLE_RANGE_INSUFFICIENT");
+          return false;
+         }
 
-      if(!IsBearishMomentumCandle(context))
-         return false;
+       if(!IsBearishMomentumCandle(context))
+         {
+          // LogDiagnostic already called inside
+          return false;
+         }
 
-      if(IsShortTooExtended(context))
-         return false;
+       if(IsShortTooExtended(context))
+         {
+          LogDiagnostic(context,"SHORT","PRICE_OVEREXTENDED");
+          return false;
+         }
 
-      return true;
-     }
+       return true;
+      }
 
    //+----------------------------------------------------------------+
    //| Long score                                                     |
@@ -454,85 +589,97 @@ private:
          100.0);
      }
 
-   //+----------------------------------------------------------------+
-   //| Build Long levels                                              |
-   //+----------------------------------------------------------------+
-   bool BuildLongLevels(
-      const StrategyContext &context,
-      double &entry,
-      double &stop,
-      double &target) const
-     {
-      entry=context.market.closed_bar.close;
+//+----------------------------------------------------------------+
+    //| Build Long levels                                              |
+    //+----------------------------------------------------------------+
+    bool BuildLongLevels(
+       const StrategyContext &context,
+       double &entry,
+       double &stop,
+       double &target) const
+      {
+       entry=context.market.closed_bar.close;
 
-      if(entry<=0.0 ||
-         context.features.atr<=0.0)
-         return false;
+       if(entry<=0.0 ||
+          context.features.atr<=0.0)
+         {
+          LogDiagnostic(context,"LONG","INVALID_ENTRY_OR_ATR");
+          return false;
+         }
 
-      double atr_stop=
-         entry-
-         context.features.atr*m_stop_atr_multiplier;
+       double atr_stop=
+          entry-
+          context.features.atr*m_stop_atr_multiplier;
 
-      double structural_stop=
-         context.market.closed_bar.low-
-         context.features.atr*m_structure_buffer_atr;
+       double structural_stop=
+          context.market.closed_bar.low-
+          context.features.atr*m_structure_buffer_atr;
 
-      stop=MathMin(
-         atr_stop,
-         structural_stop);
+       stop=MathMin(
+          atr_stop,
+          structural_stop);
 
-      if(stop<=0.0 ||
-         stop>=entry)
-         return false;
+       if(stop<=0.0 ||
+          stop>=entry)
+         {
+          LogDiagnostic(context,"LONG","INVALID_STOP");
+          return false;
+         }
 
-      double distance=entry-stop;
+       double distance=entry-stop;
 
-      target=
-         entry+
-         distance*m_target_rr;
+       target=
+          entry+
+          distance*m_target_rr;
 
-      return (target>entry);
-     }
+       return (target>entry);
+      }
 
-   //+----------------------------------------------------------------+
-   //| Build Short levels                                             |
-   //+----------------------------------------------------------------+
-   bool BuildShortLevels(
-      const StrategyContext &context,
-      double &entry,
-      double &stop,
-      double &target) const
-     {
-      entry=context.market.closed_bar.close;
+    //+----------------------------------------------------------------+
+    //| Build Short levels                                             |
+    //+----------------------------------------------------------------+
+    bool BuildShortLevels(
+       const StrategyContext &context,
+       double &entry,
+       double &stop,
+       double &target) const
+      {
+       entry=context.market.closed_bar.close;
 
-      if(entry<=0.0 ||
-         context.features.atr<=0.0)
-         return false;
+       if(entry<=0.0 ||
+          context.features.atr<=0.0)
+         {
+          LogDiagnostic(context,"SHORT","INVALID_ENTRY_OR_ATR");
+          return false;
+         }
 
-      double atr_stop=
-         entry+
-         context.features.atr*m_stop_atr_multiplier;
+       double atr_stop=
+          entry+
+          context.features.atr*m_stop_atr_multiplier;
 
-      double structural_stop=
-         context.market.closed_bar.high+
-         context.features.atr*m_structure_buffer_atr;
+       double structural_stop=
+          context.market.closed_bar.high+
+          context.features.atr*m_structure_buffer_atr;
 
-      stop=MathMax(
-         atr_stop,
-         structural_stop);
+       stop=MathMax(
+          atr_stop,
+          structural_stop);
 
-      if(stop<=entry)
-         return false;
+       if(stop<=entry)
+         {
+          LogDiagnostic(context,"SHORT","INVALID_STOP");
+          return false;
+         }
 
-      double distance=stop-entry;
+       double distance=stop-entry;
 
-      target=
-         entry-
-         distance*m_target_rr;
+       target=
+          entry-
+          distance*m_target_rr;
 
-      return (target>0.0 &&
-              target<entry);
-     }
+       return (target>0.0 &&
+               target<entry);
+      }
 
    //+----------------------------------------------------------------+
    //| Signal ID                                                      |
@@ -550,109 +697,117 @@ private:
                 TIME_DATE|TIME_MINUTES|TIME_SECONDS);
      }
 
-   //+----------------------------------------------------------------+
-   //| Long signal                                                    |
-   //+----------------------------------------------------------------+
-   bool BuildLongSignal(
-      const StrategyContext &context,
-      StrategySignal &signal) const
-     {
-      double score=ScoreLong(context);
+//+----------------------------------------------------------------+
+    //| Long signal                                                    |
+    //+----------------------------------------------------------------+
+    bool BuildLongSignal(
+       const StrategyContext &context,
+       StrategySignal &signal) const
+      {
+       double score=ScoreLong(context);
 
-      if(score<m_min_signal_score)
-         return false;
+       if(score<m_min_signal_score)
+         {
+          LogDiagnostic(context,"LONG","SCORE_BELOW_MINIMUM",score,m_min_signal_score);
+          return false;
+         }
 
-      double entry;
-      double stop;
-      double target;
+       double entry;
+       double stop;
+       double target;
 
-      if(!BuildLongLevels(
-            context,
-            entry,
-            stop,
-            target))
-         return false;
+       if(!BuildLongLevels(
+             context,
+             entry,
+             stop,
+             target))
+          return false;
 
-      signal.valid=true;
+       signal.valid=true;
 
-      signal.direction=SIGNAL_LONG;
-      signal.strategy=STRATEGY_MOMENTUM;
+       signal.direction=SIGNAL_LONG;
+       signal.strategy=STRATEGY_MOMENTUM;
 
-      signal.symbol=context.market.symbol;
-      signal.timeframe=context.market.timeframe;
+       signal.symbol=context.market.symbol;
+       signal.timeframe=context.market.timeframe;
 
-      signal.regime=context.regime;
+       signal.regime=context.regime;
 
-      signal.score=score;
-      signal.confidence=score/100.0;
+       signal.score=score;
+       signal.confidence=score/100.0;
 
-      signal.entry=entry;
-      signal.stop=stop;
-      signal.target=target;
+       signal.entry=entry;
+       signal.stop=stop;
+       signal.target=target;
 
-      signal.timestamp=
-         context.market.closed_bar.time;
+       signal.timestamp=
+          context.market.closed_bar.time;
 
-      signal.signal_id=
-         BuildSignalId(context);
+       signal.signal_id=
+          BuildSignalId(context);
 
-      signal.reason=
-         "Momentum + MACD + RSI + ROC + Volume";
+       signal.reason=
+          "Momentum + MACD + RSI + ROC + Volume";
 
-      return true;
-     }
+       LogCandidate(context,"LONG",score);
+       return true;
+      }
 
-   //+----------------------------------------------------------------+
-   //| Short signal                                                   |
-   //+----------------------------------------------------------------+
-   bool BuildShortSignal(
-      const StrategyContext &context,
-      StrategySignal &signal) const
-     {
-      double score=ScoreShort(context);
+    //+----------------------------------------------------------------+
+    //| Short signal                                                   |
+    //+----------------------------------------------------------------+
+    bool BuildShortSignal(
+       const StrategyContext &context,
+       StrategySignal &signal) const
+      {
+       double score=ScoreShort(context);
 
-      if(score<m_min_signal_score)
-         return false;
+       if(score<m_min_signal_score)
+         {
+          LogDiagnostic(context,"SHORT","SCORE_BELOW_MINIMUM",score,m_min_signal_score);
+          return false;
+         }
 
-      double entry;
-      double stop;
-      double target;
+       double entry;
+       double stop;
+       double target;
 
-      if(!BuildShortLevels(
-            context,
-            entry,
-            stop,
-            target))
-         return false;
+       if(!BuildShortLevels(
+             context,
+             entry,
+             stop,
+             target))
+          return false;
 
-      signal.valid=true;
+       signal.valid=true;
 
-      signal.direction=SIGNAL_SHORT;
-      signal.strategy=STRATEGY_MOMENTUM;
+       signal.direction=SIGNAL_SHORT;
+       signal.strategy=STRATEGY_MOMENTUM;
 
-      signal.symbol=context.market.symbol;
-      signal.timeframe=context.market.timeframe;
+       signal.symbol=context.market.symbol;
+       signal.timeframe=context.market.timeframe;
 
-      signal.regime=context.regime;
+       signal.regime=context.regime;
 
-      signal.score=score;
-      signal.confidence=score/100.0;
+       signal.score=score;
+       signal.confidence=score/100.0;
 
-      signal.entry=entry;
-      signal.stop=stop;
-      signal.target=target;
+       signal.entry=entry;
+       signal.stop=stop;
+       signal.target=target;
 
-      signal.timestamp=
-         context.market.closed_bar.time;
+       signal.timestamp=
+          context.market.closed_bar.time;
 
-      signal.signal_id=
-         BuildSignalId(context);
+       signal.signal_id=
+          BuildSignalId(context);
 
-      signal.reason=
-         "Momentum + MACD + RSI + ROC + Volume";
+       signal.reason=
+          "Momentum + MACD + RSI + ROC + Volume";
 
-      return true;
-     }
+       LogCandidate(context,"SHORT",score);
+       return true;
+      }
 
 public:
 
@@ -714,37 +869,47 @@ public:
       return STRATEGY_MOMENTUM;
      }
 
-   //+----------------------------------------------------------------+
-   //| Evaluate                                                       |
-   //+----------------------------------------------------------------+
-   virtual bool Evaluate(
-      const StrategyContext &context,
-      StrategySignal &signal) override
-     {
-      ResetSignal(signal);
+//+----------------------------------------------------------------+
+    //| Evaluate                                                       |
+    //+----------------------------------------------------------------+
+    virtual bool Evaluate(
+       const StrategyContext &context,
+       StrategySignal &signal) override
+      {
+       ResetSignal(signal);
 
-      if(!m_initialized)
-         return false;
+       if(!m_initialized)
+         {
+          LogDiagnostic(context,"NONE","STRATEGY_NOT_INITIALIZED");
+          return false;
+         }
 
-      if(!context.trading_allowed)
-         return false;
+       if(!context.trading_allowed)
+         {
+          LogDiagnostic(context,"NONE","TRADING_NOT_ALLOWED");
+          return false;
+         }
 
-      if(!context.market.valid ||
-         !context.features.valid)
-         return false;
+       if(!context.market.valid ||
+          !context.features.valid)
+         {
+          LogDiagnostic(context,"NONE","INVALID_MARKET_OR_FEATURES");
+          return false;
+         }
 
-      if(IsLongSetup(context))
-         return BuildLongSignal(
-            context,
-            signal);
+       if(IsLongSetup(context))
+          return BuildLongSignal(
+             context,
+             signal);
 
-      if(IsShortSetup(context))
-         return BuildShortSignal(
-            context,
-            signal);
+       if(IsShortSetup(context))
+          return BuildShortSignal(
+             context,
+             signal);
 
-      return false;
-     }
+       LogDiagnostic(context,"NONE","NO_SETUP_DETECTED");
+       return false;
+      }
 
    bool IsInitialized() const
      {

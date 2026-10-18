@@ -1,26 +1,27 @@
+//+------------------------------------------------------------------+
+//|                                                      ProjectName |
+//|                                      Copyright 2020, CompanyName |
+//|                                       http://www.companyname.net |
+//+------------------------------------------------------------------+
 #property strict
-#property version   "1.001"
-#property description "Multi-Asset Algorithmic EA: XAU/XAG/BTC | Scalp/Day/Swing | Signal-only by default"
+#property version   "1.002"
+#property description "Multi-Asset Algorithmic EA: Forex | Scalp/Day/Swing | Hybrid Signal Engine | Signal-only by default"
 
 #include "../Include/AlgoSystem/Constants.mqh"
 #include "../Include/AlgoSystem/Types.mqh"
+#include "../Include/AlgoSystem/Interfaces.mqh"
+#include "../Include/AlgoSystem/HybridTypes.mqh"
 #include "../Include/AlgoSystem/Config.mqh"
 #include "../Include/AlgoSystem/Utilities.mqh"
 #include "../Include/AlgoSystem/MarketData.mqh"
 #include "../Include/AlgoSystem/Indicators.mqh"
-#include "../Include/AlgoSystem/RegimeEngine.mqh"
-#include "../Include/AlgoSystem/TrendStrategy.mqh"
-#include "../Include/AlgoSystem/BreakoutStrategy.mqh"
-#include "../Include/AlgoSystem/MomentumStrategy.mqh"
-#include "../Include/AlgoSystem/MeanReversionStrategy.mqh"
-#include "../Include/AlgoSystem/RelativeValueStrategy.mqh"
-#include "../Include/AlgoSystem/SignalEngine.mqh"
+#include "../Include/AlgoSystem/HybridEngine.mqh"
+#include "../Include/AlgoSystem/HybridDashboard.mqh"
 #include "../Include/AlgoSystem/RiskEngine.mqh"
 #include "../Include/AlgoSystem/PortfolioRisk.mqh"
 #include "../Include/AlgoSystem/TradeExecutor.mqh"
 #include "../Include/AlgoSystem/PositionManager.mqh"
 #include "../Include/AlgoSystem/Logger.mqh"
-#include "../Include/AlgoSystem/Dashboard.mqh"
 #include "../Include/AlgoSystem/Statistics.mqh"
 #include "../Include/AlgoSystem/TesterFitness.mqh"
 #include "../Include/AlgoSystem/Optimization.mqh"
@@ -28,24 +29,71 @@
 #include "../Include/AlgoSystem/SessionFilter.mqh"
 
 //==================================================================
-// Inputs
+// Inputs — Reorganized into logical groups
 //==================================================================
-input group "SYSTEM"
-input ENUM_TRADING_PROFILE InpProfile=PROFILE_DAY;
-input ENUM_TRADING_MODE    InpMode=MODE_SIGNAL_ONLY;
-input bool                 InpLiveAutoConfirm=false;
-input bool                 InpDashboard=true;
-input ENUM_LOG_LEVEL       InpLogLevel=LOG_INFO;
-input bool                 InpLogFile=true;
-input bool                 InpLogFlushEachWrite=true;
-input int                  InpLogSummarySeconds=60;
+input group "01 — General"
+input ENUM_TRADING_STYLE InpTradingStyle=STYLE_DAY_TRADING;
+input ENUM_TRADING_MODE  InpMode=MODE_SIGNAL_ONLY;
+input bool               InpLiveAutoConfirm=false;
+input bool               InpDashboard=true;
+input ENUM_LOG_LEVEL     InpLogLevel=LOG_INFO;
+input bool               InpLogFile=true;
+input bool               InpLogFlushEachWrite=true;
+input int                InpLogSummarySeconds=60;
 
-input group "SYMBOLS"
+input group "02 — Symbols and Timeframes"
 input string InpGoldSymbol="XAUUSDb";
 input string InpSilverSymbol="XAGUSDb";
 input string InpBitcoinSymbol="BTCUSD";
 
-input group "RISK"
+input group "03 — Hybrid Decision"
+input double InpMinRR=1.50;
+input double InpMinScore=70.0;
+input double InpConflictThreshold=15.0;
+input double InpEntryToleranceScalp=5.0;
+input double InpEntryToleranceDay=20.0;
+input double InpEntryToleranceSwing=50.0;
+input bool   InpAllowMeanReversion=false;
+
+input group "04 — Volume Profile"
+input int    InpProfileSessionBars=78;
+input int    InpProfileRollingBars=156;
+input double InpValueAreaPercent=0.68;
+input bool   InpProfileEnabled=true;
+
+input group "05 — Liquidity and Structure"
+input int    InpSwingLookback=5;
+input int    InpEqualTolerancePoints=3;
+input int    InpMaxLevelAgeBars=100;
+input int    InpSweepConfirmBars=3;
+
+input group "06 — Divergence and Momentum"
+input int    InpRSIPeriod=14;
+input int    InpMACD_Fast=12;
+input int    InpMACD_Slow=26;
+input int    InpMACD_Signal=9;
+input double InpPivotTolerancePercent=0.02;
+input int    InpMaxDivergenceAgeBars=30;
+input int    InpMomentumLookback=50;
+
+input group "07 — Regime"
+input int    InpADXPeriod=14;
+input int    InpADXTrendThreshold=25;
+input double InpHighVolatilityRatio=1.50;
+input double InpLowVolatilityRatio=0.70;
+input int    InpRangeLookback=20;
+input int    InpHysteresisBars=3;
+
+input group "08 — News and Event Risk"
+input bool   InpNewsEnabled=false;
+input bool   InpNewsPreventNewEntries=true;
+input int    InpNewsBlackoutMinutesBefore=30;
+input int    InpNewsBlackoutMinutesAfter=30;
+input int    InpNewsCooldownMinutes=60;
+input int    InpNewsImpactThreshold=3;
+input bool   InpNewsClosePositions=false;
+
+input group "09 — Risk and Execution"
 input double InpRiskPercent=1.0;
 input double InpDailyLossLimit=3.0;
 input double InpMonthlyLossLimit=10.0;
@@ -55,80 +103,22 @@ input int    InpMaxPositionsPerSymbol=1;
 input int    InpMaxPositionsPerStrategy=1;
 input double InpMaxPortfolioRisk=3.0;
 input double InpMaxPreciousMetalsRisk=2.0;
-input double InpMinRR=1.50;
 input double InpMarginSafetyFraction=0.80;
+input ulong  InpDeviationPoints=20;
 
-input group "SIGNAL"
-input double InpMinimumSignalScore=70.0;
-input double InpConflictThreshold=5.0;
-input bool   InpEnableMeanReversion=false;
-input bool   InpEnableRelativeValue=false;
-
-input group "PROFILE STRATEGY POLICY"
-input bool   InpUseProfileSignalScoreOverrides=false;
-input bool   InpScalpTrendEnabled=true;
-input bool   InpScalpBreakoutEnabled=true;
-input bool   InpScalpMomentumEnabled=true;
-input bool   InpScalpMeanReversionEnabled=true;
-input bool   InpDayTrendEnabled=true;
-input bool   InpDayBreakoutEnabled=true;
-input bool   InpDayMomentumEnabled=true;
-input bool   InpDayMeanReversionEnabled=true;
-input bool   InpSwingTrendEnabled=true;
-input bool   InpSwingBreakoutEnabled=true;
-input bool   InpSwingMomentumEnabled=true;
-input bool   InpSwingMeanReversionEnabled=true;
-input double InpScalpTrendMinimumScore=70.0;
-input double InpScalpBreakoutMinimumScore=70.0;
-input double InpScalpMomentumMinimumScore=70.0;
-input double InpScalpMeanReversionMinimumScore=70.0;
-input double InpDayTrendMinimumScore=70.0;
-input double InpDayBreakoutMinimumScore=70.0;
-input double InpDayMomentumMinimumScore=70.0;
-input double InpDayMeanReversionMinimumScore=70.0;
-input double InpSwingTrendMinimumScore=70.0;
-input double InpSwingBreakoutMinimumScore=70.0;
-input double InpSwingMomentumMinimumScore=70.0;
-input double InpSwingMeanReversionMinimumScore=70.0;
-
-input group "FEATURES"
-input int InpEMA_Fast=20;
-input int InpEMA_Slow=50;
-input int InpEMA_Long=200;
-input int InpADX_Period=14;
-input int InpATR_Period=14;
-input int InpRSI_Period=14;
-input int InpMACD_Fast=12;
-input int InpMACD_Slow=26;
-input int InpMACD_Signal=9;
-input int InpROC_Period=10;
-input int InpVolume_Period=20;
-
-input group "REGIME"
-input int    InpADXTrendThreshold=25;
-input double InpHighVolatilityRatio=1.50;
-input double InpLowVolatilityRatio=0.70;
-input int    InpRangeLookback=20;
-input double InpRegimeBreakoutBufferATR=0.10;
-input double InpRangeWidthATR=4.0;
-input double InpTrendEMASepATR=0.25;
-
-input group "BREAKOUT"
-input int    InpBreakoutLookback=20;
-input double InpBreakoutBufferATR=0.10;
-input double InpBreakoutRangeATR=0.80;
-input double InpBreakoutVolumeRatio=1.20;
-input double InpBreakoutCandleStrength=0.50;
-input double InpBreakoutStopATR=1.50;
-input double InpBreakoutStructureBufferATR=0.20;
-input double InpBreakoutRR=1.50;
-
-input group "SESSION"
+input group "10 — Sessions and Filters"
 input bool InpSessionFilter=true;
 input int  InpSessionStartHour=0;
 input int  InpSessionEndHour=24;
+input bool InpUseSpreadFilter=true;
+input int  InpMaxSpreadPoints=50;
 
-input group "POSITION MANAGEMENT"
+input group "11 — Dashboard"
+input bool InpDashboardCompact=true;
+input bool InpDashboardDiagnostics=false;
+input bool InpDashboardOverlay=true;
+
+input group "12 — Position Management"
 input bool   InpBreakEven=false;
 input double InpBreakEvenTriggerR=1.0;
 input double InpBreakEvenOffsetPoints=0.0;
@@ -139,129 +129,287 @@ input double InpTrailingATRMultiplier=2.0;
 input bool   InpTimeExit=false;
 input int    InpMaxHoldingMinutes=240;
 
-input group "EXECUTION"
-input ulong InpDeviationPoints=20;
+// Deprecation alias for legacy parameter name
+#define InpMinimumSignalScore InpMinScore
 
-bool ProfileStrategyEnabled(const ENUM_TRADING_PROFILE profile,
-                            const ENUM_STRATEGY_ID strategy)
+//==================================================================
+// Helpers
+//==================================================================
+string StyleName(ENUM_TRADING_STYLE style)
   {
-   if(profile==PROFILE_SCALP)
+   switch(style)
      {
-      if(strategy==STRATEGY_TREND_PULLBACK) return InpScalpTrendEnabled;
-      if(strategy==STRATEGY_BREAKOUT) return InpScalpBreakoutEnabled;
-      if(strategy==STRATEGY_MOMENTUM) return InpScalpMomentumEnabled;
-      if(strategy==STRATEGY_MEAN_REVERSION) return InpScalpMeanReversionEnabled;
+      case STYLE_SCALPING:
+         return "SCALPING";
+      case STYLE_DAY_TRADING:
+         return "DAY TRADING";
+      case STYLE_SWING_TRADING:
+         return "SWING TRADING";
+      default:
+         return "UNKNOWN";
      }
-   else if(profile==PROFILE_SWING)
-     {
-      if(strategy==STRATEGY_TREND_PULLBACK) return InpSwingTrendEnabled;
-      if(strategy==STRATEGY_BREAKOUT) return InpSwingBreakoutEnabled;
-      if(strategy==STRATEGY_MOMENTUM) return InpSwingMomentumEnabled;
-      if(strategy==STRATEGY_MEAN_REVERSION) return InpSwingMeanReversionEnabled;
-     }
-   else
-     {
-      if(strategy==STRATEGY_TREND_PULLBACK) return InpDayTrendEnabled;
-      if(strategy==STRATEGY_BREAKOUT) return InpDayBreakoutEnabled;
-      if(strategy==STRATEGY_MOMENTUM) return InpDayMomentumEnabled;
-      if(strategy==STRATEGY_MEAN_REVERSION) return InpDayMeanReversionEnabled;
-     }
-
-   return false;
   }
 
-double ProfileSignalScoreOverride(const ENUM_TRADING_PROFILE profile,
-                                  const ENUM_STRATEGY_ID strategy)
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+string TimeframeText(ENUM_TIMEFRAMES tf)
   {
-   if(profile==PROFILE_SCALP)
-     {
-      if(strategy==STRATEGY_TREND_PULLBACK) return InpScalpTrendMinimumScore;
-      if(strategy==STRATEGY_BREAKOUT) return InpScalpBreakoutMinimumScore;
-      if(strategy==STRATEGY_MOMENTUM) return InpScalpMomentumMinimumScore;
-      if(strategy==STRATEGY_MEAN_REVERSION) return InpScalpMeanReversionMinimumScore;
-     }
-   else if(profile==PROFILE_SWING)
-     {
-      if(strategy==STRATEGY_TREND_PULLBACK) return InpSwingTrendMinimumScore;
-      if(strategy==STRATEGY_BREAKOUT) return InpSwingBreakoutMinimumScore;
-      if(strategy==STRATEGY_MOMENTUM) return InpSwingMomentumMinimumScore;
-      if(strategy==STRATEGY_MEAN_REVERSION) return InpSwingMeanReversionMinimumScore;
-     }
-   else
-     {
-      if(strategy==STRATEGY_TREND_PULLBACK) return InpDayTrendMinimumScore;
-      if(strategy==STRATEGY_BREAKOUT) return InpDayBreakoutMinimumScore;
-      if(strategy==STRATEGY_MOMENTUM) return InpDayMomentumMinimumScore;
-      if(strategy==STRATEGY_MEAN_REVERSION) return InpDayMeanReversionMinimumScore;
-     }
-
-   return -1.0;
+   string s=EnumToString(tf);
+   StringReplace(s,"PERIOD_","");
+   return s;
   }
 
-double MinimumSignalScoreFor(const ENUM_TRADING_PROFILE profile,
-                             const ENUM_STRATEGY_ID strategy)
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void SelectStyleTimeframes(ENUM_TRADING_STYLE style,
+                           ENUM_TIMEFRAMES &structure_tf,
+                           ENUM_TIMEFRAMES &signal_tf,
+                           ENUM_TIMEFRAMES &entry_tf)
   {
-   if(!InpUseProfileSignalScoreOverrides)
-      return InpMinimumSignalScore;
+   if(style==STYLE_SCALPING)
+     {
+      structure_tf=PERIOD_M15;
+      signal_tf=PERIOD_M5;
+      entry_tf=PERIOD_M1;
+      return;
+     }
 
-   double score_override=
-      ProfileSignalScoreOverride(profile,strategy);
-   return (score_override<0.0 ?
-           InpMinimumSignalScore :
-           score_override);
+   if(style==STYLE_SWING_TRADING)
+     {
+      structure_tf=PERIOD_D1;
+      signal_tf=PERIOD_H4;
+      entry_tf=PERIOD_H1;
+      return;
+     }
+
+   structure_tf=PERIOD_H4;
+   signal_tf=PERIOD_H1;
+   entry_tf=PERIOD_M15;
   }
 
-bool ValidSignalScoreOverride(const double score)
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+bool ValidInputSet()
   {
-   return score==-1.0 ||
-          (score>=0.0 && score<=100.0);
+   if(InpGoldSymbol=="" &&
+      InpSilverSymbol=="" &&
+      InpBitcoinSymbol=="")
+      return false;
+
+   if(InpRiskPercent<=0.0 ||
+      InpDailyLossLimit<=0.0 ||
+      InpMonthlyLossLimit<=0.0 ||
+      InpMinRR<=0.0)
+      return false;
+
+   if(InpMinScore<0.0 || InpMinScore>100.0)
+      return false;
+
+   if(InpConflictThreshold<0.0)
+      return false;
+
+   if(InpSessionStartHour<0 || InpSessionStartHour>23 ||
+      InpSessionEndHour<0 || InpSessionEndHour>24)
+      return false;
+
+   if(InpValueAreaPercent<=0.0 || InpValueAreaPercent>=1.0)
+      return false;
+
+   if(InpProfileSessionBars<=0 || InpProfileRollingBars<=0)
+      return false;
+
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+ulong MagicForStyle(ENUM_TRADING_STYLE style)
+  {
+   switch(style)
+     {
+      case STYLE_SCALPING:
+         return 27000000;
+      case STYLE_DAY_TRADING:
+         return 27100000;
+      case STYLE_SWING_TRADING:
+         return 27200000;
+      default:
+         return 26000000;
+     }
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+double GetEntryDistanceTolerance(ENUM_TRADING_STYLE style,
+                                 double point)
+  {
+   switch(style)
+     {
+      case STYLE_SCALPING:
+         return point * InpEntryToleranceScalp;
+      case STYLE_DAY_TRADING:
+         return point * InpEntryToleranceDay;
+      case STYLE_SWING_TRADING:
+         return point * InpEntryToleranceSwing;
+      default:
+         return point * 10.0;
+     }
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+bool NormalizeTradePlanStops(TradePlan& plan,
+                             string& reason)
+  {
+   reason="";
+
+   if(!plan.valid || plan.entry<=0.0)
+     {
+      reason="Invalid trade plan or entry";
+      return false;
+     }
+
+   double tick_size=SymbolInfoDouble(plan.symbol, SYMBOL_TRADE_TICK_SIZE);
+   if(tick_size<=0)
+      tick_size=SymbolInfoDouble(plan.symbol, SYMBOL_POINT);
+
+   long digits=0;
+   if(!SymbolInfoInteger(plan.symbol, SYMBOL_DIGITS, digits))
+     {
+      reason="Could not read digits";
+      return false;
+     }
+
+   bool stop_round_up = (plan.direction==SIGNAL_SHORT);
+   bool target_round_up = (plan.direction==SIGNAL_LONG);
+
+   double stop=CAlgoUtils::NormalizePriceToTick(
+                  plan.stop, tick_size, stop_round_up, (int)digits);
+   double target=CAlgoUtils::NormalizePriceToTick(
+                    plan.target, tick_size, target_round_up, (int)digits);
+
+   if(stop<=0.0 || target<=0.0)
+     {
+      reason="Normalized stop/target is invalid";
+      return false;
+     }
+
+   if(plan.direction==SIGNAL_LONG &&
+      (stop>=plan.entry || target<=plan.entry))
+     {
+      reason="Long stop/target invalid after normalization";
+      return false;
+     }
+
+   if(plan.direction==SIGNAL_SHORT &&
+      (stop<=plan.entry || target>=plan.entry))
+     {
+      reason="Short stop/target invalid after normalization";
+      return false;
+     }
+
+   plan.stop=stop;
+   plan.target=target;
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void LogInitFailure(const string stage, const string detail="")
+  {
+   int err=GetLastError();
+   g_logger.Event(
+      LOG_ERROR,
+      "INIT",
+      "INIT_FAILED",
+      "",
+      "",
+      stage,
+      "",
+      "FAIL",
+      "INIT",
+      detail,
+      err);
+   ResetLastError();
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void LogRiskLockTransition(const PortfolioState &state)
+  {
+   if(state.trading_locked==g_last_trading_locked)
+      return;
+
+   g_last_trading_locked=state.trading_locked;
+
+   g_logger.Event(
+      state.trading_locked ? LOG_WARNING : LOG_INFO,
+      "STATE",
+      state.trading_locked ?
+      "TRADING_LOCK_ON" :
+      "TRADING_LOCK_OFF",
+      "",
+      "",
+      "",
+      "",
+      state.trading_locked ? "LOCKED" : "UNLOCKED",
+      state.trading_locked ? "RISK_LOCK" : "RISK_LOCK_CLEARED",
+      "daily="+DoubleToString(state.daily_loss_percent,2)+
+      " monthly="+DoubleToString(state.monthly_loss_percent,2)+
+      " consecutive="+IntegerToString(state.consecutive_losses),
+      0,
+      0,
+      state.daily_loss_percent,
+      state.monthly_loss_percent,
+      (double)state.consecutive_losses);
   }
 
 //==================================================================
-// Runtime context
+// Runtime context — Hybrid
 //==================================================================
 class CSymbolRuntime
   {
 public:
-   string symbol;
-   ENUM_TIMEFRAMES structure_tf;
-   ENUM_TIMEFRAMES signal_tf;
-   ENUM_TIMEFRAMES entry_tf;
+   string            symbol;
+   ENUM_TRADING_STYLE style;
+   ENUM_TIMEFRAMES   structure_tf;
+   ENUM_TIMEFRAMES   signal_tf;
+   ENUM_TIMEFRAMES   entry_tf;
 
    CMarketDataEngine market_structure;
    CMarketDataEngine market_signal;
    CMarketDataEngine market_entry;
 
-   CFeatureEngine feature_structure;
-   CFeatureEngine feature_signal;
-   CFeatureEngine feature_entry;
-   CRegimeEngine  regime_engine;
+   CFeatureEngine    feature_structure;
+   CFeatureEngine    feature_signal;
+   CFeatureEngine    feature_entry;
 
-   CTrendPullbackStrategy trend;
-   CBreakoutStrategy      breakout;
-   CMomentumStrategy      momentum;
-   CMeanReversionStrategy mean_reversion;
+   CHybridSignalEngine hybrid_engine;
 
-   bool valid;
-   string last_failure;
-   ENUM_REGIME_TYPE entry_regime;
-   datetime entry_regime_bar_time;
-   bool entry_regime_valid;
+   bool              valid;
+   string            last_failure;
 
-   CSymbolRuntime()
+                     CSymbolRuntime()
      {
       symbol="";
+      style=STYLE_DAY_TRADING;
       structure_tf=PERIOD_CURRENT;
       signal_tf=PERIOD_CURRENT;
       entry_tf=PERIOD_CURRENT;
       valid=false;
       last_failure="";
-      entry_regime=REGIME_UNCERTAIN;
-      entry_regime_bar_time=0;
-      entry_regime_valid=false;
      }
 
-   bool Initialize(const string in_symbol,
+   bool              Initialize(const string in_symbol,
+                   const ENUM_TRADING_STYLE in_style,
                    const ENUM_TIMEFRAMES in_structure_tf,
                    const ENUM_TIMEFRAMES in_signal_tf,
                    const ENUM_TIMEFRAMES in_entry_tf)
@@ -270,6 +418,7 @@ public:
       last_failure="";
 
       symbol=in_symbol;
+      style=in_style;
       structure_tf=in_structure_tf;
       signal_tf=in_signal_tf;
       entry_tf=in_entry_tf;
@@ -288,168 +437,69 @@ public:
          return false;
         }
 
-      feature_structure.SetParameters(
-         InpEMA_Fast,
-         InpEMA_Slow,
-         InpEMA_Long,
-         InpADX_Period,
-         InpATR_Period,
-         InpRSI_Period,
-         InpMACD_Fast,
-         InpMACD_Slow,
-         InpMACD_Signal,
-         InpROC_Period,
-         InpVolume_Period);
-
-      feature_signal.SetParameters(
-         InpEMA_Fast,
-         InpEMA_Slow,
-         InpEMA_Long,
-         InpADX_Period,
-         InpATR_Period,
-         InpRSI_Period,
-         InpMACD_Fast,
-         InpMACD_Slow,
-         InpMACD_Signal,
-         InpROC_Period,
-         InpVolume_Period);
-
-      feature_entry.SetParameters(
-         InpEMA_Fast,
-         InpEMA_Slow,
-         InpEMA_Long,
-         InpADX_Period,
-         InpATR_Period,
-         InpRSI_Period,
-         InpMACD_Fast,
-         InpMACD_Slow,
-         InpMACD_Signal,
-         InpROC_Period,
-         InpVolume_Period);
-
-      ResetLastError();
-      if(!feature_structure.InitializeFor(
+      if(!hybrid_engine.Initialize(
             symbol,
-            structure_tf))
-        {
-         last_failure="FeatureStructure.InitializeFor failed LastError="+IntegerToString(GetLastError());
-         ResetLastError();
-         return false;
-        }
-
-      ResetLastError();
-      if(!feature_signal.InitializeFor(
-            symbol,
-            signal_tf))
-        {
-         last_failure="FeatureSignal.InitializeFor failed LastError="+IntegerToString(GetLastError());
-         ResetLastError();
-         return false;
-        }
-
-      ResetLastError();
-      if(!feature_entry.InitializeFor(
-            symbol,
+            style,
+            structure_tf,
+            signal_tf,
             entry_tf))
         {
-         last_failure="FeatureEntry.InitializeFor failed LastError="+IntegerToString(GetLastError());
-         ResetLastError();
+         last_failure="HybridEngine.Initialize failed";
          return false;
         }
 
-      regime_engine.SetParameters(
-         InpADXTrendThreshold,
+      hybrid_engine.SetVolumeProfileParams(
+         InpProfileSessionBars,
+         InpProfileRollingBars,
+         InpValueAreaPercent);
+
+      hybrid_engine.SetLiquidityParams(
+         InpSwingLookback,
+         InpEqualTolerancePoints,
+         InpMaxLevelAgeBars,
+         InpSweepConfirmBars);
+
+      hybrid_engine.SetRegimeParams(
+         InpADXPeriod,
+         (double)InpADXTrendThreshold,
          InpHighVolatilityRatio,
          InpLowVolatilityRatio,
          InpRangeLookback,
-         InpRegimeBreakoutBufferATR,
-         InpRangeWidthATR,
-         InpTrendEMASepATR);
+         InpHysteresisBars);
 
-      if(!regime_engine.Initialize())
-        {
-         last_failure="RegimeEngine.Initialize failed";
-         return false;
-        }
+      hybrid_engine.SetDivergenceParams(
+         InpRSIPeriod,
+         InpMACD_Fast,
+         InpMACD_Slow,
+         InpMACD_Signal,
+         InpPivotTolerancePercent,
+         InpMaxDivergenceAgeBars);
 
-      trend.SetParameters(
-         0.30,
-         0.75,
-         0.50,
-         0.0,
-         5.0,
-         -5.0,
-         0.0,
-         50.0,
-         70.0,
-         30.0,
-         50.0,
-         1.50,
-         0.20,
-         InpMinRR,
-         MinimumSignalScoreFor(
-            InpProfile,
-            STRATEGY_TREND_PULLBACK),
-         InpADXTrendThreshold);
+      hybrid_engine.SetMomentumParams(
+         InpADXPeriod,
+         10,
+         InpMomentumLookback);
 
-      breakout.SetParameters(
-         InpBreakoutLookback,
-         InpBreakoutBufferATR,
-         InpRangeWidthATR,
-         InpBreakoutRangeATR,
-         InpBreakoutVolumeRatio,
-         InpBreakoutCandleStrength,
-         0.0,
-         6.0,
-         -6.0,
-         0.0,
-         InpBreakoutStopATR,
-         InpBreakoutStructureBufferATR,
-         InpBreakoutRR,
-         MinimumSignalScoreFor(
-            InpProfile,
-            STRATEGY_BREAKOUT));
+      if(InpNewsEnabled)
+         hybrid_engine.SetNewsParams(
+            InpNewsBlackoutMinutesBefore,
+            InpNewsBlackoutMinutesAfter,
+            InpNewsCooldownMinutes,
+            InpNewsImpactThreshold,
+            InpNewsPreventNewEntries,
+            InpNewsClosePositions);
 
-      if(!trend.Initialize())
-        {
-         last_failure="TrendStrategy.Initialize failed";
-         return false;
-        }
+      hybrid_engine.SetBiasParams(2, 50);
+      hybrid_engine.SetMinScore(InpMinScore);
+      hybrid_engine.SetConflictThreshold(InpConflictThreshold);
+      hybrid_engine.SetMinRR(InpMinRR);
 
-      if(!breakout.Initialize())
-        {
-         last_failure="BreakoutStrategy.Initialize failed";
-         return false;
-        }
-
-      momentum.SetMinimumSignalScore(
-         MinimumSignalScoreFor(
-            InpProfile,
-            STRATEGY_MOMENTUM));
-      if(!momentum.Initialize())
-        {
-         last_failure="MomentumStrategy.Initialize failed";
-         return false;
-        }
-
-      mean_reversion.SetMinimumSignalScore(
-         MinimumSignalScoreFor(
-            InpProfile,
-            STRATEGY_MEAN_REVERSION));
-      if(!mean_reversion.Initialize())
-        {
-         last_failure="MeanReversionStrategy.Initialize failed";
-         return false;
-        }
-
-      // First observations initialize bar state without creating a signal.
       market_entry.IsNewClosedBar(symbol,entry_tf);
       market_signal.IsNewClosedBar(symbol,signal_tf);
 
       valid=true;
       return true;
      }
-
   };
 
 //==================================================================
@@ -462,330 +512,23 @@ CAlgoPortfolioRisk  g_portfolio_risk;
 CRiskEngine         g_risk_engine;
 CTradeExecutor      g_executor;
 CPositionManager    g_position_manager;
-CSignalEngine       g_signal_engine;
 CAlgoLogger         g_logger;
-CAlgoDashboard      g_dashboard;
+CHybridDashboard    g_dashboard;
 CSessionFilter      g_session_filter;
-CRelativeValueStrategy g_relative_value;
 CTesterFitness      g_tester_fitness;
 COptimizationController g_optimizer;
 
+string g_runtime_wait_state[3];
+string g_runtime_init_failure[3];
 bool g_system_ready=false;
 bool g_initialization_started=false;
 bool g_initialization_failed=false;
-string g_runtime_wait_state[3];
-string g_runtime_init_failure[3];
 bool g_last_trading_locked=false;
 string g_last_runtime_dashboard_status="";
 
 //==================================================================
-// Helpers
+// Dashboard helpers
 //==================================================================
-void SelectProfileTimeframes(ENUM_TRADING_PROFILE profile,
-                             ENUM_TIMEFRAMES &structure_tf,
-                             ENUM_TIMEFRAMES &signal_tf,
-                             ENUM_TIMEFRAMES &entry_tf)
-  {
-   if(profile==PROFILE_SCALP)
-     {
-      structure_tf=PERIOD_M15;
-      signal_tf=PERIOD_M5;
-      entry_tf=PERIOD_M1;
-      return;
-     }
-
-   if(profile==PROFILE_SWING)
-     {
-      structure_tf=PERIOD_D1;
-      signal_tf=PERIOD_H4;
-      entry_tf=PERIOD_H1;
-      return;
-     }
-
-   structure_tf=PERIOD_H4;
-   signal_tf=PERIOD_H1;
-   entry_tf=PERIOD_M15;
-  }
-
-bool ValidInputSet()
-  {
-   if(InpGoldSymbol=="" &&
-      InpSilverSymbol=="" &&
-      InpBitcoinSymbol=="")
-      return false;
-
-   if(!ValidSignalScoreOverride(InpScalpTrendMinimumScore) ||
-      !ValidSignalScoreOverride(InpScalpBreakoutMinimumScore) ||
-      !ValidSignalScoreOverride(InpScalpMomentumMinimumScore) ||
-      !ValidSignalScoreOverride(InpScalpMeanReversionMinimumScore) ||
-      !ValidSignalScoreOverride(InpDayTrendMinimumScore) ||
-      !ValidSignalScoreOverride(InpDayBreakoutMinimumScore) ||
-      !ValidSignalScoreOverride(InpDayMomentumMinimumScore) ||
-      !ValidSignalScoreOverride(InpDayMeanReversionMinimumScore) ||
-      !ValidSignalScoreOverride(InpSwingTrendMinimumScore) ||
-      !ValidSignalScoreOverride(InpSwingBreakoutMinimumScore) ||
-      !ValidSignalScoreOverride(InpSwingMomentumMinimumScore) ||
-      !ValidSignalScoreOverride(InpSwingMeanReversionMinimumScore))
-      return false;
-
-   if(InpRiskPercent<=0.0 ||
-      InpDailyLossLimit<=0.0 ||
-      InpMonthlyLossLimit<=0.0 ||
-      InpMinRR<=0.0)
-      return false;
-
-   if(InpEMA_Fast<=0 ||
-      InpEMA_Slow<=InpEMA_Fast ||
-      InpEMA_Long<=InpEMA_Slow)
-      return false;
-
-   if(InpMACD_Fast<=0 ||
-      InpMACD_Slow<=InpMACD_Fast ||
-      InpMACD_Signal<=0)
-      return false;
-
-   if(InpSessionStartHour<0 || InpSessionStartHour>23 ||
-      InpSessionEndHour<0 || InpSessionEndHour>24)
-      return false;
-
-   return true;
-  }
-
-long MagicForStrategy(const ENUM_STRATEGY_ID strategy)
-  {
-   if(strategy==STRATEGY_TREND_PULLBACK) return MAGIC_TREND;
-   if(strategy==STRATEGY_BREAKOUT) return MAGIC_BREAKOUT;
-   if(strategy==STRATEGY_MOMENTUM) return MAGIC_MOMENTUM;
-   if(strategy==STRATEGY_MEAN_REVERSION) return MAGIC_MEAN_REVERSION;
-   if(strategy==STRATEGY_RELATIVE_VALUE) return MAGIC_RELATIVE_VALUE;
-   return MAGIC_BASE;
-  }
-
-bool StructureCompatible(const ENUM_STRATEGY_ID strategy,
-                         const ENUM_REGIME_TYPE signal_regime,
-                         const ENUM_REGIME_TYPE structure_regime)
-  {
-   if(signal_regime==REGIME_UNCERTAIN ||
-      structure_regime==REGIME_UNCERTAIN)
-      return false;
-
-   if(strategy==STRATEGY_TREND_PULLBACK)
-     {
-      if(signal_regime==REGIME_TREND_UP)
-         return structure_regime==REGIME_TREND_UP ||
-                structure_regime==REGIME_BREAKOUT;
-
-      if(signal_regime==REGIME_TREND_DOWN)
-         return structure_regime==REGIME_TREND_DOWN ||
-                structure_regime==REGIME_BREAKOUT;
-     }
-
-   if(strategy==STRATEGY_BREAKOUT)
-     {
-      return structure_regime==REGIME_BREAKOUT ||
-             structure_regime==REGIME_TREND_UP ||
-             structure_regime==REGIME_TREND_DOWN;
-     }
-
-   if(strategy==STRATEGY_MOMENTUM)
-     {
-      if(signal_regime==REGIME_TREND_UP)
-         return structure_regime==REGIME_TREND_UP ||
-                structure_regime==REGIME_BREAKOUT;
-
-      if(signal_regime==REGIME_TREND_DOWN)
-         return structure_regime==REGIME_TREND_DOWN ||
-                structure_regime==REGIME_BREAKOUT;
-
-      if(signal_regime==REGIME_BREAKOUT)
-         return structure_regime!=REGIME_RANGE;
-     }
-
-   if(strategy==STRATEGY_MEAN_REVERSION)
-      return structure_regime==REGIME_RANGE ||
-             structure_regime==REGIME_LOW_VOLATILITY;
-
-   return false;
-  }
-
-string StrategyRegimeRejection(const ENUM_STRATEGY_ID strategy,
-                               const ENUM_REGIME_TYPE signal_regime,
-                               const ENUM_REGIME_TYPE structure_regime)
-  {
-   if(signal_regime==REGIME_UNCERTAIN)
-      return "SIGNAL_REGIME_UNCERTAIN";
-
-   if(structure_regime==REGIME_UNCERTAIN)
-      return "STRUCTURE_REGIME_UNCERTAIN";
-
-   if(!StructureCompatible(
-         strategy,
-         signal_regime,
-         structure_regime))
-      return "REGIME_PAIR_INCOMPATIBLE";
-
-   return "";
-  }
-
-bool NormalizeSignalStopsToTick(StrategySignal &signal,
-                               string &reason)
-  {
-   reason="";
-
-   if(!signal.valid ||
-      (signal.direction!=SIGNAL_LONG &&
-       signal.direction!=SIGNAL_SHORT))
-     {
-      reason="Invalid signal direction";
-      return false;
-     }
-
-   double tick_size=
-      SymbolInfoDouble(
-         signal.symbol,
-         SYMBOL_TRADE_TICK_SIZE);
-   long digits=0;
-
-   if(tick_size<=0.0 ||
-      !SymbolInfoInteger(signal.symbol,SYMBOL_DIGITS,digits))
-     {
-      reason="Symbol tick size or digits unavailable";
-      return false;
-     }
-
-   bool stop_round_up=
-      (signal.direction==SIGNAL_SHORT);
-   bool target_round_up=
-      (signal.direction==SIGNAL_LONG);
-
-   double stop=
-      CAlgoUtils::NormalizePriceToTick(
-         signal.stop,
-         tick_size,
-         stop_round_up,
-         (int)digits);
-   double target=
-      CAlgoUtils::NormalizePriceToTick(
-         signal.target,
-         tick_size,
-         target_round_up,
-         (int)digits);
-
-   if(stop<=0.0 ||
-      target<=0.0 ||
-      (signal.direction==SIGNAL_LONG &&
-       (stop>=signal.entry || target<=signal.entry)) ||
-      (signal.direction==SIGNAL_SHORT &&
-       (stop<=signal.entry || target>=signal.entry)))
-     {
-      reason="Tick normalization invalidated stop/target levels";
-      return false;
-     }
-
-   signal.stop=stop;
-   signal.target=target;
-   return true;
-  }
-
-bool BuildExecutionRequest(const StrategySignal &signal,
-                           const RiskDecision &risk,
-                           ExecutionRequest &request)
-  {
-   request.intent=
-      signal.direction==SIGNAL_LONG ?
-      ORDER_INTENT_OPEN_LONG :
-      ORDER_INTENT_OPEN_SHORT;
-
-   request.symbol=signal.symbol;
-   request.direction=signal.direction;
-   request.strategy=signal.strategy;
-
-   request.volume=risk.calculated_volume;
-   request.price=signal.entry;
-
-   request.stop_loss=signal.stop;
-   request.take_profit=signal.target;
-
-   request.position_ticket=0;
-   request.magic=MagicForStrategy(signal.strategy);
-
-   request.comment="AlgoMultiAssetEA";
-   request.signal_id=signal.signal_id;
-
-   return true;
-  }
-
-void LogReject(const string symbol,const string reason)
-  {
-   g_logger.Log(LOG_DEBUG,
-                 "Rejected symbol="+symbol+
-                 " reason="+reason);
-  }
-
-void LogInitSuccess(const string stage,
-                     const string detail="")
-  {
-   g_logger.Event(
-      LOG_INFO,
-      "INIT",
-      "INIT_STAGE_OK",
-      "",
-      "",
-      stage,
-      "",
-      "OK",
-      "",
-      detail);
-  }
-
-void LogInitFailureEvent(const string stage,
-                         const string detail="")
-  {
-   int err=GetLastError();
-   g_logger.Event(
-      LOG_ERROR,
-      "INIT",
-      "INIT_FAILED",
-      "",
-      "",
-      stage,
-      "",
-      "FAIL",
-      "INIT",
-      detail,
-      err);
-   ResetLastError();
-  }
-
-void LogRiskLockTransition(const PortfolioState &state)
-  {
-   if(state.trading_locked==g_last_trading_locked)
-      return;
-
-   g_last_trading_locked=state.trading_locked;
-
-   g_logger.Event(
-      state.trading_locked ? LOG_WARNING : LOG_INFO,
-      "STATE",
-      state.trading_locked ?
-         "TRADING_LOCK_ON" :
-         "TRADING_LOCK_OFF",
-      "",
-      "",
-      "",
-      "",
-      state.trading_locked ? "LOCKED" : "UNLOCKED",
-      state.trading_locked ? "RISK_LOCK" : "RISK_LOCK_CLEARED",
-      "daily="+DoubleToString(state.daily_loss_percent,2)+
-      " monthly="+DoubleToString(state.monthly_loss_percent,2)+
-      " consecutive="+IntegerToString(state.consecutive_losses),
-      0,
-      0,
-      state.daily_loss_percent,
-      state.monthly_loss_percent,
-      (double)state.consecutive_losses);
-  }
-
 void UpdateDashboardForChart()
   {
    if(!g_system_ready || !InpDashboard)
@@ -814,38 +557,7 @@ void UpdateDashboardForChart()
          return;
         }
 
-      FeatureSet features;
-      ResetLastError();
-
-      if(!g_runtime[i].feature_signal.Calculate(
-            market,
-            features))
-        {
-         g_dashboard.ShowStatus(
-            "WAITING FOR INDICATOR DATA | "+chart_symbol);
-         ResetLastError();
-         return;
-        }
-
-      ENUM_REGIME_TYPE regime=
-         g_runtime[i].regime_engine.Detect(
-            market,
-            features);
-
-      PortfolioState portfolio;
-      if(!g_state.GetPortfolioState(portfolio))
-        {
-         g_dashboard.ShowStatus(
-            "RISK STATE UNAVAILABLE | ENTRY BLOCKED");
-         return;
-        }
-
-      g_dashboard.UpdateMarket(
-         market,
-         features,
-         regime,
-         portfolio);
-
+      g_dashboard.RenderMarketView(market);
       return;
      }
 
@@ -853,6 +565,9 @@ void UpdateDashboardForChart()
       "CHART SYMBOL NOT CONFIGURED | "+chart_symbol);
   }
 
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
 void ShowRuntimeGateStatus(CSymbolRuntime &runtime,
                            const string status)
   {
@@ -860,10 +575,8 @@ void ShowRuntimeGateStatus(CSymbolRuntime &runtime,
       runtime.symbol!=ChartSymbol(0))
       return;
 
-   string signal_tf=EnumToString(runtime.signal_tf);
-   string entry_tf=EnumToString(runtime.entry_tf);
-   StringReplace(signal_tf,"PERIOD_","");
-   StringReplace(entry_tf,"PERIOD_","");
+   string signal_tf=TimeframeText(runtime.signal_tf);
+   string entry_tf=TimeframeText(runtime.entry_tf);
 
    string dashboard_status=
       status+
@@ -876,546 +589,158 @@ void ShowRuntimeGateStatus(CSymbolRuntime &runtime,
    g_dashboard.ShowStatus(dashboard_status);
   }
 
-bool PrepareRuntimeAnalysis(CSymbolRuntime &runtime,
-                           MarketSnapshot &signal_market,
-                           MarketSnapshot &structure_market,
-                           FeatureSet &signal_features,
-                           FeatureSet &structure_features,
-                           ENUM_REGIME_TYPE &signal_regime,
-                           ENUM_REGIME_TYPE &structure_regime)
+//==================================================================
+// Hybrid decision pipeline
+//==================================================================
+void ProcessHybridDecision(CSymbolRuntime& runtime,
+                           const HybridDecision& decision,
+                           const PortfolioState& portfolio_state)
   {
-   ResetLastError();
-   if(!runtime.market_signal.GetSnapshot(
-         runtime.symbol,
-         runtime.signal_tf,
-         signal_market))
+   g_logger.Signal(decision);
+
+   if(decision.status != DECISION_BUY_CANDIDATE &&
+      decision.status != DECISION_SELL_CANDIDATE)
      {
-      g_logger.Event(
-         LOG_ERROR,"MARKET","MARKET_SNAPSHOT_FAILED",
-         runtime.symbol,EnumToString(runtime.signal_tf),"","","FAIL",
-         "SIGNAL_SNAPSHOT","Market signal snapshot failed",GetLastError());
-      ResetLastError();
-      return false;
-     }
+      g_dashboard.Update(decision, portfolio_state);
 
-   ResetLastError();
-   if(!runtime.market_structure.GetSnapshot(
-         runtime.symbol,
-         runtime.structure_tf,
-         structure_market))
-     {
-      g_logger.Event(
-         LOG_ERROR,"MARKET","MARKET_SNAPSHOT_FAILED",
-         runtime.symbol,EnumToString(runtime.structure_tf),"","","FAIL",
-         "STRUCTURE_SNAPSHOT","Market structure snapshot failed",GetLastError());
-      ResetLastError();
-      return false;
-     }
-
-   ResetLastError();
-   if(!runtime.feature_signal.Calculate(
-         signal_market,
-         signal_features))
-     {
-      g_logger.Event(
-         LOG_ERROR,"FEATURE","FEATURE_CALC_FAILED",
-         runtime.symbol,EnumToString(runtime.signal_tf),"","","FAIL",
-         "SIGNAL_FEATURES","Signal feature calculation failed",GetLastError());
-      ResetLastError();
-      return false;
-     }
-
-   ResetLastError();
-   if(!runtime.feature_structure.Calculate(
-         structure_market,
-         structure_features))
-     {
-      g_logger.Event(
-         LOG_ERROR,"FEATURE","FEATURE_CALC_FAILED",
-         runtime.symbol,EnumToString(runtime.structure_tf),"","","FAIL",
-         "STRUCTURE_FEATURES","Structure feature calculation failed",GetLastError());
-      ResetLastError();
-      return false;
-     }
-
-   signal_regime=
-      runtime.regime_engine.Detect(
-         signal_market,
-         signal_features);
-
-   structure_regime=
-      runtime.regime_engine.Detect(
-         structure_market,
-         structure_features);
-
-   g_logger.Event(
-      LOG_DEBUG,"REGIME","REGIME_DETECTED",
-      runtime.symbol,EnumToString(runtime.signal_tf),"","","OK",
-      "REGIME",
-      "signal="+EnumToString(signal_regime)+
-      " entry="+EnumToString(runtime.entry_regime)+
-      " structure="+EnumToString(structure_regime),
-      0,0,
-      signal_features.adx,
-      signal_features.atr,
-      signal_features.rsi);
-
-   return true;
-  }
-
-bool UpdateRuntimeEntryRegime(CSymbolRuntime &runtime)
-  {
-   MarketSnapshot entry_market;
-   FeatureSet entry_features;
-
-   ResetLastError();
-   if(!runtime.market_entry.GetSnapshot(
-         runtime.symbol,
-         runtime.entry_tf,
-         entry_market))
-     {
-      g_logger.Event(
-         LOG_ERROR,"MARKET","MARKET_SNAPSHOT_FAILED",
-         runtime.symbol,EnumToString(runtime.entry_tf),"","","FAIL",
-         "ENTRY_REGIME_SNAPSHOT",
-         "Market entry-regime snapshot failed",GetLastError());
-      ResetLastError();
-      runtime.entry_regime_valid=false;
-      return false;
-     }
-
-   ResetLastError();
-   if(!runtime.feature_entry.Calculate(
-         entry_market,
-         entry_features))
-     {
-      g_logger.Event(
-         LOG_ERROR,"FEATURE","FEATURE_CALC_FAILED",
-         runtime.symbol,EnumToString(runtime.entry_tf),"","","FAIL",
-         "ENTRY_REGIME_FEATURES",
-         "Entry-regime feature calculation failed",GetLastError());
-      ResetLastError();
-      runtime.entry_regime_valid=false;
-      return false;
-     }
-
-   ENUM_REGIME_TYPE previous_regime=
-      runtime.entry_regime;
-   bool had_previous_regime=
-      runtime.entry_regime_valid;
-
-   runtime.entry_regime=
-      runtime.regime_engine.Detect(
-         entry_market,
-         entry_features);
-   runtime.entry_regime_bar_time=
-      entry_market.closed_bar_time;
-   runtime.entry_regime_valid=true;
-
-   if(!had_previous_regime ||
-      previous_regime!=runtime.entry_regime)
-     {
-      string previous=
-         had_previous_regime ?
-         EnumToString(previous_regime) :
-         "UNINITIALIZED";
-      g_logger.Event(
-         LOG_INFO,"REGIME","REGIME_STATE_CHANGED",
-         runtime.symbol,EnumToString(runtime.entry_tf),"","","UPDATE",
-         "ENTRY_TIMEFRAME_REGIME",
-         previous+" -> "+EnumToString(runtime.entry_regime),
-         0,0,
-         entry_features.adx,
-         entry_features.atr,
-         entry_features.rsi);
-     }
-
-   return true;
-  }
-
-bool BuildRuntimeStrategyContext(CSymbolRuntime &runtime,
-                                 const MarketSnapshot &signal_market,
-                                 const FeatureSet &signal_features,
-                                 const ENUM_REGIME_TYPE signal_regime,
-                                 StrategyContext &context,
-                                 PortfolioState &portfolio_state)
-  {
-   context.market=signal_market;
-   context.features=signal_features;
-   context.regime=signal_regime;
-   context.trading_allowed=false;
-   context.rejection_reason="";
-
-   if(!g_state.GetPortfolioState(portfolio_state))
-     {
-      context.rejection_reason="Portfolio risk state unavailable";
-      g_logger.Event(
-         LOG_ERROR,"RISK","RISK_STATE_UNAVAILABLE",
-         runtime.symbol,EnumToString(runtime.signal_tf),"","","REJECT",
-         "RISK_STATE","Portfolio state is unavailable; entry blocked");
-      ShowRuntimeGateStatus(
-         runtime,
-         "BLOCKED: RISK STATE UNAVAILABLE");
-      return false;
-     }
-
-   LogRiskLockTransition(portfolio_state);
-
-   context.trading_allowed=true;
-   if(portfolio_state.trading_locked)
-     {
-      context.trading_allowed=false;
-      context.rejection_reason="Risk lock active";
-
-      g_logger.Event(
-         LOG_WARNING,"RISK","RISK_LOCK_ACTIVE",
-         runtime.symbol,EnumToString(runtime.signal_tf),"","","REJECT",
-         "RISK_LOCK","Trading locked by portfolio state");
-     }
-
-   return true;
-  }
-
-int EvaluateRuntimeStrategies(CSymbolRuntime &runtime,
-                              const StrategyContext &context,
-                              const ENUM_REGIME_TYPE signal_regime,
-                              const ENUM_REGIME_TYPE structure_regime,
-                              StrategySignal &candidates[],
-                              string &diagnostics)
-  {
-   for(int i=0;i<5;i++)
-     {
-      candidates[i].valid=false;
-      candidates[i].direction=SIGNAL_NONE;
-     }
-
-   diagnostics="";
-   int candidate_count=0;
-
-   bool trend_enabled=ProfileStrategyEnabled(
-      InpProfile,
-      STRATEGY_TREND_PULLBACK);
-   bool breakout_enabled=ProfileStrategyEnabled(
-      InpProfile,
-      STRATEGY_BREAKOUT);
-   bool momentum_enabled=ProfileStrategyEnabled(
-      InpProfile,
-      STRATEGY_MOMENTUM);
-   bool mean_reversion_enabled=
-      InpEnableMeanReversion &&
-      ProfileStrategyEnabled(
-         InpProfile,
-         STRATEGY_MEAN_REVERSION);
-
-   string trend_status=
-      !context.trading_allowed ?
-      "RISK_LOCK" :
-      (!trend_enabled ?
-       "DISABLED" :
-       StrategyRegimeRejection(
-          STRATEGY_TREND_PULLBACK,
-          signal_regime,
-          structure_regime));
-   if(trend_status=="")
-     {
-      StrategySignal signal;
-      if(runtime.trend.Evaluate(context,signal) && signal.valid)
-        {
-         candidates[candidate_count]=signal;
-         candidate_count++;
-         trend_status="CANDIDATE";
-        }
-      else
-         trend_status="NO_SIGNAL_RETURNED";
-     }
-
-   string breakout_status=
-      !context.trading_allowed ?
-      "RISK_LOCK" :
-      (!breakout_enabled ?
-       "DISABLED" :
-       StrategyRegimeRejection(
-          STRATEGY_BREAKOUT,
-          signal_regime,
-          structure_regime));
-   if(breakout_status=="")
-     {
-      StrategySignal signal;
-      if(runtime.breakout.Evaluate(context,signal) && signal.valid)
-        {
-         candidates[candidate_count]=signal;
-         candidate_count++;
-         breakout_status="CANDIDATE";
-        }
-      else
-         breakout_status="NO_SIGNAL_RETURNED";
-     }
-
-   string momentum_status=
-      !context.trading_allowed ?
-      "RISK_LOCK" :
-      (!momentum_enabled ?
-       "DISABLED" :
-       StrategyRegimeRejection(
-          STRATEGY_MOMENTUM,
-          signal_regime,
-          structure_regime));
-   if(momentum_status=="")
-     {
-      StrategySignal signal;
-      if(runtime.momentum.Evaluate(context,signal) && signal.valid)
-        {
-         candidates[candidate_count]=signal;
-         candidate_count++;
-         momentum_status="CANDIDATE";
-        }
-      else
-         momentum_status="NO_SIGNAL_RETURNED";
-     }
-
-   string mean_reversion_status=
-      !context.trading_allowed ?
-      "RISK_LOCK" :
-      (!InpEnableMeanReversion ?
-       "DISABLED_GLOBAL" :
-       (!mean_reversion_enabled ?
-        "DISABLED_PROFILE" :
-        StrategyRegimeRejection(
-           STRATEGY_MEAN_REVERSION,
-           signal_regime,
-           structure_regime)));
-   if(mean_reversion_status=="")
-     {
-      StrategySignal signal;
-      if(runtime.mean_reversion.Evaluate(context,signal) && signal.valid)
-        {
-         candidates[candidate_count]=signal;
-         candidate_count++;
-         mean_reversion_status="CANDIDATE";
-        }
-      else
-         mean_reversion_status="NO_SIGNAL_RETURNED";
-     }
-
-   // Relative Value is multi-leg and is intentionally not converted
-   // into the single-leg StrategySignal path.
-   if(InpEnableRelativeValue &&
-      runtime.symbol==InpGoldSymbol)
-     {
-      g_relative_value.SetPair(
-         InpGoldSymbol,
-         InpSilverSymbol);
-
-      if(g_relative_value.Initialize())
-        {
-         RelativeValueOpportunity rv;
-         if(g_relative_value.EvaluatePair(
-               runtime.signal_tf,
-               rv))
-           {
-            g_logger.Info(
-               "RelativeValue opportunity: "+
-               rv.reason+
-               " z="+
-               DoubleToString(rv.zscore,2)+
-               " score="+
-               DoubleToString(rv.score,1));
-           }
-        }
-     }
-
-   diagnostics=
-      "readiness=signal_market:READY,signal_features:READY"+
-      ",entry_market:READY,entry_features:READY"+
-      ",structure_market:READY,structure_features:READY"+
-      " risk_lock="+
-      (context.trading_allowed ? "NO" : "YES")+
-      " enabled=trend:"+(trend_enabled ? "yes" : "no")+
-      ",breakout:"+(breakout_enabled ? "yes" : "no")+
-      ",momentum:"+(momentum_enabled ? "yes" : "no")+
-      ",mean_reversion:"+(mean_reversion_enabled ? "yes" : "no")+
-      " eligibility=trend:"+trend_status+
-      ",breakout:"+breakout_status+
-      ",momentum:"+momentum_status+
-      ",mean_reversion:"+mean_reversion_status;
-
-   return candidate_count;
-  }
-
-void ProcessRuntimeCandidates(CSymbolRuntime &runtime,
-                              const StrategySignal &candidates[],
-                              const int candidate_count,
-                              const MarketSnapshot &signal_market,
-                              const FeatureSet &signal_features,
-                              const ENUM_REGIME_TYPE signal_regime,
-                              const ENUM_REGIME_TYPE entry_regime,
-                              const ENUM_REGIME_TYPE structure_regime,
-                              const string strategy_diagnostics,
-                              const PortfolioState &portfolio_state)
-  {
-   StrategySignal selected_signal;
-   selected_signal.valid=false;
-
-   StrategySignal normalized_candidates[5];
-   int normalized_count=0;
-   for(int i=0;i<candidate_count;i++)
-     {
-      StrategySignal candidate=candidates[i];
-      string normalization_failure="";
-
-      if(!NormalizeSignalStopsToTick(
-            candidate,
-            normalization_failure))
+      if(decision.status==DECISION_NEWS_BLOCKED)
         {
          g_logger.Event(
-            LOG_WARNING,"SIGNAL","SIGNAL_LEVELS_REJECTED",
-            candidate.symbol,
-            EnumToString(candidate.timeframe),
-            EnumToString(candidate.strategy),
-            candidate.signal_id,
-            "REJECT","INVALID_TICK_LEVELS",
-            normalization_failure);
-         continue;
+            LOG_INFO, "HYBRID", "DECISION_NEWS_BLOCKED",
+            runtime.symbol, "", "",
+            "", "NEWS_BLOCKED", decision.main_reason);
         }
+      else
+         if(decision.status==DECISION_DATA_UNAVAILABLE)
+           {
+            g_logger.Event(
+               LOG_DEBUG, "HYBRID", "DATA_UNAVAILABLE",
+               runtime.symbol, "", "",
+               "", "NO_DATA", decision.main_reason);
+           }
+         else
+            if(decision.status==DECISION_NO_TRADE)
+              {
+               g_logger.Event(
+                  LOG_DEBUG, "HYBRID", "NO_TRADE",
+                  runtime.symbol, "", "",
+                  "", "NO_TRADE", decision.main_reason +
+                  " | L=" + DoubleToString(decision.long_score,1) +
+                  " S=" + DoubleToString(decision.short_score,1));
+              }
+            else
+               if(decision.status==DECISION_CONFLICTED_SIGNAL)
+                 {
+                  g_logger.Event(
+                     LOG_INFO, "HYBRID", "CONFLICTED_SIGNAL",
+                     runtime.symbol, "", "",
+                     "", "CONFLICT", decision.main_reason +
+                     " | L=" + DoubleToString(decision.long_score,1) +
+                     " S=" + DoubleToString(decision.short_score,1));
+                 }
 
-      normalized_candidates[normalized_count]=candidate;
-      normalized_count++;
-     }
-
-   int compatible_count=0;
-   string validation_rejections="";
-   bool compatibility_checked=
-      g_signal_engine.CountCompatible(
-         normalized_candidates,
-         normalized_count,
-         compatible_count,
-         validation_rejections);
-
-   bool selected=false;
-   if(compatible_count>0)
-     {
-      ResetLastError();
-      selected=g_signal_engine.Evaluate(
-         normalized_candidates,
-         normalized_count,
-         selected_signal);
-     }
-
-   string pipeline_result="SIGNAL_SELECTED";
-   if(candidate_count<=0)
-      pipeline_result="NO_STRATEGY_CANDIDATE";
-   else if(normalized_count<=0)
-      pipeline_result="INVALID_TICK_LEVELS";
-   else if(!compatibility_checked)
-      pipeline_result="SIGNAL_ENGINE_UNAVAILABLE";
-   else if(compatible_count<=0)
-      pipeline_result="SIGNAL_VALIDATION_REJECTED";
-   else if(!selected)
-      pipeline_result="CONFLICT_OR_ARBITRATION_REJECTED";
-
-   string pipeline_diagnostics=
-      "bar="+TimeToString(
-         signal_market.closed_bar_time,
-         TIME_DATE|TIME_MINUTES|TIME_SECONDS)+
-      " regimes=signal:"+EnumToString(signal_regime)+
-      ",entry:"+EnumToString(entry_regime)+
-      ",structure:"+EnumToString(structure_regime)+
-      " "+strategy_diagnostics+
-      " candidates=raw:"+IntegerToString(candidate_count)+
-      ",normalized:"+IntegerToString(normalized_count)+
-      ",compatible:"+IntegerToString(compatible_count)+
-      ",selected:"+(selected ? "1" : "0")+
-      " validation_rejections="+
-      (validation_rejections=="" ? "none" : validation_rejections);
-
-   g_logger.Event(
-      LOG_INFO,
-      "PIPELINE",
-      "SIGNAL_BAR_DIAGNOSTIC",
-      runtime.symbol,
-      EnumToString(runtime.signal_tf),
-      "",
-      "",
-      selected ? "SIGNAL" : "NO_SIGNAL",
-      pipeline_result,
-      pipeline_diagnostics);
-
-   if(!selected)
-     {
-      RiskDecision empty_risk;
-      empty_risk.decision=RISK_UNDEFINED;
-      g_dashboard.Update(
-         signal_market,
-         signal_features,
-         signal_regime,
-         selected_signal,
-         empty_risk,
-         portfolio_state);
       return;
      }
 
-   g_logger.Signal(selected_signal);
+   if(!decision.plan.valid)
+      return;
+
+   TradePlan normalized_plan = decision.plan;
+   string norm_reason="";
+   if(!NormalizeTradePlanStops(normalized_plan, norm_reason))
+     {
+      g_logger.Event(
+         LOG_WARNING, "HYBRID", "PLAN_STOP_NORMALIZE_FAILED",
+         runtime.symbol, "", "", decision.plan.setup_id,
+         "REJECT", "INVALID_STOPS", norm_reason);
+      return;
+     }
+
+   double entry=normalized_plan.entry;
+   double current_price=0;
+
+   MqlTick tick;
+   if(!SymbolInfoTick(runtime.symbol, tick))
+     {
+      g_logger.Event(
+         LOG_WARNING, "HYBRID", "TICK_UNAVAILABLE",
+         runtime.symbol, "", "", decision.plan.setup_id,
+         "REJECT", "NO_TICK", "Could not retrieve current tick");
+      return;
+     }
+
+   current_price =
+      (normalized_plan.direction==SIGNAL_LONG) ? tick.ask : tick.bid;
+
+   double point=runtime.hybrid_engine.GetPoint();
+   double max_entry_dist=GetEntryDistanceTolerance(runtime.style, point);
+
+   if(MathAbs(entry - current_price) > max_entry_dist)
+     {
+      int digits=(int)runtime.market_signal.GetSymbolDigits(runtime.symbol);
+      g_logger.Event(
+         LOG_WARNING, "HYBRID", "ENTRY_TOO_FAR",
+         runtime.symbol, "", "", decision.plan.setup_id,
+         "REJECT", "ENTRY_DISTANCE",
+         "entry=" + DoubleToString(entry, digits) +
+         " current=" + DoubleToString(current_price, digits) +
+         " max_dist=" + DoubleToString(max_entry_dist, digits));
+      return;
+     }
+
+   StrategySignal legacy_signal;
+   legacy_signal.valid=true;
+   legacy_signal.direction=normalized_plan.direction;
+   legacy_signal.strategy=STRATEGY_TREND_PULLBACK;
+   legacy_signal.symbol=runtime.symbol;
+   legacy_signal.timeframe=runtime.signal_tf;
+   legacy_signal.regime=(ENUM_REGIME_TYPE)decision.regime;
+   legacy_signal.score=(normalized_plan.direction==SIGNAL_LONG) ?
+                       decision.long_score : decision.short_score;
+   legacy_signal.confidence=1.0;
+   legacy_signal.entry=normalized_plan.entry;
+   legacy_signal.stop=normalized_plan.stop;
+   legacy_signal.target=normalized_plan.target;
+   legacy_signal.timestamp=normalized_plan.signal_time;
+   legacy_signal.signal_id=normalized_plan.setup_id;
+   legacy_signal.reason=decision.main_reason;
+
+   g_logger.Signal(legacy_signal);
 
    RiskDecision risk;
 
-   if(!g_risk_engine.Evaluate(
-         selected_signal,
-         risk))
+   if(!g_risk_engine.Evaluate(legacy_signal, risk))
      {
       g_logger.Risk(risk);
-      g_dashboard.Update(
-         signal_market,
-         signal_features,
-         signal_regime,
-         selected_signal,
-         risk,
-         portfolio_state);
+      g_dashboard.Update(decision, portfolio_state);
       return;
      }
 
-   if(!g_portfolio_risk.CanOpen(
-         selected_signal,
-         risk))
+   if(!g_portfolio_risk.CanOpen(legacy_signal, risk))
      {
       risk.decision=RISK_REJECTED;
       risk.rejection_reason=REJECT_PORTFOLIO_RISK;
-      risk.reason=
-         g_portfolio_risk.LastRejectionReason();
+      risk.reason=g_portfolio_risk.LastRejectionReason();
 
       g_logger.Event(
-         LOG_WARNING,"PORTFOLIO","PORTFOLIO_REJECTED",
-         selected_signal.symbol,
-         EnumToString(selected_signal.timeframe),
-         EnumToString(selected_signal.strategy),
-         selected_signal.signal_id,
-         "REJECT",
-         g_portfolio_risk.LastRejectionCode(),
+         LOG_WARNING, "PORTFOLIO", "PORTFOLIO_REJECTED",
+         legacy_signal.symbol,
+         "",
+         legacy_signal.signal_id,
+          "REJECT",
+          (double)g_portfolio_risk.LastRejectionCode(),
          g_portfolio_risk.LastRejectionReason(),
-         0,0,
-         risk.risk_percent,
+         0, 0,
+          (double)risk.risk_percent,
          g_portfolio_risk.CurrentRiskPercent(),
          portfolio_state.total_positions);
 
       g_logger.Risk(risk);
-      g_dashboard.Update(
-         signal_market,
-         signal_features,
-         signal_regime,
-         selected_signal,
-         risk,
-         portfolio_state);
+      g_dashboard.Update(decision, portfolio_state);
       return;
      }
 
-   g_logger.Risk(risk);
-
-   g_dashboard.Update(
-      signal_market,
-      signal_features,
-      signal_regime,
-      selected_signal,
-      risk,
-      portfolio_state);
+   g_dashboard.Update(decision, portfolio_state);
 
    bool execute=false;
 
@@ -1429,31 +754,43 @@ void ProcessRuntimeCandidates(CSymbolRuntime &runtime,
    if(!execute)
      {
       g_logger.Event(
-         LOG_DEBUG,"EXECUTION","EXECUTION_SKIPPED",
-         selected_signal.symbol,EnumToString(selected_signal.timeframe),
-         EnumToString(selected_signal.strategy),selected_signal.signal_id,
-         "NOOP","SIGNAL_ONLY","Execution disabled by mode");
+         LOG_DEBUG, "EXECUTION", "EXECUTION_SKIPPED",
+         runtime.symbol, "", "",
+         legacy_signal.signal_id,
+         "NOOP", "SIGNAL_ONLY", "Execution disabled by mode");
       return;
      }
 
    ExecutionRequest request;
-   BuildExecutionRequest(
-      selected_signal,
-      risk,
-      request);
+   request.intent =
+      normalized_plan.direction==SIGNAL_LONG ?
+      ORDER_INTENT_OPEN_LONG :
+      ORDER_INTENT_OPEN_SHORT;
+   request.symbol=runtime.symbol;
+   request.direction=normalized_plan.direction;
+   request.strategy=STRATEGY_TREND_PULLBACK;
+   request.volume=risk.calculated_volume;
+   request.price=normalized_plan.entry;
+   request.stop_loss=normalized_plan.stop;
+   request.take_profit=normalized_plan.target;
+   request.position_ticket=0;
+   request.magic=MagicForStyle(runtime.style);
+   request.comment="AlgoMultiAssetEA_Hybrid";
+   request.signal_id=normalized_plan.setup_id;
 
    g_logger.Event(
-      LOG_INFO,"EXECUTION","EXECUTION_SUBMITTED",
-      request.symbol,EnumToString(selected_signal.timeframe),
-      EnumToString(request.strategy),request.signal_id,
-      "SUBMIT","EXECUTION_READY","Order execution request ready",
-      0,0,request.volume,request.stop_loss,request.take_profit);
+      LOG_INFO, "EXECUTION", "EXECUTION_SUBMITTED",
+      request.symbol, "", "",
+      request.signal_id,
+      "SUBMIT", "EXECUTION_READY", "Order execution request ready",
+      0, 0,
+      request.volume,
+      request.stop_loss,
+      request.take_profit);
 
    ExecutionResult result;
 
-   if(!g_executor.Execute(
-         request,
-         result))
+   if(!g_executor.Execute(request, result))
      {
       g_logger.Trade(result);
       return;
@@ -1462,164 +799,200 @@ void ProcessRuntimeCandidates(CSymbolRuntime &runtime,
    g_logger.Trade(result);
    if(!g_state.UpdateAfterTrade(result))
       g_logger.Event(
-         LOG_ERROR,"STATE","STATE_RECONSTRUCT_FAILED",
-         selected_signal.symbol,
-         EnumToString(selected_signal.timeframe),
-         EnumToString(selected_signal.strategy),
-         selected_signal.signal_id,
-         "FAIL","HISTORY_OR_ACCOUNT_STATE",
+         LOG_ERROR, "STATE", "STATE_RECONSTRUCT_FAILED",
+         runtime.symbol, "", "",
+         legacy_signal.signal_id,
+         "FAIL", "HISTORY_OR_ACCOUNT_STATE",
          "Post-trade state reconstruction failed; new entries blocked");
   }
 
-void ProcessRuntime(CSymbolRuntime &runtime)
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void ProcessRuntime(CSymbolRuntime& runtime)
   {
    if(!runtime.valid || !g_system_ready)
       return;
 
    if(!g_session_filter.IsAllowed(TimeCurrent()))
      {
-      ShowRuntimeGateStatus(runtime,"BLOCKED: SESSION FILTER");
+      ShowRuntimeGateStatus(runtime, "BLOCKED: SESSION FILTER");
       return;
      }
 
-   // Refresh the regime on each closed entry bar. Strategy evaluation
-   // remains synchronized to a new closed signal bar.
    if(!runtime.market_entry.IsNewClosedBar(
          runtime.symbol,
          runtime.entry_tf))
      {
-      ShowRuntimeGateStatus(
-         runtime,
-         "WAITING: ENTRY BAR");
+      ShowRuntimeGateStatus(runtime, "WAITING: ENTRY BAR");
       return;
      }
 
-   if(!UpdateRuntimeEntryRegime(runtime))
+   MarketSnapshot signal_market;
+   MarketSnapshot structure_market;
+   MarketSnapshot entry_market;
+   FeatureSet signal_features;
+   FeatureSet structure_features;
+   FeatureSet entry_features;
+   string reason="";
+
+   ResetLastError();
+   if(!runtime.market_signal.GetSnapshot(
+         runtime.symbol,
+         runtime.signal_tf,
+         signal_market))
      {
-      ShowRuntimeGateStatus(
-         runtime,
-         "BLOCKED: ENTRY REGIME DATA");
+      g_logger.Event(
+         LOG_ERROR, "MARKET", "MARKET_SNAPSHOT_FAILED",
+         runtime.symbol, "", "",
+         "", "FAIL", "SIGNAL_SNAPSHOT",
+         "Market signal snapshot failed", GetLastError());
+      ResetLastError();
+      ShowRuntimeGateStatus(runtime, "BLOCKED: SIGNAL DATA");
       return;
+     }
+
+   ResetLastError();
+   if(!runtime.market_structure.GetSnapshot(
+         runtime.symbol,
+         runtime.structure_tf,
+         structure_market))
+     {
+      g_logger.Event(
+         LOG_ERROR, "MARKET", "MARKET_SNAPSHOT_FAILED",
+         runtime.symbol, "", "",
+         "", "FAIL", "STRUCTURE_SNAPSHOT",
+         "Market structure snapshot failed", GetLastError());
+      ResetLastError();
+      ShowRuntimeGateStatus(runtime, "BLOCKED: STRUCTURE DATA");
+      return;
+     }
+
+   ResetLastError();
+   if(!runtime.market_entry.GetSnapshot(
+         runtime.symbol,
+         runtime.entry_tf,
+         entry_market))
+     {
+      g_logger.Event(
+         LOG_ERROR, "MARKET", "MARKET_SNAPSHOT_FAILED",
+         runtime.symbol, "", "",
+         "", "FAIL", "ENTRY_SNAPSHOT",
+         "Market entry snapshot failed", GetLastError());
+      ResetLastError();
+      ShowRuntimeGateStatus(runtime, "BLOCKED: ENTRY DATA");
+      return;
+     }
+
+   ResetLastError();
+   if(!runtime.feature_signal.Calculate(signal_market, signal_features))
+     {
+      g_logger.Event(
+         LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
+         runtime.symbol, "", "",
+         "", "FAIL", "SIGNAL_FEATURES",
+         "Signal feature calculation failed", GetLastError());
+      ResetLastError();
+      ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
+      return;
+     }
+
+   ResetLastError();
+   if(!runtime.feature_structure.Calculate(structure_market, structure_features))
+     {
+      g_logger.Event(
+         LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
+         runtime.symbol, "", "",
+         "", "FAIL", "STRUCTURE_FEATURES",
+         "Structure feature calculation failed", GetLastError());
+      ResetLastError();
      }
 
    if(!runtime.market_signal.IsNewClosedBar(
          runtime.symbol,
          runtime.signal_tf))
      {
-      ShowRuntimeGateStatus(
-         runtime,
-         "WAITING: SIGNAL BAR");
+      ShowRuntimeGateStatus(runtime, "WAITING: SIGNAL BAR");
       return;
      }
 
-   MarketSnapshot signal_market;
-   MarketSnapshot structure_market;
-   FeatureSet signal_features;
-   FeatureSet structure_features;
-   ENUM_REGIME_TYPE signal_regime;
-   ENUM_REGIME_TYPE structure_regime;
-
-   if(!PrepareRuntimeAnalysis(
-         runtime,
-         signal_market,
-         structure_market,
-         signal_features,
-         structure_features,
-         signal_regime,
-         structure_regime))
-      return;
-
-   if(!runtime.entry_regime_valid ||
-      runtime.entry_regime_bar_time<=0)
-     {
-      ShowRuntimeGateStatus(
-         runtime,
-         "BLOCKED: ENTRY REGIME UNAVAILABLE");
-      return;
-     }
-
-   StrategyContext context;
    PortfolioState portfolio_state;
-   if(!BuildRuntimeStrategyContext(
-      runtime,
-      signal_market,
-      signal_features,
-      signal_regime,
-      context,
-      portfolio_state))
+   if(!g_state.GetPortfolioState(portfolio_state))
+     {
+      g_logger.Event(
+         LOG_ERROR, "RISK", "RISK_STATE_UNAVAILABLE",
+         runtime.symbol, "", "",
+         "", "REJECT", "RISK_STATE",
+         "Portfolio state is unavailable; entry blocked");
+      ShowRuntimeGateStatus(runtime, "BLOCKED: RISK STATE UNAVAILABLE");
       return;
+     }
 
-   StrategySignal candidates[5];
-   string strategy_diagnostics="";
-   int candidate_count=
-      EvaluateRuntimeStrategies(
-         runtime,
-         context,
-         signal_regime,
-         structure_regime,
-         candidates,
-         strategy_diagnostics);
+   LogRiskLockTransition(portfolio_state);
 
-   ProcessRuntimeCandidates(
-      runtime,
-      candidates,
-      candidate_count,
-      signal_market,
-      signal_features,
-      signal_regime,
-      runtime.entry_regime,
-      structure_regime,
-      strategy_diagnostics,
-      portfolio_state);
+   if(portfolio_state.trading_locked)
+     {
+      g_logger.Event(
+         LOG_WARNING, "RISK", "RISK_LOCK_ACTIVE",
+         runtime.symbol, "", "",
+         "", "REJECT", "RISK_LOCK",
+         "Trading locked by portfolio state");
+      ShowRuntimeGateStatus(runtime, "BLOCKED: RISK LOCK");
+      return;
+     }
+
+   bool ok=false;
+   FeatureContext ctx = runtime.hybrid_engine.BuildFeatureContext(
+                           signal_market,
+                           structure_market,
+                           entry_market,
+                           portfolio_state,
+                           ok);
+
+   if(!ok || !ctx.valid)
+     {
+      g_logger.Event(
+         LOG_WARNING, "HYBRID", "CONTEXT_BUILD_FAILED",
+         runtime.symbol, "", "",
+         "", "WARN", "CONTEXT_INVALID", ctx.reason);
+      ShowRuntimeGateStatus(runtime, "BLOCKED: CONTEXT INVALID");
+      return;
+     }
+
+   HybridDecision decision = runtime.hybrid_engine.Evaluate(
+                                runtime.symbol, ctx, signal_market, ok);
+
+   ProcessHybridDecision(runtime, decision, portfolio_state);
   }
 
 //==================================================================
-// Initialization diagnostics
+// Initialization
 //==================================================================
-void InitFailure(const string stage,const string detail="")
-  {
-   int err=GetLastError();
-   g_logger.Event(
-      LOG_ERROR,
-      "INIT",
-      "INIT_FAILED",
-      "",
-      "",
-      stage,
-      "",
-      "FAIL",
-      "INIT",
-      detail,
-      err);
-   ResetLastError();
-  }
-
-bool ValidateConfiguredSymbol(const string role,const string symbol)
+bool ValidateConfiguredSymbol(const string role,
+                              const string symbol)
   {
    if(symbol=="")
      {
       g_logger.Event(
-         LOG_INFO,"INIT","INIT_SYMBOL_DISABLED",
-         "","",role,"","SKIP","SYMBOL_DISABLED","No symbol configured");
+         LOG_INFO, "INIT", "INIT_SYMBOL_DISABLED",
+         "", "", role, "",
+         "SKIP", "SYMBOL_DISABLED", "No symbol configured");
       return true;
      }
 
    bool custom=false;
    ResetLastError();
-   if(!SymbolExist(symbol,custom))
-     {
+   if(!SymbolExist(symbol, custom))
       return true;
-     }
 
    ResetLastError();
-   if(!SymbolSelect(symbol,true))
-     {
+   if(!SymbolSelect(symbol, true))
       return true;
-     }
 
    g_logger.Event(
-      LOG_INFO,"INIT","INIT_SYMBOL_SELECTED",
-      symbol,"",role,"","OK","SYMBOL_SELECTED",
+      LOG_INFO, "INIT", "INIT_SYMBOL_SELECTED",
+      symbol, "", role, "",
+      "OK", "SYMBOL_SELECTED",
       "Configured symbol is selected; synchronization is checked asynchronously");
    return true;
   }
@@ -1631,6 +1004,9 @@ enum ENUM_SYSTEM_INIT_STATUS
    SYSTEM_INIT_READY=1
   };
 
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
 int InitializePendingRuntimes()
   {
    string symbols[3];
@@ -1646,8 +1022,8 @@ int InitializePendingRuntimes()
    ENUM_TIMEFRAMES structure_tf;
    ENUM_TIMEFRAMES signal_tf;
    ENUM_TIMEFRAMES entry_tf;
-   SelectProfileTimeframes(
-      InpProfile,
+   SelectStyleTimeframes(
+      InpTradingStyle,
       structure_tf,
       signal_tf,
       entry_tf);
@@ -1657,7 +1033,7 @@ int InitializePendingRuntimes()
    timeframes[1]=signal_tf;
    timeframes[2]=entry_tf;
 
-   bool tester_single_symbol=
+   bool tester_single_symbol =
       (MQLInfoInteger(MQL_TESTER)!=0);
    int runtime_count=0;
 
@@ -1672,9 +1048,9 @@ int InitializePendingRuntimes()
          if(g_runtime_wait_state[i]!="TESTER_SKIPPED")
            {
             g_logger.Event(
-               LOG_INFO,"INIT","INIT_TESTER_SYMBOL_SKIPPED",
-               symbols[i],"",roles[i],"","SKIP",
-               "TESTER_SINGLE_SYMBOL",
+               LOG_INFO, "INIT", "INIT_TESTER_SYMBOL_SKIPPED",
+               symbols[i], "", roles[i], "",
+               "SKIP", "TESTER_SINGLE_SYMBOL",
                "Tester evaluates the chart symbol only");
             g_runtime_wait_state[i]="TESTER_SKIPPED";
            }
@@ -1682,22 +1058,22 @@ int InitializePendingRuntimes()
         }
 
       bool custom_symbol=false;
-      if(!SymbolExist(symbols[i],custom_symbol))
+      if(!SymbolExist(symbols[i], custom_symbol))
         {
          if(g_runtime_wait_state[i]!="SYMBOL_MISSING")
            {
             g_runtime_wait_state[i]="SYMBOL_MISSING";
             g_logger.Event(
-               LOG_WARNING,"INIT","INIT_SYMBOL_UNAVAILABLE",
-               symbols[i],"",roles[i],"","SKIP",
-               "SYMBOL_MISSING",
+               LOG_WARNING, "INIT", "INIT_SYMBOL_UNAVAILABLE",
+               symbols[i], "", roles[i], "",
+               "SKIP", "SYMBOL_MISSING",
                "Configured symbol is unavailable; other symbols remain active");
            }
          continue;
         }
 
       ResetLastError();
-      if(!SymbolSelect(symbols[i],true))
+      if(!SymbolSelect(symbols[i], true))
         {
          int select_error=GetLastError();
          string select_state=
@@ -1706,9 +1082,9 @@ int InitializePendingRuntimes()
            {
             g_runtime_wait_state[i]=select_state;
             g_logger.Event(
-               LOG_WARNING,"INIT","INIT_SYMBOL_UNAVAILABLE",
-               symbols[i],"",roles[i],"","WAIT",
-               "SYMBOL_SELECT",
+               LOG_WARNING, "INIT", "INIT_SYMBOL_UNAVAILABLE",
+               symbols[i], "", roles[i], "",
+               "WAIT", "SYMBOL_SELECT",
                "Unable to select configured symbol; other symbols remain active",
                select_error);
            }
@@ -1732,11 +1108,10 @@ int InitializePendingRuntimes()
             MqlRates rates[1];
             ResetLastError();
             int copied=CopyRates(
-               symbols[i],
-               timeframes[timeframe_index],
-               0,
-               1,
-               rates);
+                          symbols[i],
+                          timeframes[timeframe_index],
+                          0, 1,
+                          rates);
             int request_error=GetLastError();
 
             if(copied!=1)
@@ -1759,9 +1134,9 @@ int InitializePendingRuntimes()
            {
             g_runtime_wait_state[i]=wait_state;
             g_logger.Event(
-               LOG_INFO,"INIT","INIT_SYMBOL_WAITING",
-               symbols[i],"",roles[i],"","WAIT",
-               "SYMBOL_SYNC",
+               LOG_INFO, "INIT", "INIT_SYMBOL_WAITING",
+               symbols[i], "", roles[i], "",
+               "WAIT", "SYMBOL_SYNC",
                "Waiting for this symbol only: "+wait_state);
            }
          continue;
@@ -1770,6 +1145,7 @@ int InitializePendingRuntimes()
       g_runtime_wait_state[i]="";
       if(!g_runtime[i].Initialize(
             symbols[i],
+            InpTradingStyle,
             structure_tf,
             signal_tf,
             entry_tf))
@@ -1779,9 +1155,9 @@ int InitializePendingRuntimes()
            {
             g_runtime_init_failure[i]=failure;
             g_logger.Event(
-               LOG_WARNING,"INIT","INIT_RUNTIME_PENDING",
-               symbols[i],"",roles[i],"","WAIT",
-               "RUNTIME_INIT",
+               LOG_WARNING, "INIT", "INIT_RUNTIME_PENDING",
+               symbols[i], "", roles[i], "",
+               "WAIT", "RUNTIME_INIT",
                "Runtime initialization failed; other symbols remain active: "+
                failure,
                GetLastError());
@@ -1793,14 +1169,17 @@ int InitializePendingRuntimes()
       g_runtime_init_failure[i]="";
       runtime_count++;
       g_logger.Event(
-         LOG_INFO,"INIT","INIT_RUNTIME_READY",
-         symbols[i],"",roles[i],"","READY",
-         "RUNTIME_INIT","Symbol runtime initialized");
+         LOG_INFO, "INIT", "INIT_RUNTIME_READY",
+         symbols[i], "", roles[i], "",
+         "READY", "RUNTIME_INIT", "Symbol runtime initialized");
      }
 
    return runtime_count;
   }
 
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
 ENUM_SYSTEM_INIT_STATUS InitializeSystemWhenReady()
   {
    if(g_system_ready)
@@ -1819,9 +1198,8 @@ ENUM_SYSTEM_INIT_STATUS InitializeSystemWhenReady()
    if(!g_state.Initialize())
      {
       g_initialization_started=false;
-      InitFailure(
-         "StateManager.Initialize",
-         "Risk state reconstruction failed; history or account metrics are unavailable");
+      LogInitFailure("StateManager.Initialize",
+                     "Risk state reconstruction failed; history or account metrics are unavailable");
       return SYSTEM_INIT_FAILED;
      }
 
@@ -1838,7 +1216,7 @@ ENUM_SYSTEM_INIT_STATUS InitializeSystemWhenReady()
    if(!g_risk_engine.Initialize())
      {
       g_initialization_started=false;
-      InitFailure("RiskEngine.Initialize");
+      LogInitFailure("RiskEngine.Initialize");
       return SYSTEM_INIT_FAILED;
      }
 
@@ -1854,22 +1232,20 @@ ENUM_SYSTEM_INIT_STATUS InitializeSystemWhenReady()
    if(!g_portfolio_risk.Initialize())
      {
       g_initialization_started=false;
-      InitFailure("PortfolioRisk.Initialize");
+      LogInitFailure("PortfolioRisk.Initialize");
       return SYSTEM_INIT_FAILED;
      }
 
-   g_executor.SetDeviationPoints(
-      InpDeviationPoints);
+   g_executor.SetDeviationPoints(InpDeviationPoints);
 
    if(!g_executor.Initialize())
      {
       g_initialization_started=false;
-      InitFailure("TradeExecutor.Initialize");
+      LogInitFailure("TradeExecutor.Initialize");
       return SYSTEM_INIT_FAILED;
      }
 
-   g_position_manager.SetExecutor(
-      &g_executor);
+   g_position_manager.SetExecutor(&g_executor);
 
    g_position_manager.SetBreakEven(
       InpBreakEven,
@@ -1889,18 +1265,7 @@ ENUM_SYSTEM_INIT_STATUS InitializeSystemWhenReady()
    if(!g_position_manager.Initialize())
      {
       g_initialization_started=false;
-      InitFailure("PositionManager.Initialize");
-      return SYSTEM_INIT_FAILED;
-     }
-
-   g_signal_engine.SetParameters(
-      InpConflictThreshold,
-      0.0);
-
-   if(!g_signal_engine.Initialize())
-     {
-      g_initialization_started=false;
-      InitFailure("SignalEngine.Initialize");
+      LogInitFailure("PositionManager.Initialize");
       return SYSTEM_INIT_FAILED;
      }
 
@@ -1909,9 +1274,8 @@ ENUM_SYSTEM_INIT_STATUS InitializeSystemWhenReady()
    if(!g_state.Reconstruct())
      {
       g_initialization_started=false;
-      InitFailure(
-         "StateManager.Reconstruct",
-         "Risk state reconstruction failed; trading remains disabled");
+      LogInitFailure("StateManager.Reconstruct",
+                     "Risk state reconstruction failed; trading remains disabled");
       return SYSTEM_INIT_FAILED;
      }
 
@@ -1925,12 +1289,18 @@ ENUM_SYSTEM_INIT_STATUS InitializeSystemWhenReady()
    g_system_ready=true;
 
    g_logger.Event(
-      LOG_INFO,"SYSTEM","SYSTEM_READY",
-      _Symbol,EnumToString((ENUM_TIMEFRAMES)_Period),"","",
-      "READY","INIT_COMPLETE",
-      "AlgoMultiAssetEA initialized version="+ALGO_SYSTEM_VERSION+
+      LOG_INFO, "SYSTEM", "SYSTEM_READY",
+      _Symbol, EnumToString((ENUM_TIMEFRAMES)_Period), "", "",
+      "READY", "INIT_COMPLETE",
+      "AlgoMultiAssetEA Hybrid version="+
+      ALGO_SYSTEM_VERSION+
+      " style="+StyleName(InpTradingStyle)+
       " mode="+IntegerToString((int)InpMode)+
       " runtimes_ready="+IntegerToString(runtime_count));
+
+   g_dashboard.SetCompactView(InpDashboardCompact);
+   g_dashboard.ShowDiagnostics(InpDashboardDiagnostics);
+   g_dashboard.ShowOverlay(InpDashboardOverlay);
 
    UpdateDashboardForChart();
    return SYSTEM_INIT_READY;
@@ -1953,14 +1323,17 @@ int OnInit()
       g_logger.EnableFile(false);
 
    g_logger.Event(
-      LOG_INFO,"SYSTEM","SYSTEM_START",
-      _Symbol,EnumToString((ENUM_TIMEFRAMES)_Period),"","",
-      "START","RUN",
-      "AlgoMultiAssetEA OnInit started RunID="+g_logger.RunId());
+      LOG_INFO, "SYSTEM", "SYSTEM_START",
+      _Symbol, EnumToString((ENUM_TIMEFRAMES)_Period), "", "",
+      "START", "RUN",
+      "AlgoMultiAssetEA Hybrid OnInit started RunID="+g_logger.RunId());
 
    if(!ValidInputSet())
      {
-      InitFailure("ValidInputSet");
+      g_logger.Event(
+         LOG_ERROR, "INIT", "INIT_FAILED",
+         "", "", "ValidInputSet", "",
+         "FAIL", "INIT", "Invalid input parameters", 0);
       return INIT_PARAMETERS_INCORRECT;
      }
 
@@ -1968,32 +1341,42 @@ int OnInit()
       !MQLInfoInteger(MQL_TESTER) &&
       !InpLiveAutoConfirm)
      {
-      InitFailure("LiveAutoConfirm","MODE_AUTO requires InpLiveAutoConfirm=true");
+      g_logger.Event(
+         LOG_ERROR, "INIT", "INIT_FAILED",
+         "", "", "LiveAutoConfirm", "",
+         "FAIL", "INIT", "MODE_AUTO requires InpLiveAutoConfirm=true", 0);
       return INIT_PARAMETERS_INCORRECT;
      }
 
    if(InpMode==MODE_BACKTEST &&
       !MQLInfoInteger(MQL_TESTER))
      {
-      InitFailure("BacktestMode","MODE_BACKTEST requires Strategy Tester");
+      g_logger.Event(
+         LOG_ERROR, "INIT", "INIT_FAILED",
+         "", "", "BacktestMode", "",
+         "FAIL", "INIT", "MODE_BACKTEST requires Strategy Tester", 0);
       return INIT_PARAMETERS_INCORRECT;
      }
 
-   if(!ValidateConfiguredSymbol("GOLD",InpGoldSymbol))
+   if(!ValidateConfiguredSymbol("GOLD", InpGoldSymbol))
       return INIT_FAILED;
 
-   if(!ValidateConfiguredSymbol("SILVER",InpSilverSymbol))
+   if(!ValidateConfiguredSymbol("SILVER", InpSilverSymbol))
       return INIT_FAILED;
 
-   if(!ValidateConfiguredSymbol("BITCOIN",InpBitcoinSymbol))
+   if(!ValidateConfiguredSymbol("BITCOIN", InpBitcoinSymbol))
       return INIT_FAILED;
 
    g_dashboard.Enable(InpDashboard);
+   g_dashboard.SetTitle("ALGO HYBRID");
 
    ResetLastError();
    if(!EventSetTimer(5))
      {
-      InitFailure("EventSetTimer","5-second timer setup failed");
+      g_logger.Event(
+         LOG_ERROR, "INIT", "INIT_FAILED",
+         "", "", "EventSetTimer", "",
+         "FAIL", "INIT", "5-second timer setup failed", GetLastError());
       return INIT_FAILED;
      }
 
@@ -2026,6 +1409,9 @@ bool RefreshTradingState()
    return true;
   }
 
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
 void OnTick()
   {
    if(!g_system_ready)
@@ -2035,8 +1421,6 @@ void OnTick()
 
    g_logger.MaybeWriteSummary(false);
 
-   // Position management runs tick-by-tick independently of signal
-   // generation.
    g_position_manager.Update();
 
    if(!risk_state_ready)
@@ -2074,10 +1458,8 @@ void OnTimer()
 
    bool risk_state_ready=RefreshTradingState();
 
-   // Refresh the chart-bound dashboard independently from signal-bar logic.
    UpdateDashboardForChart();
 
-   // Multi-symbol runtime must not depend on the chart symbol's ticks.
    g_position_manager.Update();
 
    if(!risk_state_ready)
@@ -2096,9 +1478,9 @@ void OnDeinit(const int reason)
      {
       g_logger.MaybeWriteSummary(true);
       g_logger.Event(
-         LOG_INFO,"SYSTEM","SYSTEM_STOP",
-         _Symbol,EnumToString((ENUM_TIMEFRAMES)_Period),"","",
-         "STOP","DEINIT",
+         LOG_INFO, "SYSTEM", "SYSTEM_STOP",
+         _Symbol, EnumToString((ENUM_TIMEFRAMES)_Period), "", "",
+         "STOP", "DEINIT",
          "OnDeinit reason="+IntegerToString(reason));
      }
 
@@ -2121,17 +1503,51 @@ double OnTester()
 //==================================================================
 int OnTesterInit()
   {
-   // Small, controlled optimization surface. Do not expand blindly.
-   ParameterSetRange("InpEMA_Fast",true,(double)InpEMA_Fast,10.0,5.0,40.0);
-   ParameterSetRange("InpEMA_Slow",true,(double)InpEMA_Slow,30.0,10.0,100.0);
-   ParameterSetRange("InpADXTrendThreshold",true,(double)InpADXTrendThreshold,15.0,5.0,35.0);
-   ParameterSetRange("InpBreakoutLookback",true,(double)InpBreakoutLookback,10.0,5.0,40.0);
+   if(MQLInfoInteger(MQL_OPTIMIZATION))
+     {
+      string param_names[4]=
+        {
+         "InpMinScore",
+         "InpConflictThreshold",
+         "InpADXTrendThreshold",
+         "InpRSIPeriod"
+        };
+
+      for(int i=0;i<ArraySize(param_names);i++)
+        {
+         string name=param_names[i];
+         bool enabled=false;
+         double current=0, start=0, step=0, stop=0;
+         if(ParameterGetRange(
+               name,
+               enabled,
+               current,
+               start,
+               step,
+               stop))
+           {
+            string msg=
+               name+
+               " current="+DoubleToString(current,2)+
+               " start="+DoubleToString(start,2)+
+               " step="+DoubleToString(step,2)+
+               " stop="+DoubleToString(stop,2);
+            g_logger.Log(LOG_INFO, msg);
+           }
+         else
+            g_logger.Log(
+               LOG_WARNING,
+               "OnTesterInit: could not read range for "+name);
+        }
+     }
 
    return INIT_SUCCEEDED;
   }
 
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
 void OnTesterDeinit()
   {
-   // Detailed pass aggregation is intentionally deferred to the
-   // explicit WFO/robustness orchestration layer.
   }
+//+------------------------------------------------------------------+

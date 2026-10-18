@@ -27,6 +27,7 @@ private:
    string            m_symbols[];
    ENUM_TIMEFRAMES   m_timeframes[];
    datetime          m_last_closed_bar[];
+   bool              m_caching_enabled;
 
    int FindRegistration(const string symbol,
                         const ENUM_TIMEFRAMES timeframe) const
@@ -189,6 +190,7 @@ public:
       ArrayResize(m_symbols,0);
       ArrayResize(m_timeframes,0);
       ArrayResize(m_last_closed_bar,0);
+      m_caching_enabled=false;
      }
 
    //+---------------------------------------------------------------+
@@ -477,7 +479,26 @@ public:
    //| Registered data stream count                                  |
    //+---------------------------------------------------------------+
 
-   int RegistrationCount() const
+    bool EnableCaching(bool enable)
+     {
+      m_caching_enabled = enable;
+      return true;
+     }
+
+    bool IsCachingEnabled() const
+     {
+      return m_caching_enabled;
+     }
+
+    int GetSymbolDigits(const string symbol) const
+     {
+      long digits=0;
+      if(!SymbolInfoInteger(symbol, SYMBOL_DIGITS, digits))
+         return 0;
+      return (int)digits;
+     }
+
+    int RegistrationCount() const
      {
       return ArraySize(m_symbols);
      }

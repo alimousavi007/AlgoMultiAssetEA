@@ -2,6 +2,7 @@
 #define __ALGOSYSTEM_LOGGER_MQH__
 
 #include "Interfaces.mqh"
+#include "HybridTypes.mqh"
 
 class CAlgoLogger : public ILogger
   {
@@ -672,25 +673,59 @@ public:
       Event(LOG_INFO,"SYSTEM","SYSTEM_INFO","","","","","INFO","",message);
      }
 
-   virtual void Signal(const StrategySignal &signal) override
-     {
-      Event(
-         LOG_SIGNAL,
-         "SIGNAL",
-         "SIGNAL_GENERATED",
-         signal.symbol,
-         EnumToString(signal.timeframe),
-         EnumToString(signal.strategy),
-         signal.signal_id,
-         "OK",
-         "SIGNAL_VALID",
-         signal.reason,
-         0,
-         0,
-         signal.score,
-         signal.confidence,
-         signal.entry);
-     }
+    virtual void Signal(const StrategySignal &signal) override
+      {
+       Event(
+          LOG_SIGNAL,
+          "SIGNAL",
+          "SIGNAL_GENERATED",
+          signal.symbol,
+          EnumToString(signal.timeframe),
+          EnumToString(signal.strategy),
+          signal.signal_id,
+          "OK",
+          "SIGNAL_VALID",
+          signal.reason,
+          0,
+          0,
+          signal.score,
+          signal.confidence,
+          signal.entry);
+      }
+
+    void Signal(const HybridDecision &decision)
+      {
+       string result="NO_TRADE";
+       switch(decision.status)
+         {
+          case DECISION_BUY_CANDIDATE:  result="BUY"; break;
+          case DECISION_SELL_CANDIDATE: result="SELL"; break;
+          case DECISION_NO_TRADE:       result="NO_TRADE"; break;
+          case DECISION_DATA_UNAVAILABLE: result="NO_DATA"; break;
+          case DECISION_NEWS_BLOCKED:   result="NEWS_BLOCKED"; break;
+          case DECISION_RISK_REJECTED:  result="RISK_REJECT"; break;
+          case DECISION_CONFLICTED_SIGNAL: result="CONFLICT"; break;
+          case DECISION_SETUP_EXPIRED:  result="EXPIRED"; break;
+          case DECISION_SETUP_INVALIDATED: result="INVALIDATED"; break;
+         }
+
+       Event(
+          LOG_SIGNAL,
+          "HYBRID",
+          "DECISION_EVALUATED",
+          decision.symbol,
+          "",
+          "",
+          "",
+          result,
+          decision.main_reason,
+          decision.evidence_summary,
+          0,
+          0,
+          decision.long_score,
+          decision.short_score,
+          (decision.plan.valid) ? decision.plan.entry : 0.0);
+      }
 
    virtual void Risk(const RiskDecision &decision) override
      {

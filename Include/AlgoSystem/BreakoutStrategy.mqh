@@ -54,33 +54,84 @@ private:
 
    bool m_initialized;
 
-   //+----------------------------------------------------------------+
-   //| Reset signal                                                   |
-   //+----------------------------------------------------------------+
-   void ResetSignal(StrategySignal &signal) const
-     {
-      signal.valid=false;
+//+----------------------------------------------------------------+
+    //| Log diagnostic event                                           |
+    //+----------------------------------------------------------------+
+    void LogDiagnostic(const StrategyContext &context,
+                       const string direction,
+                       const string reason_code,
+                       const double score=0.0,
+                       const double threshold=0.0) const
+      {
+       if(!context.market.valid)
+          return;
 
-      signal.direction=SIGNAL_NONE;
-      signal.strategy=STRATEGY_BREAKOUT;
+       string msg=
+          "symbol="+context.market.symbol+
+          "|tf="+EnumToString(context.market.timeframe)+
+          "|bar="+TimeToString(context.market.closed_bar.time,TIME_DATE|TIME_MINUTES|TIME_SECONDS)+
+          "|strategy=BREAKOUT"+
+          "|direction="+direction+
+          "|regime="+EnumToString(context.regime)+
+          "|outcome=REJECTED"+
+          "|reason="+reason_code;
 
-      signal.symbol="";
-      signal.timeframe=PERIOD_CURRENT;
+       if(score>0.0 || threshold>0.0)
+          msg+="|score="+DoubleToString(score,2)+"|threshold="+DoubleToString(threshold,2);
 
-      signal.regime=REGIME_UNKNOWN;
+       g_logger.Log(LOG_DEBUG,msg);
+      }
 
-      signal.score=0.0;
-      signal.confidence=0.0;
+    //+----------------------------------------------------------------+
+    //| Log candidate produced                                         |
+    //+----------------------------------------------------------------+
+    void LogCandidate(const StrategyContext &context,
+                      const string direction,
+                      const double score) const
+      {
+       if(!context.market.valid)
+          return;
 
-      signal.entry=0.0;
-      signal.stop=0.0;
-      signal.target=0.0;
+       string msg=
+          "symbol="+context.market.symbol+
+          "|tf="+EnumToString(context.market.timeframe)+
+          "|bar="+TimeToString(context.market.closed_bar.time,TIME_DATE|TIME_MINUTES|TIME_SECONDS)+
+          "|strategy=BREAKOUT"+
+          "|direction="+direction+
+          "|regime="+EnumToString(context.regime)+
+          "|outcome=CANDIDATE"+
+          "|score="+DoubleToString(score,2);
 
-      signal.timestamp=0;
+       g_logger.Log(LOG_DEBUG,msg);
+      }
 
-      signal.signal_id="";
-      signal.reason="";
-     }
+    //+----------------------------------------------------------------+
+    //| Reset signal                                                   |
+    //+----------------------------------------------------------------+
+    void ResetSignal(StrategySignal &signal) const
+      {
+       signal.valid=false;
+
+       signal.direction=SIGNAL_NONE;
+       signal.strategy=STRATEGY_BREAKOUT;
+
+       signal.symbol="";
+       signal.timeframe=PERIOD_CURRENT;
+
+       signal.regime=REGIME_UNKNOWN;
+
+       signal.score=0.0;
+       signal.confidence=0.0;
+
+       signal.entry=0.0;
+       signal.stop=0.0;
+       signal.target=0.0;
+
+       signal.timestamp=0;
+
+       signal.signal_id="";
+       signal.reason="";
+      }
 
    //+----------------------------------------------------------------+
    //| Validate parameters                                            |
@@ -192,77 +243,107 @@ private:
       return true;
      }
 
-   //+----------------------------------------------------------------+
-   //| Detect long breakout                                           |
-   //+----------------------------------------------------------------+
-   bool IsLongBreakout(const StrategyContext &context,
-                       const double range_high) const
-     {
-      if(context.regime!=REGIME_BREAKOUT)
-         return false;
+//+----------------------------------------------------------------+
+    //| Detect long breakout                                           |
+    //+----------------------------------------------------------------+
+    bool IsLongBreakout(const StrategyContext &context,
+                        const double range_high) const
+      {
+       if(context.regime!=REGIME_BREAKOUT)
+         {
+          LogDiagnostic(context,"LONG","REGIME_MISMATCH");
+          return false;
+         }
 
-      if(context.features.atr<=0.0)
-         return false;
+       if(context.features.atr<=0.0)
+         {
+          LogDiagnostic(context,"LONG","INVALID_ATR");
+          return false;
+         }
 
-      double breakout_level=
-         range_high+
-         context.features.atr*m_breakout_buffer_atr;
+       double breakout_level=
+          range_high+
+          context.features.atr*m_breakout_buffer_atr;
 
-      if(context.market.closed_bar.close<=breakout_level)
-         return false;
+       if(context.market.closed_bar.close<=breakout_level)
+         {
+          LogDiagnostic(context,"LONG","BREAKOUT_LEVEL_NOT_BREACHED");
+          return false;
+         }
 
-      // Require meaningful candle expansion.
-      double candle_range=
-         context.market.closed_bar.high-
-         context.market.closed_bar.low;
+       // Require meaningful candle expansion.
+       double candle_range=
+          context.market.closed_bar.high-
+          context.market.closed_bar.low;
 
-      if(candle_range<
-         context.features.atr*m_min_breakout_range_atr)
-         return false;
+       if(candle_range<
+          context.features.atr*m_min_breakout_range_atr)
+         {
+          LogDiagnostic(context,"LONG","CANDLE_EXPANSION_INSUFFICIENT");
+          return false;
+         }
 
-      // Bullish close.
-      if(context.market.closed_bar.close<=
-         context.market.closed_bar.open)
-         return false;
+       // Bullish close.
+       if(context.market.closed_bar.close<=
+          context.market.closed_bar.open)
+         {
+          LogDiagnostic(context,"LONG","CANDLE_NOT_BULLISH");
+          return false;
+         }
 
-      return true;
-     }
+       return true;
+      }
 
-   //+----------------------------------------------------------------+
-   //| Detect short breakout                                          |
-   //+----------------------------------------------------------------+
-   bool IsShortBreakout(const StrategyContext &context,
-                        const double range_low) const
-     {
-      if(context.regime!=REGIME_BREAKOUT)
-         return false;
+//+----------------------------------------------------------------+
+    //| Detect short breakout                                          |
+    //+----------------------------------------------------------------+
+    bool IsShortBreakout(const StrategyContext &context,
+                         const double range_low) const
+      {
+       if(context.regime!=REGIME_BREAKOUT)
+         {
+          LogDiagnostic(context,"SHORT","REGIME_MISMATCH");
+          return false;
+         }
 
-      if(context.features.atr<=0.0)
-         return false;
+       if(context.features.atr<=0.0)
+         {
+          LogDiagnostic(context,"SHORT","INVALID_ATR");
+          return false;
+         }
 
-      double breakout_level=
-         range_low-
-         context.features.atr*m_breakout_buffer_atr;
+       double breakout_level=
+          range_low-
+          context.features.atr*m_breakout_buffer_atr;
 
-      if(context.market.closed_bar.close>=breakout_level)
-         return false;
+       if(context.market.closed_bar.close>=breakout_level)
+         {
+          LogDiagnostic(context,"SHORT","BREAKOUT_LEVEL_NOT_BREACHED");
+          return false;
+         }
 
-      // Require meaningful candle expansion.
-      double candle_range=
-         context.market.closed_bar.high-
-         context.market.closed_bar.low;
+       // Require meaningful candle expansion.
+       double candle_range=
+          context.market.closed_bar.high-
+          context.market.closed_bar.low;
 
-      if(candle_range<
-         context.features.atr*m_min_breakout_range_atr)
-         return false;
+       if(candle_range<
+          context.features.atr*m_min_breakout_range_atr)
+         {
+          LogDiagnostic(context,"SHORT","CANDLE_EXPANSION_INSUFFICIENT");
+          return false;
+         }
 
-      // Bearish close.
-      if(context.market.closed_bar.close>=
-         context.market.closed_bar.open)
-         return false;
+       // Bearish close.
+       if(context.market.closed_bar.close>=
+          context.market.closed_bar.open)
+         {
+          LogDiagnostic(context,"SHORT","CANDLE_NOT_BEARISH");
+          return false;
+         }
 
-      return true;
-     }
+       return true;
+      }
 
    //+----------------------------------------------------------------+
    //| Score range compression                                        |
@@ -574,113 +655,137 @@ private:
          100.0);
      }
 
-   //+----------------------------------------------------------------+
-   //| Build long levels                                              |
-   //+----------------------------------------------------------------+
-   bool BuildLongLevels(
-      const StrategyContext &context,
-      const double range_low,
-      double &entry,
-      double &stop,
-      double &target) const
-     {
-      entry=context.market.closed_bar.close;
+//+----------------------------------------------------------------+
+    //| Build long levels                                              |
+    //+----------------------------------------------------------------+
+    bool BuildLongLevels(
+       const StrategyContext &context,
+       const double range_low,
+       double &entry,
+       double &stop,
+       double &target) const
+      {
+       entry=context.market.closed_bar.close;
 
-      if(entry<=0.0 ||
-         context.features.atr<=0.0)
-         return false;
+       if(entry<=0.0 ||
+          context.features.atr<=0.0)
+         {
+          LogDiagnostic(context,"LONG","INVALID_ENTRY_OR_ATR");
+          return false;
+         }
 
-      double atr_stop=
-         entry-
-         context.features.atr*m_stop_atr_multiplier;
+       double atr_stop=
+          entry-
+          context.features.atr*m_stop_atr_multiplier;
 
-      double structural_stop=
-         range_low-
-         context.features.atr*m_structure_buffer_atr;
+       double structural_stop=
+          range_low-
+          context.features.atr*m_structure_buffer_atr;
 
-      // Choose the wider protective boundary.
-      stop=MathMin(
-         atr_stop,
-         structural_stop);
+       // Choose the wider protective boundary.
+       stop=MathMin(
+          atr_stop,
+          structural_stop);
 
-      if(stop<=0.0 ||
-         stop>=entry)
-         return false;
+       if(stop<=0.0 ||
+          stop>=entry)
+         {
+          LogDiagnostic(context,"LONG","INVALID_STOP");
+          return false;
+         }
 
-      double distance=entry-stop;
+       double distance=entry-stop;
 
-      target=
-         entry+
-         distance*m_target_rr;
+       target=
+          entry+
+          distance*m_target_rr;
 
-      if(target<=entry)
-         return false;
+       if(target<=entry)
+         {
+          LogDiagnostic(context,"LONG","INVALID_TARGET");
+          return false;
+         }
 
-      double actual_rr=
-         CAlgoUtils::SafeDivide(
-            target-entry,
-            entry-stop,
-            0.0);
+       double actual_rr=
+          CAlgoUtils::SafeDivide(
+             target-entry,
+             entry-stop,
+             0.0);
 
-      if(actual_rr<m_target_rr)
-         return false;
+       if(actual_rr<m_target_rr)
+         {
+          LogDiagnostic(context,"LONG","RR_TOO_LOW");
+          return false;
+         }
 
-      return true;
-     }
+       return true;
+      }
 
-   //+----------------------------------------------------------------+
-   //| Build short levels                                             |
-   //+----------------------------------------------------------------+
-   bool BuildShortLevels(
-      const StrategyContext &context,
-      const double range_high,
-      double &entry,
-      double &stop,
-      double &target) const
-     {
-      entry=context.market.closed_bar.close;
+//+----------------------------------------------------------------+
+    //| Build short levels                                             |
+    //+----------------------------------------------------------------+
+    bool BuildShortLevels(
+       const StrategyContext &context,
+       const double range_high,
+       double &entry,
+       double &stop,
+       double &target) const
+      {
+       entry=context.market.closed_bar.close;
 
-      if(entry<=0.0 ||
-         context.features.atr<=0.0)
-         return false;
+       if(entry<=0.0 ||
+          context.features.atr<=0.0)
+         {
+          LogDiagnostic(context,"SHORT","INVALID_ENTRY_OR_ATR");
+          return false;
+         }
 
-      double atr_stop=
-         entry+
-         context.features.atr*m_stop_atr_multiplier;
+       double atr_stop=
+          entry+
+          context.features.atr*m_stop_atr_multiplier;
 
-      double structural_stop=
-         range_high+
-         context.features.atr*m_structure_buffer_atr;
+       double structural_stop=
+          range_high+
+          context.features.atr*m_structure_buffer_atr;
 
-      // Choose the wider protective boundary.
-      stop=MathMax(
-         atr_stop,
-         structural_stop);
+       // Choose the wider protective boundary.
+       stop=MathMax(
+          atr_stop,
+          structural_stop);
 
-      if(stop<=entry)
-         return false;
+       if(stop<=entry)
+         {
+          LogDiagnostic(context,"SHORT","INVALID_STOP");
+          return false;
+         }
 
-      double distance=stop-entry;
+       double distance=stop-entry;
 
-      target=
-         entry-
-         distance*m_target_rr;
+       target=
+          entry-
+          distance*m_target_rr;
 
-      if(target<=0.0 ||
-         target>=entry)
-         return false;
+       if(target<=0.0 ||
+          target>=entry)
+         {
+          LogDiagnostic(context,"SHORT","INVALID_TARGET");
+          return false;
+         }
 
-      double actual_rr=
-         CAlgoUtils::SafeDivide(
-            entry-target,
-            stop-entry,
-            0.0);
+       double actual_rr=
+          CAlgoUtils::SafeDivide(
+             entry-target,
+             stop-entry,
+             0.0);
 
-      if(actual_rr<m_target_rr)
-         return false;
+       if(actual_rr<m_target_rr)
+         {
+          LogDiagnostic(context,"SHORT","RR_TOO_LOW");
+          return false;
+         }
 
-      return true;
-     }
+       return true;
+      }
 
    //+----------------------------------------------------------------+
    //| Build signal ID                                                |
@@ -698,123 +803,131 @@ private:
                 TIME_DATE|TIME_MINUTES|TIME_SECONDS);
      }
 
-   //+----------------------------------------------------------------+
-   //| Build long signal                                              |
-   //+----------------------------------------------------------------+
-   bool BuildLongSignal(
-      const StrategyContext &context,
-      const double range_high,
-      const double range_low,
-      StrategySignal &signal) const
-     {
-      double score=
-         CalculateLongScore(
-            context,
-            range_high,
-            range_low);
+//+----------------------------------------------------------------+
+    //| Build long signal                                              |
+    //+----------------------------------------------------------------+
+    bool BuildLongSignal(
+       const StrategyContext &context,
+       const double range_high,
+       const double range_low,
+       StrategySignal &signal) const
+      {
+       double score=
+          CalculateLongScore(
+             context,
+             range_high,
+             range_low);
 
-      if(score<m_min_breakout_score)
-         return false;
+       if(score<m_min_breakout_score)
+         {
+          LogDiagnostic(context,"LONG","SCORE_BELOW_MINIMUM",score,m_min_breakout_score);
+          return false;
+         }
 
-      double entry;
-      double stop;
-      double target;
+       double entry;
+       double stop;
+       double target;
 
-      if(!BuildLongLevels(
-            context,
-            range_low,
-            entry,
-            stop,
-            target))
-         return false;
+       if(!BuildLongLevels(
+             context,
+             range_low,
+             entry,
+             stop,
+             target))
+          return false;
 
-      signal.valid=true;
+       signal.valid=true;
 
-      signal.direction=SIGNAL_LONG;
-      signal.strategy=STRATEGY_BREAKOUT;
+       signal.direction=SIGNAL_LONG;
+       signal.strategy=STRATEGY_BREAKOUT;
 
-      signal.symbol=context.market.symbol;
-      signal.timeframe=context.market.timeframe;
+       signal.symbol=context.market.symbol;
+       signal.timeframe=context.market.timeframe;
 
-      signal.regime=REGIME_BREAKOUT;
+       signal.regime=REGIME_BREAKOUT;
 
-      signal.score=score;
-      signal.confidence=score/100.0;
+       signal.score=score;
+       signal.confidence=score/100.0;
 
-      signal.entry=entry;
-      signal.stop=stop;
-      signal.target=target;
+       signal.entry=entry;
+       signal.stop=stop;
+       signal.target=target;
 
-      signal.timestamp=
-         context.market.closed_bar.time;
+       signal.timestamp=
+          context.market.closed_bar.time;
 
-      signal.signal_id=
-         BuildSignalId(context);
+       signal.signal_id=
+          BuildSignalId(context);
 
-      signal.reason=
-         "RangeBreak + Expansion + Momentum";
+       signal.reason=
+          "RangeBreak + Expansion + Momentum";
 
-      return true;
-     }
+       LogCandidate(context,"LONG",score);
+       return true;
+      }
 
-   //+----------------------------------------------------------------+
-   //| Build short signal                                             |
-   //+----------------------------------------------------------------+
-   bool BuildShortSignal(
-      const StrategyContext &context,
-      const double range_high,
-      const double range_low,
-      StrategySignal &signal) const
-     {
-      double score=
-         CalculateShortScore(
-            context,
-            range_high,
-            range_low);
+//+----------------------------------------------------------------+
+    //| Build short signal                                             |
+    //+----------------------------------------------------------------+
+    bool BuildShortSignal(
+       const StrategyContext &context,
+       const double range_high,
+       const double range_low,
+       StrategySignal &signal) const
+      {
+       double score=
+          CalculateShortScore(
+             context,
+             range_high,
+             range_low);
 
-      if(score<m_min_breakout_score)
-         return false;
+       if(score<m_min_breakout_score)
+         {
+          LogDiagnostic(context,"SHORT","SCORE_BELOW_MINIMUM",score,m_min_breakout_score);
+          return false;
+         }
 
-      double entry;
-      double stop;
-      double target;
+       double entry;
+       double stop;
+       double target;
 
-      if(!BuildShortLevels(
-            context,
-            range_high,
-            entry,
-            stop,
-            target))
-         return false;
+       if(!BuildShortLevels(
+             context,
+             range_high,
+             entry,
+             stop,
+             target))
+          return false;
 
-      signal.valid=true;
+       signal.valid=true;
 
-      signal.direction=SIGNAL_SHORT;
-      signal.strategy=STRATEGY_BREAKOUT;
+       signal.direction=SIGNAL_SHORT;
+       signal.strategy=STRATEGY_BREAKOUT;
 
-      signal.symbol=context.market.symbol;
-      signal.timeframe=context.market.timeframe;
+       signal.symbol=context.market.symbol;
+       signal.timeframe=context.market.timeframe;
 
-      signal.regime=REGIME_BREAKOUT;
+       signal.regime=REGIME_BREAKOUT;
 
-      signal.score=score;
-      signal.confidence=score/100.0;
+       signal.score=score;
+       signal.confidence=score/100.0;
 
-      signal.entry=entry;
-      signal.stop=stop;
-      signal.target=target;
+       signal.entry=entry;
+       signal.stop=stop;
+       signal.target=target;
 
-      signal.timestamp=
-         context.market.closed_bar.time;
+       signal.timestamp=
+          context.market.closed_bar.time;
 
-      signal.signal_id=
-         BuildSignalId(context);
+       signal.signal_id=
+          BuildSignalId(context);
 
-      signal.reason=
-         "RangeBreak + Expansion + Momentum";
+       signal.reason=
+          "RangeBreak + Expansion + Momentum";
 
-      return true;
-     }
+       LogCandidate(context,"SHORT",score);
+       return true;
+      }
 
 public:
 
@@ -940,71 +1053,93 @@ public:
       return STRATEGY_BREAKOUT;
      }
 
-   //+----------------------------------------------------------------+
-   //| Evaluate                                                       |
-   //+----------------------------------------------------------------+
-   virtual bool Evaluate(
-      const StrategyContext &context,
-      StrategySignal &signal) override
-     {
-      ResetSignal(signal);
+//+----------------------------------------------------------------+
+    //| Evaluate                                                       |
+    //+----------------------------------------------------------------+
+    virtual bool Evaluate(
+       const StrategyContext &context,
+       StrategySignal &signal) override
+      {
+       ResetSignal(signal);
 
-      if(!m_initialized)
-         return false;
+       if(!m_initialized)
+         {
+          LogDiagnostic(context,"NONE","STRATEGY_NOT_INITIALIZED");
+          return false;
+         }
 
-      if(!context.trading_allowed)
-         return false;
+       if(!context.trading_allowed)
+         {
+          LogDiagnostic(context,"NONE","TRADING_NOT_ALLOWED");
+          return false;
+         }
 
-      if(!context.market.valid)
-         return false;
+       if(!context.market.valid)
+         {
+          LogDiagnostic(context,"NONE","INVALID_MARKET_DATA");
+          return false;
+         }
 
-      if(!context.features.valid)
-         return false;
+       if(!context.features.valid)
+         {
+          LogDiagnostic(context,"NONE","INVALID_FEATURES");
+          return false;
+         }
 
-      if(context.regime!=REGIME_BREAKOUT)
-         return false;
+       if(context.regime!=REGIME_BREAKOUT)
+         {
+          LogDiagnostic(context,"NONE","REGIME_MISMATCH");
+          return false;
+         }
 
-      double range_high;
-      double range_low;
-      double range_width;
+       double range_high;
+       double range_low;
+       double range_width;
 
-      if(!GetPreBreakoutRange(
-            context.market.symbol,
-            context.market.timeframe,
-            range_high,
-            range_low,
-            range_width))
-         return false;
+       if(!GetPreBreakoutRange(
+             context.market.symbol,
+             context.market.timeframe,
+             range_high,
+             range_low,
+             range_width))
+         {
+          LogDiagnostic(context,"NONE","RANGE_DATA_UNAVAILABLE");
+          return false;
+         }
 
-      // Reject excessively wide pre-breakout structures.
-      if(range_width>
-         context.features.atr*m_max_range_width_atr)
-         return false;
+       // Reject excessively wide pre-breakout structures.
+       if(range_width>
+          context.features.atr*m_max_range_width_atr)
+         {
+          LogDiagnostic(context,"NONE","RANGE_WIDTH_EXCEEDED");
+          return false;
+         }
 
-      if(IsLongBreakout(
-            context,
-            range_high))
-        {
-         return BuildLongSignal(
-            context,
-            range_high,
-            range_low,
-            signal);
-        }
+       if(IsLongBreakout(
+             context,
+             range_high))
+         {
+          return BuildLongSignal(
+             context,
+             range_high,
+             range_low,
+             signal);
+         }
 
-      if(IsShortBreakout(
-            context,
-            range_low))
-        {
-         return BuildShortSignal(
-            context,
-            range_high,
-            range_low,
-            signal);
-        }
+       if(IsShortBreakout(
+             context,
+             range_low))
+         {
+          return BuildShortSignal(
+             context,
+             range_high,
+             range_low,
+             signal);
+         }
 
-      return false;
-     }
+       LogDiagnostic(context,"NONE","NO_BREAKOUT_DETECTED");
+       return false;
+      }
 
    //+----------------------------------------------------------------+
    //| Accessors                                                     |
