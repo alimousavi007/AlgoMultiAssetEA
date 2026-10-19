@@ -892,7 +892,7 @@ public:
       bool is_duplicate =
          (m_last_signal_direction != SIGNAL_NONE) &&
          (m_last_signal_time == ctx.signal_market.closed_bar_time) &&
-         (!m_last_signal_consumed);
+         (m_last_signal_consumed);
 
       if(is_duplicate)
         {

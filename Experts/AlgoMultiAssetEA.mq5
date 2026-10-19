@@ -793,6 +793,8 @@ void ProcessHybridDecision(CSymbolRuntime& runtime,
          runtime.symbol, "", "",
          legacy_signal.signal_id,
          "NOOP", "SIGNAL_ONLY", "Execution disabled by mode");
+
+      runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
       return;
      }
 
