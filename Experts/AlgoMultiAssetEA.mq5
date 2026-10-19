@@ -645,6 +645,40 @@ void ProcessHybridDecision(CSymbolRuntime& runtime,
    if(!decision.plan.valid)
       return;
 
+   if(decision.plan.symbol != runtime.symbol ||
+      decision.plan.style != runtime.style ||
+      (decision.plan.direction != SIGNAL_LONG && decision.plan.direction != SIGNAL_SHORT) ||
+      decision.plan.setup_id == "" ||
+      decision.plan.signal_time <= 0 ||
+      decision.plan.entry <= 0.0 ||
+      decision.plan.stop <= 0.0 ||
+      decision.plan.target <= 0.0)
+     {
+      g_logger.Event(
+         LOG_WARNING, "HYBRID", "INVALID_PLAN", runtime.symbol, "", "",
+         decision.plan.setup_id, "REJECT", "INVALID_PLAN",
+         "Plan consistency validation failed");
+      return;
+     }
+
+   if(runtime.hybrid_engine.IsPlanExpired(decision.plan, TimeCurrent()))
+     {
+      g_logger.Event(
+         LOG_WARNING, "HYBRID", "PLAN_EXPIRED", runtime.symbol, "", "",
+         decision.plan.setup_id, "REJECT", "PLAN_EXPIRED",
+         "Setup expired");
+      return;
+     }
+
+   if(runtime.hybrid_engine.IsPlanConsumed(decision.plan))
+     {
+      g_logger.Event(
+         LOG_DEBUG, "HYBRID", "PLAN_CONSUMED", runtime.symbol, "", "",
+         decision.plan.setup_id, "NOOP", "CONSUMED",
+         "Plan already consumed");
+      return;
+     }
+
    TradePlan normalized_plan = decision.plan;
    string norm_reason="";
    if(!NormalizeTradePlanStops(normalized_plan, norm_reason))
@@ -793,7 +827,10 @@ void ProcessHybridDecision(CSymbolRuntime& runtime,
 
    if(!g_executor.Execute(request, result))
      {
-      g_logger.Trade(result);
+   g_logger.Trade(result);
+
+   runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+
       return;
      }
 
