@@ -1112,12 +1112,17 @@ private:
       rr=0;
       reason="";
 
-      double buffer_atr = ctx.signal_features.atr;
-      if(buffer_atr<=0)
-         buffer_atr = ctx.structure_market.closed_bar.high -
-                     ctx.structure_market.closed_bar.low;
-      if(buffer_atr<=0)
-         buffer_atr = GetTickSize() * 10;
+       double buffer_atr = 0.0;
+       if(ctx.momentum.valid && ctx.momentum.atr > 0)
+          buffer_atr = ctx.momentum.atr;
+       if(buffer_atr <= 0)
+          buffer_atr = ctx.signal_market.closed_bar.high -
+                      ctx.signal_market.closed_bar.low;
+       if(buffer_atr <= 0)
+          buffer_atr = ctx.structure_market.closed_bar.high -
+                      ctx.structure_market.closed_bar.low;
+       if(buffer_atr <= 0)
+          buffer_atr = GetTickSize() * 10;
 
       double stop_buffer_points = GetStopBuffer(m_active_style) * buffer_atr;
       double target_buffer_points = GetTargetBuffer(m_active_style) * buffer_atr;

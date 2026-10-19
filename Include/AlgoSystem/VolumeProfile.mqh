@@ -305,7 +305,7 @@ public:
 
       double poc_price=(bin_edges[poc_bin]+bin_edges[poc_bin+1]) / 2.0;
       result.poc=poc_price;
-      result.poc_time=rates[loaded-1-poc_bin < 0 ? 0 : loaded-1].time;
+       result.poc_time=market.closed_bar_time;
 
       int va_threshold=(int)(total_volume * m_value_area_percent);
 

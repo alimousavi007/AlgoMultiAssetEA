@@ -174,7 +174,8 @@ public:
         }
 
       double roc=CalculateROC(rates, m_roc_period);
-      result.roc=roc;
+       result.roc=roc;
+       result.atr=atr;
 
       MqlRates current=rates[0];
       MqlRates prev=rates[1];

@@ -256,6 +256,7 @@ struct MomentumFeatures
    string            state_reason;
 
    double            roc;
+   double            atr;
    double            body_ratio;
    double            close_location;
    double            momentum_score;

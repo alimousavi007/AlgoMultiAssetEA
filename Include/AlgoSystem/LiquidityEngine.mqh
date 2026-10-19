@@ -310,14 +310,14 @@ public:
       if(copied<2)
          return false;
 
-       datetime today_session=StringToTime(TimeToString(daily[0].time, TIME_DATE));
+        datetime today_session=StringToTime(TimeToString(daily[2].time, TIME_DATE));
 
-      if(m_daily_session_time != today_session)
-        {
-         m_daily_session_time=today_session;
-         m_daily_high=daily[1].high;
-         m_daily_low=daily[1].low;
-        }
+       if(m_daily_session_time != today_session)
+         {
+          m_daily_session_time=today_session;
+          m_daily_high=daily[1].high;
+          m_daily_low=daily[1].low;
+         }
 
       return true;
      }
@@ -449,35 +449,33 @@ public:
 
       double tolerance=m_equal_tolerance_points * GetPoint();
 
-      for(int i=size-1; i>=0; i--)
-        {
-         if(MathAbs(rates[i].low - equal_low_level) <= tolerance &&
-            rates[i].low < equal_low_level)
-           {
-            if(i > 0)
-              {
-               bool closed_back=false;
-               for(int j=i-1; j>=0 && j>i-confirm_bars-1; j--)
-                 {
-                  if(rates[j].close > equal_low_level)
-                    {
-                     closed_back=true;
-                     break;
-                    }
-                 }
+       for(int i=0; i<size-1; i++)
+         {
+          if(MathAbs(rates[i].low - equal_low_level) <= tolerance &&
+             rates[i].low < equal_low_level)
+            {
+             bool closed_back=false;
+             int last_closed=size-2;
+             for(int j=i+1; j<=i+confirm_bars && j<=last_closed; j++)
+               {
+                if(rates[j].close > equal_low_level)
+                  {
+                   closed_back=true;
+                   break;
+                  }
+               }
 
-               if(closed_back)
-                 {
-                  m_last_event=LIQ_EVENT_LONG_SWEEP;
-                  m_event_time=rates[i].time;
-                  m_event_level=equal_low_level;
-                  m_event_expiry=rates[i].time + confirm_bars * PeriodSeconds(m_timeframe);
-                  m_event_consumed=false;
-                  return true;
-                 }
-              }
-           }
-        }
+             if(closed_back)
+               {
+                m_last_event=LIQ_EVENT_LONG_SWEEP;
+                m_event_time=rates[i].time;
+                m_event_level=equal_low_level;
+                m_event_expiry=rates[i].time + confirm_bars * PeriodSeconds(m_timeframe);
+                m_event_consumed=false;
+                return true;
+               }
+            }
+         }
 
       return false;
      }
@@ -492,35 +490,33 @@ public:
 
       double tolerance=m_equal_tolerance_points * GetPoint();
 
-      for(int i=size-1; i>=0; i--)
-        {
-         if(MathAbs(rates[i].high - equal_high_level) <= tolerance &&
-            rates[i].high > equal_high_level)
-           {
-            if(i > 0)
-              {
-               bool closed_back=false;
-               for(int j=i-1; j>=0 && j>i-confirm_bars-1; j--)
-                 {
-                  if(rates[j].close < equal_high_level)
-                    {
-                     closed_back=true;
-                     break;
-                    }
-                 }
+       for(int i=0; i<size-1; i++)
+         {
+          if(MathAbs(rates[i].high - equal_high_level) <= tolerance &&
+             rates[i].high > equal_high_level)
+            {
+             bool closed_back=false;
+             int last_closed=size-2;
+             for(int j=i+1; j<=i+confirm_bars && j<=last_closed; j++)
+               {
+                if(rates[j].close < equal_high_level)
+                  {
+                   closed_back=true;
+                   break;
+                  }
+               }
 
-               if(closed_back)
-                 {
-                  m_last_event=LIQ_EVENT_SHORT_SWEEP;
-                  m_event_time=rates[i].time;
-                  m_event_level=equal_high_level;
-                  m_event_expiry=rates[i].time + confirm_bars * PeriodSeconds(m_timeframe);
-                  m_event_consumed=false;
-                  return true;
-                 }
-              }
-           }
-        }
+             if(closed_back)
+               {
+                m_last_event=LIQ_EVENT_SHORT_SWEEP;
+                m_event_time=rates[i].time;
+                m_event_level=equal_high_level;
+                m_event_expiry=rates[i].time + confirm_bars * PeriodSeconds(m_timeframe);
+                m_event_consumed=false;
+                return true;
+               }
+            }
+         }
 
       return false;
      }
@@ -638,9 +634,10 @@ public:
       bool bos_short=false;
       datetime bos_time=0;
 
-      if(size>=m_swing_lookback*2+2)
-        {
-         DetectBOS(rates, size-2, m_swing_lookback, bos_long, bos_short, bos_time);
+       int structure_idx=size - m_swing_lookback - 2;
+       if(structure_idx >= m_swing_lookback)
+         {
+          DetectBOS(rates, structure_idx, m_swing_lookback, bos_long, bos_short, bos_time);
 
          if(bos_long)
            {
@@ -657,9 +654,9 @@ public:
         }
 
       bool choch=false;
-      if(size>=m_swing_lookback*2+2)
-        {
-         DetectChoCH(rates, size-2, m_swing_lookback, choch);
+       if(structure_idx >= m_swing_lookback)
+         {
+          DetectChoCH(rates, structure_idx, m_swing_lookback, choch);
          if(choch)
            {
             m_current_choch=true;
