@@ -244,16 +244,6 @@ public:
    double GetPoint() const { return m_point; }
    int    GetDigits() const { return m_digits; }
 
-   string GenerateSetupID()
-     {
-      m_setup_sequence++;
-      return m_setup_id_counter_symbol +
-             "_" +
-             IntegerToString(m_setup_sequence) +
-             "_" +
-             LongToString(GetCurrentTicket());
-     }
-
 private:
    datetime GetCurrentTicket()
      {
@@ -268,12 +258,26 @@ private:
       return (datetime)StringToInteger(ticket_str);
      }
 
+public:
+   string GenerateSetupID()
+     {
+      m_setup_sequence++;
+      MqlDateTime dt;
+      TimeToStruct(TimeCurrent(), dt);
+      string ticket_str=IntegerToString(dt.year)+IntegerToString(dt.mon)+IntegerToString(dt.day)+IntegerToString(dt.hour)+IntegerToString(dt.min)+IntegerToString(dt.sec);
+      return m_setup_id_counter_symbol +
+             "_" +
+             IntegerToString(m_setup_sequence) +
+             "_" +
+             ticket_str;
+     }
+
    bool LoadMarketSnapshot(const string symbol,
                            ENUM_TIMEFRAMES tf,
                            MarketSnapshot& snapshot,
                            string& reason)
      {
-      MqlRates current_tick[];
+      MqlRates rates[];
       ResetLastError();
       MqlTick tick;
       if(!SymbolInfoTick(symbol, tick))

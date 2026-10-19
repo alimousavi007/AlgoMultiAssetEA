@@ -726,14 +726,15 @@ void ProcessHybridDecision(CSymbolRuntime& runtime,
          LOG_WARNING, "PORTFOLIO", "PORTFOLIO_REJECTED",
          legacy_signal.symbol,
          "",
+         "",
          legacy_signal.signal_id,
-          "REJECT",
-          (double)g_portfolio_risk.LastRejectionCode(),
+         "REJECT",
+         g_portfolio_risk.LastRejectionCode(),
          g_portfolio_risk.LastRejectionReason(),
          0, 0,
-          (double)risk.risk_percent,
+         (double)risk.risk_percent,
          g_portfolio_risk.CurrentRiskPercent(),
-         portfolio_state.total_positions);
+         (double)portfolio_state.total_positions);
 
       g_logger.Risk(risk);
       g_dashboard.Update(decision, portfolio_state);
