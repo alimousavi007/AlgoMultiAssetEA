@@ -190,7 +190,7 @@ public:
       m_rsi_period=14;
       m_macd_fast=12;
       m_macd_slow=26;
-      m_macd_signal=9;
+      m_macd_signal_period=9;
       m_lookback=100;
       m_pivot_tolerance_percent=0.02;
       m_max_age_bars=30;
@@ -213,7 +213,7 @@ public:
       m_rsi_period=rsi_period;
       m_macd_fast=macd_fast;
       m_macd_slow=macd_slow;
-      m_macd_signal=macd_signal;
+      m_macd_signal_period=macd_signal;
       m_pivot_tolerance_percent=pivot_tolerance_percent;
       m_max_age_bars=max_age_bars;
      }

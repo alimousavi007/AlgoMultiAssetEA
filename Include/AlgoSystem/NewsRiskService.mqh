@@ -199,8 +199,9 @@ public:
       string base=StringSubstr(symbol, 0, 3);
       string quote=StringSubstr(symbol, 3, 3);
 
-      string event_cur=StringTrimLeft(event_currency);
-      StringUpper(event_cur);
+      string event_cur=event_currency;
+      StringTrimLeft(event_cur);
+      StringToUpper(event_cur);
 
       return (event_cur==base || event_cur==quote);
      }

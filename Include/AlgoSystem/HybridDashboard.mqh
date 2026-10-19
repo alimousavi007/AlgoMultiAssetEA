@@ -284,24 +284,7 @@ private:
       {
        if(StringLen(reason) <= 24)
           return reason;
-    string ShortReason(const string reason) const
-      {
-       if(StringLen(reason) <= 24)
-          return reason;
        return StringSubstr(reason, 0, 21) + "...";
-      }
-      {
-       if(StringLen(reason) <= 24)
-          return reason;
-       return StringSubstr(reason, 0, 21) + "...";
-      }
-
-    void ShowStatus(const string status)
-      {
-       if(!m_enabled)
-          return;
-
-       m_status_text = status;
       }
 
 public:
@@ -517,13 +500,6 @@ public:
       ChartRedraw(m_chart_id);
      }
 
-   void ShowStatus(const string status)
-     {
-      if(!m_enabled)
-         return;
-
-      m_status_text = status;
-     }
   };
 
 #endif
