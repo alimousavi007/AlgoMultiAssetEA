@@ -33,7 +33,10 @@ private:
             magic==MAGIC_BREAKOUT ||
             magic==MAGIC_MOMENTUM ||
             magic==MAGIC_MEAN_REVERSION ||
-            magic==MAGIC_RELATIVE_VALUE;
+            magic==MAGIC_RELATIVE_VALUE ||
+            magic==MAGIC_HYBRID_SCALP ||
+            magic==MAGIC_HYBRID_DAY ||
+            magic==MAGIC_HYBRID_SWING;
         }
    datetime DayStart(const datetime t) const
      {

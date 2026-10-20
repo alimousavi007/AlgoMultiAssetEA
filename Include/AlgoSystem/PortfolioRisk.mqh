@@ -19,11 +19,15 @@ private:
 
    bool IsManagedMagic(const long magic) const
      {
-      return magic==MAGIC_TREND ||
-             magic==MAGIC_BREAKOUT ||
-             magic==MAGIC_MOMENTUM ||
-             magic==MAGIC_MEAN_REVERSION ||
-             magic==MAGIC_RELATIVE_VALUE;
+       return magic==MAGIC_TREND ||
+              magic==MAGIC_BREAKOUT ||
+              magic==MAGIC_MOMENTUM ||
+              magic==MAGIC_MEAN_REVERSION ||
+              magic==MAGIC_RELATIVE_VALUE ||
+              magic==MAGIC_HYBRID_SCALP ||
+              magic==MAGIC_HYBRID_DAY ||
+              magic==MAGIC_HYBRID_SWING;
+
      }
 
    bool IsPrecious(const string symbol) const

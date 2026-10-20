@@ -53,13 +53,15 @@ enum ENUM_VOLUME_DATA_MODE
 //| News State                                                        |
 //+------------------------------------------------------------------+
 enum ENUM_NEWS_STATE
-  {
-   NEWS_UNAVAILABLE = 0,
-   NEWS_NO_EVENT_SCHEDULED,
-   NEWS_BLACKOUT_ACTIVE,
-   NEWS_COOLDOWN_ACTIVE,
-   NEWS_EVENT_PASSED
-  };
+   {
+    NEWS_DISABLED = -1,
+    NEWS_UNAVAILABLE = 0,
+    NEWS_NO_EVENT_SCHEDULED,
+    NEWS_BLACKOUT_ACTIVE,
+    NEWS_COOLDOWN_ACTIVE,
+    NEWS_EVENT_PASSED
+   };
+
 
 //+------------------------------------------------------------------+
 //| Feature Validity                                                  |

@@ -33,6 +33,8 @@ private:
 
    double             m_tick_size;
    double             m_point;
+   bool               m_use_spread_filter;
+   double             m_max_spread_points;
    int                m_digits;
    double             m_min_rr;
    double             m_min_score;
@@ -68,7 +70,10 @@ public:
       m_entry_tf=PERIOD_M15;
       m_lookback=100;
       m_tick_size=0;
-      m_point=0;
+       m_point=0;
+       m_use_spread_filter=true;
+       m_max_spread_points=0;
+
       m_digits=0;
       m_min_rr=1.5;
       m_min_score=70.0;
@@ -152,18 +157,30 @@ public:
       m_momentum_engine.SetParameters(atr_period, roc_period, lookback);
      }
 
-   void SetNewsParams(int blackout_before,
-                      int blackout_after,
-                      int cooldown,
-                      int impact_threshold,
-                      bool prevent_entries,
-                      bool close_on_news)
-     {
-      m_news_service.SetParameters(
-         blackout_before, blackout_after,
-         cooldown, impact_threshold,
-         prevent_entries, close_on_news);
-     }
+    void SetNewsParams(int blackout_before,
+                       int blackout_after,
+                       int cooldown,
+                       int impact_threshold,
+                       bool prevent_entries,
+                       bool close_on_news)
+      {
+       m_news_service.SetParameters(
+          blackout_before, blackout_after,
+          cooldown, impact_threshold,
+          prevent_entries, close_on_news);
+      }
+
+    void SetNewsEnabled(bool enabled)
+      {
+       m_news_service.SetEnabled(enabled);
+      }
+
+    void SetSpreadFilterParams(bool use_filter, double max_spread_points)
+      {
+       m_use_spread_filter=use_filter;
+       m_max_spread_points=max_spread_points;
+      }
+
 
     void SetBiasParams(int swings_required, int lookback)
       {
@@ -512,26 +529,29 @@ public:
          reasons += " trade_not_allowed";
         }
 
-      if(ctx.signal_market.spread_points > 0 && m_point > 0)
-        {
-         double spread_pips = ctx.signal_market.spread_points / m_point;
-         double max_spread=0;
+       if(m_use_spread_filter && ctx.signal_market.spread_points > 0)
+         {
+          double spread_points = ctx.signal_market.spread_points;
+          double max_spread=0;
 
-         if(m_style==STYLE_SCALPING)
-            max_spread=20.0;
-         else if(m_style==STYLE_DAY_TRADING)
-            max_spread=50.0;
-         else
-            max_spread=100.0;
+          if(m_max_spread_points>0)
+             max_spread=m_max_spread_points;
+          else if(m_style==STYLE_SCALPING)
+             max_spread=20.0;
+          else if(m_style==STYLE_DAY_TRADING)
+             max_spread=50.0;
+          else
+             max_spread=100.0;
 
-         if(spread_pips > max_spread)
-           {
-            gates.spread_acceptable=false;
-            if(gates.first_failure_reason=="")
-               gates.first_failure_reason="SPREAD_TOO_HIGH";
-            reasons += " spread="+DoubleToString(spread_pips,1);
-           }
-        }
+          if(spread_points > max_spread)
+            {
+             gates.spread_acceptable=false;
+             if(gates.first_failure_reason=="")
+                gates.first_failure_reason="SPREAD_TOO_HIGH";
+             reasons += " spread="+DoubleToString(spread_points,1);
+            }
+         }
+
 
       gates.details=reasons;
       gates.data_sufficient = gates.data_sufficient && gates.data_fresh;

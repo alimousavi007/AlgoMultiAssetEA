@@ -105,10 +105,12 @@ private:
    int                m_cooldown_minutes;
    int                m_high_impact_threshold;
 
-   bool               m_prevent_new_entries;
-   bool               m_close_positions_on_news;
+    bool               m_prevent_new_entries;
+    bool               m_close_positions_on_news;
+    bool               m_enabled;
 
-   datetime           m_last_event_time;
+    datetime           m_last_event_time;
+
    string             m_last_currency;
    string             m_last_event_name;
 
@@ -124,8 +126,10 @@ public:
       m_cooldown_minutes=60;
       m_high_impact_threshold=3;
       m_prevent_new_entries=true;
-      m_close_positions_on_news=false;
-      m_last_event_time=0;
+       m_close_positions_on_news=false;
+       m_enabled=true;
+       m_last_event_time=0;
+
       m_last_currency="";
       m_last_event_name="";
       m_initialized=false;
@@ -167,7 +171,13 @@ public:
       return m_provider != NULL;
      }
 
-   bool Initialize(INewsProvider* provider=NULL)
+    void SetEnabled(bool enabled)
+      {
+       m_enabled=enabled;
+      }
+
+    bool Initialize(INewsProvider* provider=NULL)
+
      {
       if(provider!=NULL)
         {
@@ -222,12 +232,13 @@ public:
       result.symbol=symbol;
       result.reason_detail="";
 
-      if(!m_initialized || m_provider==NULL)
-        {
-         result.state=NEWS_UNAVAILABLE;
-         result.reason="News service not initialized";
-         return result;
-        }
+       if(!m_enabled)
+         {
+          result.state=NEWS_DISABLED;
+          result.reason="News risk disabled by configuration";
+          return result;
+         }
+
 
       if(m_provider.IsUnavailable())
         {
@@ -300,8 +311,9 @@ public:
       if(!news.valid)
          return false;
 
-      if(news.state==NEWS_UNAVAILABLE)
-         return true;
+       if(news.state==NEWS_DISABLED)
+          return false;
+
 
       if(news.state==NEWS_BLACKOUT_ACTIVE && m_prevent_new_entries)
          return true;

@@ -429,13 +429,22 @@ public:
          return false;
         }
 
-      if(!market_structure.Initialize() ||
-         !market_signal.Initialize() ||
-         !market_entry.Initialize())
-        {
-         last_failure="MarketData.Initialize failed";
-         return false;
-        }
+       if(!market_structure.Initialize() ||
+          !market_signal.Initialize() ||
+          !market_entry.Initialize())
+         {
+          last_failure="MarketData.Initialize failed";
+          return false;
+         }
+
+       if(!feature_structure.InitializeFor(symbol, structure_tf) ||
+          !feature_signal.InitializeFor(symbol, signal_tf) ||
+          !feature_entry.InitializeFor(symbol, entry_tf))
+         {
+          last_failure="FeatureEngine.Initialize failed";
+          return false;
+         }
+
 
       if(!hybrid_engine.Initialize(
             symbol,
@@ -480,14 +489,16 @@ public:
          10,
          InpMomentumLookback);
 
-      if(InpNewsEnabled)
-         hybrid_engine.SetNewsParams(
-            InpNewsBlackoutMinutesBefore,
-            InpNewsBlackoutMinutesAfter,
-            InpNewsCooldownMinutes,
-            InpNewsImpactThreshold,
-            InpNewsPreventNewEntries,
-            InpNewsClosePositions);
+       hybrid_engine.SetNewsParams(
+          InpNewsBlackoutMinutesBefore,
+          InpNewsBlackoutMinutesAfter,
+          InpNewsCooldownMinutes,
+          InpNewsImpactThreshold,
+          InpNewsPreventNewEntries,
+          InpNewsClosePositions);
+       hybrid_engine.SetNewsEnabled(InpNewsEnabled);
+       hybrid_engine.SetSpreadFilterParams(InpUseSpreadFilter, (double)InpMaxSpreadPoints);
+
 
       hybrid_engine.SetBiasParams(2, 50);
       hybrid_engine.SetMinScore(InpMinScore);
@@ -827,24 +838,26 @@ void ProcessHybridDecision(CSymbolRuntime& runtime,
 
    ExecutionResult result;
 
-   if(!g_executor.Execute(request, result))
-     {
-   g_logger.Trade(result);
+    if(!g_executor.Execute(request, result))
+      {
+    g_logger.Trade(result);
 
-   runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+       return;
+      }
 
-      return;
-     }
 
-   g_logger.Trade(result);
-   if(!g_state.UpdateAfterTrade(result))
-      g_logger.Event(
-         LOG_ERROR, "STATE", "STATE_RECONSTRUCT_FAILED",
-         runtime.symbol, "", "",
-         legacy_signal.signal_id,
-         "FAIL", "HISTORY_OR_ACCOUNT_STATE",
-         "Post-trade state reconstruction failed; new entries blocked");
-  }
+    g_logger.Trade(result);
+    if(!g_state.UpdateAfterTrade(result))
+       g_logger.Event(
+          LOG_ERROR, "STATE", "STATE_RECONSTRUCT_FAILED",
+          runtime.symbol, "", "",
+          legacy_signal.signal_id,
+          "FAIL", "HISTORY_OR_ACCOUNT_STATE",
+          "Post-trade state reconstruction failed; new entries blocked");
+
+    runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+   }
+
 
 //+------------------------------------------------------------------+
 //|                                                                  |
