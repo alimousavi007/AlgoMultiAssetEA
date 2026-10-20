@@ -158,13 +158,13 @@ private:
             volume,
             8);
 
-      if(volume<minimum)
-         return 0.0;
+       if(volume>maximum)
+          volume=MathFloor(maximum/step)*step;
 
-      if(volume>maximum)
-         volume=maximum;
+       if(volume<minimum)
+          return 0.0;
 
-      return volume;
+       return volume;
      }
 
 public:

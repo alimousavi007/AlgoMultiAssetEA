@@ -84,11 +84,12 @@ private:
     bool LoadRates(int count, MqlRates& rates[])
       {
        ResetLastError();
-       int copied=CopyRates(m_symbol, m_timeframe, 0, count, rates);
-       if(copied<=0)
-          return false;
+        int copied=CopyRates(m_symbol, m_timeframe, 0, count, rates);
+        if(copied<=0)
+           return false;
 
-       return true;
+        ArraySetAsSeries(rates, true);
+        return true;
       }
 
     double CalculateATR(const MqlRates& rates[], int period) const
@@ -142,11 +143,17 @@ public:
       result.timeframe=market.timeframe;
       result.reason="";
 
-      if(!m_initialized)
-        {
-         result.reason="Engine not initialized";
-         return result;
-        }
+       if(!m_initialized)
+         {
+          result.reason="Engine not initialized";
+          return result;
+         }
+
+       if(!market.valid)
+         {
+          result.reason="Invalid market snapshot";
+          return result;
+         }
 
       int count=MathMax(m_lookback, m_roc_period+5);
       count=MathMax(count, m_atr_period+5);
@@ -166,12 +173,12 @@ public:
          return result;
         }
 
-      double atr=CalculateATR(rates, m_atr_period);
-      if(atr<=0)
-        {
-         result.reason="ATR is zero or invalid";
-         return result;
-        }
+       double atr=CalculateATR(rates, m_atr_period);
+       if(atr<=0 || !MathIsValidNumber(atr))
+         {
+          result.reason="ATR is zero or invalid";
+          return result;
+         }
 
       double roc=CalculateROC(rates, m_roc_period);
        result.roc=roc;

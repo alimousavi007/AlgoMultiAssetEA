@@ -254,11 +254,17 @@ public:
       result.timeframe=market.timeframe;
       result.reason="";
 
-      if(!m_initialized)
-        {
-         result.reason="Engine not initialized";
-         return result;
-        }
+       if(!m_initialized)
+         {
+          result.reason="Engine not initialized";
+          return result;
+         }
+
+       if(!market.valid)
+         {
+          result.reason="Invalid market snapshot";
+          return result;
+         }
 
       int lookback=MathMax(m_lookback, 50);
       if(!CopyIndicatorData(lookback))

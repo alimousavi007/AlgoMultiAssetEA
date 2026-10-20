@@ -272,12 +272,14 @@ public:
 
       MqlRates rates[];
       ResetLastError();
-      int copied=CopyRates(market.symbol, market.timeframe, 0, m_range_lookback+5, rates);
-      if(copied<=0 || ArraySize(rates)<m_range_lookback+1)
-        {
-         result.reason="Insufficient bars for regime efficiency calculation";
-         return result;
-        }
+       int copied=CopyRates(market.symbol, market.timeframe, 0, m_range_lookback+5, rates);
+       if(copied<=0 || ArraySize(rates)<m_range_lookback+1)
+         {
+          result.reason="Insufficient bars for regime efficiency calculation";
+          return result;
+         }
+
+       ArraySetAsSeries(rates, true);
 
       double efficiency=CalculateEfficiency(rates, m_range_lookback);
       double vol_ratio=CalculateVolatilityRatio(rates, atr, m_range_lookback);

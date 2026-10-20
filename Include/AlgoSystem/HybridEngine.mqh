@@ -1107,10 +1107,16 @@ private:
                        double& rr,
                        string& reason)
      {
-      stop=0;
-      target=0;
-      rr=0;
-      reason="";
+       stop=0;
+       target=0;
+       rr=0;
+       reason="";
+
+       if(entry<=0.0 || !MathIsValidNumber(entry))
+         {
+          reason="Invalid entry price";
+          return false;
+         }
 
        double buffer_atr = 0.0;
        if(ctx.momentum.valid && ctx.momentum.atr > 0)
@@ -1124,8 +1130,13 @@ private:
        if(buffer_atr <= 0)
           buffer_atr = GetTickSize() * 10;
 
-      double stop_buffer_points = GetStopBuffer(m_active_style) * buffer_atr;
-      double target_buffer_points = GetTargetBuffer(m_active_style) * buffer_atr;
+       if(buffer_atr <= 0 || !MathIsValidNumber(buffer_atr))
+         {
+          reason="Invalid volatility input for trade plan";
+          return false;
+         }
+       double stop_buffer_points = GetStopBuffer(m_active_style) * buffer_atr;
+       double target_buffer_points = GetTargetBuffer(m_active_style) * buffer_atr;
 
       if(direction==SIGNAL_LONG)
         {
