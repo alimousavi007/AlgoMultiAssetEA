@@ -232,13 +232,13 @@ ulong MagicForStyle(ENUM_TRADING_STYLE style)
    switch(style)
      {
       case STYLE_SCALPING:
-         return 27000000;
+         return MAGIC_HYBRID_SCALP;
       case STYLE_DAY_TRADING:
-         return 27100000;
+         return MAGIC_HYBRID_DAY;
       case STYLE_SWING_TRADING:
-         return 27200000;
+         return MAGIC_HYBRID_SWING;
       default:
-         return 26000000;
+         return MAGIC_BASE;
      }
   }
 
@@ -409,10 +409,10 @@ public:
      }
 
    bool              Initialize(const string in_symbol,
-                   const ENUM_TRADING_STYLE in_style,
-                   const ENUM_TIMEFRAMES in_structure_tf,
-                   const ENUM_TIMEFRAMES in_signal_tf,
-                   const ENUM_TIMEFRAMES in_entry_tf)
+                                const ENUM_TRADING_STYLE in_style,
+                                const ENUM_TIMEFRAMES in_structure_tf,
+                                const ENUM_TIMEFRAMES in_signal_tf,
+                                const ENUM_TIMEFRAMES in_entry_tf)
      {
       valid=false;
       last_failure="";
@@ -429,21 +429,21 @@ public:
          return false;
         }
 
-       if(!market_structure.Initialize() ||
-          !market_signal.Initialize() ||
-          !market_entry.Initialize())
-         {
-          last_failure="MarketData.Initialize failed";
-          return false;
-         }
+      if(!market_structure.Initialize() ||
+         !market_signal.Initialize() ||
+         !market_entry.Initialize())
+        {
+         last_failure="MarketData.Initialize failed";
+         return false;
+        }
 
-       if(!feature_structure.InitializeFor(symbol, structure_tf) ||
-          !feature_signal.InitializeFor(symbol, signal_tf) ||
-          !feature_entry.InitializeFor(symbol, entry_tf))
-         {
-          last_failure="FeatureEngine.Initialize failed";
-          return false;
-         }
+      if(!feature_structure.InitializeFor(symbol, structure_tf) ||
+         !feature_signal.InitializeFor(symbol, signal_tf) ||
+         !feature_entry.InitializeFor(symbol, entry_tf))
+        {
+         last_failure="FeatureEngine.Initialize failed";
+         return false;
+        }
 
 
       if(!hybrid_engine.Initialize(
@@ -489,15 +489,15 @@ public:
          10,
          InpMomentumLookback);
 
-       hybrid_engine.SetNewsParams(
-          InpNewsBlackoutMinutesBefore,
-          InpNewsBlackoutMinutesAfter,
-          InpNewsCooldownMinutes,
-          InpNewsImpactThreshold,
-          InpNewsPreventNewEntries,
-          InpNewsClosePositions);
-       hybrid_engine.SetNewsEnabled(InpNewsEnabled);
-       hybrid_engine.SetSpreadFilterParams(InpUseSpreadFilter, (double)InpMaxSpreadPoints);
+      hybrid_engine.SetNewsParams(
+         InpNewsBlackoutMinutesBefore,
+         InpNewsBlackoutMinutesAfter,
+         InpNewsCooldownMinutes,
+         InpNewsImpactThreshold,
+         InpNewsPreventNewEntries,
+         InpNewsClosePositions);
+      hybrid_engine.SetNewsEnabled(InpNewsEnabled);
+      hybrid_engine.SetSpreadFilterParams(InpUseSpreadFilter, (double)InpMaxSpreadPoints);
 
 
       hybrid_engine.SetBiasParams(2, 50);
@@ -837,26 +837,26 @@ void ProcessHybridDecision(CSymbolRuntime& runtime,
       request.take_profit);
 
    ExecutionResult result;
+   bool execution_ok = g_executor.Execute(request, result);
+   g_logger.Trade(result);
 
-    if(!g_executor.Execute(request, result))
-      {
-    g_logger.Trade(result);
+// An executor call consumes this setup even when it fails. Automatic
+// retries need an explicit retry policy; do not resubmit the same setup
+// on the next entry bar after an ambiguous broker/transport result.
+   runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
 
-       return;
-      }
+   if(!execution_ok || !result.success)
+      return;
+   if(!g_state.UpdateAfterTrade(result))
+      g_logger.Event(
+         LOG_ERROR, "STATE", "STATE_RECONSTRUCT_FAILED",
+         runtime.symbol, "", "",
+         legacy_signal.signal_id,
+         "FAIL", "HISTORY_OR_ACCOUNT_STATE",
+         "Post-trade state reconstruction failed; new entries blocked");
 
-
-    g_logger.Trade(result);
-    if(!g_state.UpdateAfterTrade(result))
-       g_logger.Event(
-          LOG_ERROR, "STATE", "STATE_RECONSTRUCT_FAILED",
-          runtime.symbol, "", "",
-          legacy_signal.signal_id,
-          "FAIL", "HISTORY_OR_ACCOUNT_STATE",
-          "Post-trade state reconstruction failed; new entries blocked");
-
-    runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
-   }
+   runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+  }
 
 
 //+------------------------------------------------------------------+
@@ -959,8 +959,21 @@ void ProcessRuntime(CSymbolRuntime& runtime)
          "", "FAIL", "STRUCTURE_FEATURES",
          "Structure feature calculation failed", GetLastError());
       ResetLastError();
+      ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
+      return;
      }
-
+   ResetLastError();
+   if(!runtime.feature_entry.Calculate(entry_market, entry_features))
+     {
+      g_logger.Event(
+         LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
+         runtime.symbol, "", "",
+         "", "FAIL", "ENTRY_FEATURES",
+         "Entry feature calculation failed", GetLastError());
+      ResetLastError();
+      ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
+      return;
+     }
    if(!runtime.market_signal.IsNewClosedBar(
          runtime.symbol,
          runtime.signal_tf))
@@ -999,6 +1012,9 @@ void ProcessRuntime(CSymbolRuntime& runtime)
                            signal_market,
                            structure_market,
                            entry_market,
+                           signal_features,
+                           structure_features,
+                           entry_features,
                            portfolio_state,
                            ok);
 
@@ -1603,4 +1619,5 @@ int OnTesterInit()
 void OnTesterDeinit()
   {
   }
+//+------------------------------------------------------------------+
 //+------------------------------------------------------------------+

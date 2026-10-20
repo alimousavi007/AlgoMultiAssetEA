@@ -42,6 +42,12 @@ private:
       if(magic==MAGIC_MOMENTUM) return STRATEGY_MOMENTUM;
       if(magic==MAGIC_MEAN_REVERSION) return STRATEGY_MEAN_REVERSION;
       if(magic==MAGIC_RELATIVE_VALUE) return STRATEGY_RELATIVE_VALUE;
+            // Hybrid requests currently use STRATEGY_TREND_PULLBACK.
+      // Count Hybrid magic IDs against the same per-strategy position cap.
+      if(magic==MAGIC_HYBRID_SCALP ||
+         magic==MAGIC_HYBRID_DAY ||
+         magic==MAGIC_HYBRID_SWING)
+         return STRATEGY_TREND_PULLBACK;
       return STRATEGY_NONE;
      }
 

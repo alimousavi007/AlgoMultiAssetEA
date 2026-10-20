@@ -1,3 +1,8 @@
+﻿//+------------------------------------------------------------------+
+//|                                                      ProjectName |
+//|                                      Copyright 2020, CompanyName |
+//|                                       http://www.companyname.net |
+//+------------------------------------------------------------------+
 #ifndef __ALGOSYSTEM_NEWS_RISK_MQH__
 #define __ALGOSYSTEM_NEWS_RISK_MQH__
 
@@ -13,15 +18,15 @@
 class INewsProvider
   {
 public:
-   virtual ~INewsProvider() {}
+   virtual          ~INewsProvider() {}
 
-   virtual bool Initialize() = 0;
+   virtual bool      Initialize() = 0;
 
    virtual ENUM_NEWS_STATE GetState(const string symbol,
-                                   datetime current_time,
-                                   NewsFeatures& news) = 0;
+                                    datetime current_time,
+                                    NewsFeatures& news) = 0;
 
-   virtual bool IsUnavailable() const = 0;
+   virtual bool      IsUnavailable() const = 0;
   };
 
 //+------------------------------------------------------------------+
@@ -30,12 +35,12 @@ public:
 class CNoOpNewsProvider : public INewsProvider
   {
 public:
-   bool Initialize() override
+   bool              Initialize() override
      {
       return true;
      }
 
-   ENUM_NEWS_STATE GetState(const string symbol,
+   ENUM_NEWS_STATE   GetState(const string symbol,
                             datetime current_time,
                             NewsFeatures& news) override
      {
@@ -51,7 +56,7 @@ public:
       return NEWS_UNAVAILABLE;
      }
 
-   bool IsUnavailable() const override
+   bool              IsUnavailable() const override
      {
       return true;
      }
@@ -62,18 +67,18 @@ public:
 //+------------------------------------------------------------------+
 struct CalendarEvent
   {
-   datetime time;
-   string   currency;
-   string   name;
-   int      impact;
-   double   actual;
-   double   forecast;
-   double   previous;
-   bool     has_actual;
-   bool     has_forecast;
-   bool     has_previous;
+   datetime          time;
+   string            currency;
+   string            name;
+   int               impact;
+   double            actual;
+   double            forecast;
+   double            previous;
+   bool              has_actual;
+   bool              has_forecast;
+   bool              has_previous;
 
-   CalendarEvent()
+                     CalendarEvent()
      {
       time=0;
       currency="";
@@ -105,11 +110,11 @@ private:
    int                m_cooldown_minutes;
    int                m_high_impact_threshold;
 
-    bool               m_prevent_new_entries;
-    bool               m_close_positions_on_news;
-    bool               m_enabled;
+   bool               m_prevent_new_entries;
+   bool               m_close_positions_on_news;
+   bool               m_enabled;
 
-    datetime           m_last_event_time;
+   datetime           m_last_event_time;
 
    string             m_last_currency;
    string             m_last_event_name;
@@ -117,7 +122,7 @@ private:
    bool               m_initialized;
 
 public:
-   CNewsRiskService()
+                     CNewsRiskService()
      {
       m_provider=NULL;
       m_own_provider=false;
@@ -126,16 +131,16 @@ public:
       m_cooldown_minutes=60;
       m_high_impact_threshold=3;
       m_prevent_new_entries=true;
-       m_close_positions_on_news=false;
-       m_enabled=true;
-       m_last_event_time=0;
+      m_close_positions_on_news=false;
+      m_enabled=true;
+      m_last_event_time=0;
 
       m_last_currency="";
       m_last_event_name="";
       m_initialized=false;
      }
 
-   ~CNewsRiskService()
+                    ~CNewsRiskService()
      {
       if(m_own_provider && m_provider!=NULL)
         {
@@ -144,7 +149,7 @@ public:
         }
      }
 
-   void SetParameters(int blackout_before,
+   void              SetParameters(int blackout_before,
                       int blackout_after,
                       int cooldown,
                       int impact_threshold,
@@ -159,7 +164,7 @@ public:
       m_close_positions_on_news=close_on_news;
      }
 
-   bool SetProvider(INewsProvider* provider, bool take_ownership=false)
+   bool              SetProvider(INewsProvider* provider, bool take_ownership=false)
      {
       if(m_own_provider && m_provider!=NULL)
         {
@@ -171,12 +176,12 @@ public:
       return m_provider != NULL;
      }
 
-    void SetEnabled(bool enabled)
-      {
-       m_enabled=enabled;
-      }
+   void              SetEnabled(bool enabled)
+     {
+      m_enabled=enabled;
+     }
 
-    bool Initialize(INewsProvider* provider=NULL)
+   bool              Initialize(INewsProvider* provider=NULL)
 
      {
       if(provider!=NULL)
@@ -200,7 +205,7 @@ public:
       return true;
      }
 
-   bool IsSymbolAffected(const string symbol,
+   bool              IsSymbolAffected(const string symbol,
                          const string event_currency) const
      {
       if(symbol=="" || event_currency=="")
@@ -216,7 +221,7 @@ public:
       return (event_cur==base || event_cur==quote);
      }
 
-   NewsFeatures Evaluate(const string symbol,
+   NewsFeatures      Evaluate(const string symbol,
                          datetime current_time,
                          const PortfolioState& portfolio_state)
      {
@@ -232,18 +237,19 @@ public:
       result.symbol=symbol;
       result.reason_detail="";
 
-       if(!m_enabled)
-         {
-          result.state=NEWS_DISABLED;
-          result.reason="News risk disabled by configuration";
-          return result;
-         }
+      if(!m_enabled)
+        {
+         result.state=NEWS_DISABLED;
+         result.reason="News risk disabled by configuration";
+         return result;
+        }
 
 
       if(m_provider.IsUnavailable())
         {
          result.state=NEWS_UNAVAILABLE;
          result.reason="News provider unavailable";
+         result.reason_detail="News is enabled but no usable provider is available; entries must fail closed";
          return result;
         }
 
@@ -308,20 +314,26 @@ public:
    bool ShouldBlockEntry(const NewsFeatures& news,
                         const string symbol) const
      {
-      if(!news.valid)
+      // Disabled means explicitly disabled by configuration. When enabled,
+      // invalid or unavailable news data must not silently become NO NEWS.
+      if(!m_enabled)
          return false;
 
-       if(news.state==NEWS_DISABLED)
-          return false;
+      if(!news.valid ||
+         news.state==NEWS_UNAVAILABLE ||
+         news.state==NEWS_DISABLED)
+         return true;
 
-
-      if(news.state==NEWS_BLACKOUT_ACTIVE && m_prevent_new_entries)
+      if((news.state==NEWS_BLACKOUT_ACTIVE ||
+          news.state==NEWS_COOLDOWN_ACTIVE ||
+          news.state==NEWS_EVENT_PASSED) &&
+         m_prevent_new_entries)
          return true;
 
       return false;
      }
 
-   bool ShouldClosePosition(const NewsFeatures& news,
+   bool              ShouldClosePosition(const NewsFeatures& news,
                             const string symbol) const
      {
       if(!m_close_positions_on_news)
@@ -336,10 +348,11 @@ public:
       return false;
      }
 
-   bool IsUnavailable() const
+   bool              IsUnavailable() const
      {
       return m_provider==NULL || m_provider.IsUnavailable();
      }
   };
 
 #endif
+//+------------------------------------------------------------------+

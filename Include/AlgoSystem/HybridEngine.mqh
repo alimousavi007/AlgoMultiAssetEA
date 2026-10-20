@@ -1,3 +1,8 @@
+﻿//+------------------------------------------------------------------+
+//|                                                      ProjectName |
+//|                                      Copyright 2020, CompanyName |
+//|                                       http://www.companyname.net |
+//+------------------------------------------------------------------+
 #ifndef __ALGOSYSTEM_HYBRID_ENGINE_MQH__
 #define __ALGOSYSTEM_HYBRID_ENGINE_MQH__
 
@@ -47,9 +52,9 @@ private:
    CLiquidityStructureEngine m_liquidity_engine;
    CHybridRegimeEngine m_regime_engine;
    CDivergenceEngine m_divergence_engine;
-   CMomentumEngine m_momentum_engine;
-   CNewsRiskService m_news_service;
-   CBiasEngine m_bias_engine;
+   CMomentumEngine   m_momentum_engine;
+   CNewsRiskService  m_news_service;
+   CBiasEngine       m_bias_engine;
 
    string             m_setup_id_counter_symbol;
    int                m_setup_sequence;
@@ -61,7 +66,7 @@ private:
    ENUM_TRADING_STYLE m_active_style;
 
 public:
-   CHybridSignalEngine()
+                     CHybridSignalEngine()
      {
       m_symbol="";
       m_style=STYLE_DAY_TRADING;
@@ -70,9 +75,9 @@ public:
       m_entry_tf=PERIOD_M15;
       m_lookback=100;
       m_tick_size=0;
-       m_point=0;
-       m_use_spread_filter=true;
-       m_max_spread_points=0;
+      m_point=0;
+      m_use_spread_filter=true;
+      m_max_spread_points=0;
 
       m_digits=0;
       m_min_rr=1.5;
@@ -88,14 +93,14 @@ public:
       m_active_style=STYLE_DAY_TRADING;
      }
 
-   void SetParameters(ENUM_TRADING_STYLE style,
-                      ENUM_TIMEFRAMES structure_tf,
-                      ENUM_TIMEFRAMES signal_tf,
-                      ENUM_TIMEFRAMES entry_tf,
-                      double min_rr,
-                      double min_score,
-                      double conflict_threshold,
-                      int lookback)
+   void              SetParameters(ENUM_TRADING_STYLE style,
+                                   ENUM_TIMEFRAMES structure_tf,
+                                   ENUM_TIMEFRAMES signal_tf,
+                                   ENUM_TIMEFRAMES entry_tf,
+                                   double min_rr,
+                                   double min_score,
+                                   double conflict_threshold,
+                                   int lookback)
      {
       m_style=style;
       m_structure_tf=structure_tf;
@@ -108,29 +113,29 @@ public:
       m_active_style=style;
      }
 
-   void SetVolumeProfileParams(int session_bars,
-                               int rolling_bars,
-                               double va_percent)
+   void              SetVolumeProfileParams(int session_bars,
+         int rolling_bars,
+         double va_percent)
      {
       m_profile_engine.SetParameters(session_bars, rolling_bars, va_percent);
      }
 
-   void SetLiquidityParams(int swing_lookback,
-                           int equal_tolerance_points,
-                           int max_level_age_bars,
-                           int sweep_confirm_bars)
+   void              SetLiquidityParams(int swing_lookback,
+                                        int equal_tolerance_points,
+                                        int max_level_age_bars,
+                                        int sweep_confirm_bars)
      {
       m_liquidity_engine.SetParameters(
          swing_lookback, equal_tolerance_points,
          max_level_age_bars, sweep_confirm_bars);
      }
 
-   void SetRegimeParams(int adx_period,
-                        double trend_threshold,
-                        double high_vol_ratio,
-                        double low_vol_ratio,
-                        int range_lookback,
-                        int hysteresis_bars)
+   void              SetRegimeParams(int adx_period,
+                                     double trend_threshold,
+                                     double high_vol_ratio,
+                                     double low_vol_ratio,
+                                     int range_lookback,
+                                     int hysteresis_bars)
      {
       m_regime_engine.SetParameters(
          adx_period, trend_threshold,
@@ -138,66 +143,66 @@ public:
          range_lookback, hysteresis_bars);
      }
 
-   void SetDivergenceParams(int rsi_period,
-                           int macd_fast,
-                           int macd_slow,
-                           int macd_signal,
-                           double pivot_tolerance_percent,
-                           int max_age_bars)
+   void              SetDivergenceParams(int rsi_period,
+                                         int macd_fast,
+                                         int macd_slow,
+                                         int macd_signal,
+                                         double pivot_tolerance_percent,
+                                         int max_age_bars)
      {
       m_divergence_engine.SetParameters(
          rsi_period, macd_fast, macd_slow, macd_signal,
          pivot_tolerance_percent, max_age_bars);
      }
 
-   void SetMomentumParams(int atr_period,
-                          int roc_period,
-                          int lookback)
+   void              SetMomentumParams(int atr_period,
+                                       int roc_period,
+                                       int lookback)
      {
       m_momentum_engine.SetParameters(atr_period, roc_period, lookback);
      }
 
-    void SetNewsParams(int blackout_before,
-                       int blackout_after,
-                       int cooldown,
-                       int impact_threshold,
-                       bool prevent_entries,
-                       bool close_on_news)
-      {
-       m_news_service.SetParameters(
-          blackout_before, blackout_after,
-          cooldown, impact_threshold,
-          prevent_entries, close_on_news);
-      }
+   void              SetNewsParams(int blackout_before,
+                                   int blackout_after,
+                                   int cooldown,
+                                   int impact_threshold,
+                                   bool prevent_entries,
+                                   bool close_on_news)
+     {
+      m_news_service.SetParameters(
+         blackout_before, blackout_after,
+         cooldown, impact_threshold,
+         prevent_entries, close_on_news);
+     }
 
-    void SetNewsEnabled(bool enabled)
-      {
-       m_news_service.SetEnabled(enabled);
-      }
+   void              SetNewsEnabled(bool enabled)
+     {
+      m_news_service.SetEnabled(enabled);
+     }
 
-    void SetSpreadFilterParams(bool use_filter, double max_spread_points)
-      {
-       m_use_spread_filter=use_filter;
-       m_max_spread_points=max_spread_points;
-      }
+   void              SetSpreadFilterParams(bool use_filter, double max_spread_points)
+     {
+      m_use_spread_filter=use_filter;
+      m_max_spread_points=max_spread_points;
+     }
 
 
-    void SetBiasParams(int swings_required, int lookback)
-      {
-       m_bias_engine.SetParameters(swings_required, lookback);
-      }
+   void              SetBiasParams(int swings_required, int lookback)
+     {
+      m_bias_engine.SetParameters(swings_required, lookback);
+     }
 
-    void SetMinScore(double min_score) { m_min_score = min_score; }
-    void SetConflictThreshold(double threshold) { m_conflict_threshold = threshold; }
-    void SetMinRR(double min_rr) { m_min_rr = min_rr; }
+   void              SetMinScore(double min_score) { m_min_score = min_score; }
+   void              SetConflictThreshold(double threshold) { m_conflict_threshold = threshold; }
+   void              SetMinRR(double min_rr) { m_min_rr = min_rr; }
 
-    void SetLookback(int lookback) { m_lookback = lookback; }
+   void              SetLookback(int lookback) { m_lookback = lookback; }
 
-   bool Initialize(const string symbol,
-                   ENUM_TRADING_STYLE style,
-                   ENUM_TIMEFRAMES structure_tf,
-                   ENUM_TIMEFRAMES signal_tf,
-                   ENUM_TIMEFRAMES entry_tf)
+   bool              Initialize(const string symbol,
+                                ENUM_TRADING_STYLE style,
+                                ENUM_TIMEFRAMES structure_tf,
+                                ENUM_TIMEFRAMES signal_tf,
+                                ENUM_TIMEFRAMES entry_tf)
      {
       m_symbol=symbol;
       m_style=style;
@@ -247,36 +252,36 @@ public:
       return true;
      }
 
-   void SetNewsProvider(INewsProvider* provider, bool take_ownership=false)
+   void              SetNewsProvider(INewsProvider* provider, bool take_ownership=false)
      {
       m_news_service.SetProvider(provider, take_ownership);
      }
 
-   bool IsInitialized() const
+   bool              IsInitialized() const
      {
       return m_initialized;
      }
 
-   double GetTickSize() const { return m_tick_size; }
-   double GetPoint() const { return m_point; }
-   int    GetDigits() const { return m_digits; }
+   double            GetTickSize() const { return m_tick_size; }
+   double            GetPoint() const { return m_point; }
+   int               GetDigits() const { return m_digits; }
 
 private:
-   datetime GetCurrentTicket()
+   datetime          GetCurrentTicket()
      {
       MqlDateTime dt;
       TimeToStruct(TimeCurrent(), dt);
       string ticket_str=IntegerToString(dt.year)+
-                         IntegerToString(dt.mon)+
-                         IntegerToString(dt.day)+
-                         IntegerToString(dt.hour)+
-                         IntegerToString(dt.min)+
-                         IntegerToString(dt.sec);
+                        IntegerToString(dt.mon)+
+                        IntegerToString(dt.day)+
+                        IntegerToString(dt.hour)+
+                        IntegerToString(dt.min)+
+                        IntegerToString(dt.sec);
       return (datetime)StringToInteger(ticket_str);
      }
 
 public:
-   string GenerateSetupID()
+   string            GenerateSetupID()
      {
       m_setup_sequence++;
       MqlDateTime dt;
@@ -289,10 +294,10 @@ public:
              ticket_str;
      }
 
-   bool LoadMarketSnapshot(const string symbol,
-                           ENUM_TIMEFRAMES tf,
-                           MarketSnapshot& snapshot,
-                           string& reason)
+   bool              LoadMarketSnapshot(const string symbol,
+                                        ENUM_TIMEFRAMES tf,
+                                        MarketSnapshot& snapshot,
+                                        string& reason)
      {
       MqlRates rates[];
       ResetLastError();
@@ -356,8 +361,8 @@ public:
       props.freeze_level=(int)freeze_level;
       props.trade_allowed=true;
       long selected_flag=0;
-       SymbolInfoInteger(symbol, SYMBOL_SELECT, selected_flag);
-       props.selected = (selected_flag != 0);
+      SymbolInfoInteger(symbol, SYMBOL_SELECT, selected_flag);
+      props.selected = (selected_flag != 0);
       snapshot.properties=props;
       snapshot.valid=true;
 
@@ -366,11 +371,14 @@ public:
      }
 
 public:
-   FeatureContext BuildFeatureContext(const MarketSnapshot& signal_market,
-                                      const MarketSnapshot& structure_market,
-                                      const MarketSnapshot& entry_market,
-                                      const PortfolioState& portfolio_state,
-                                      bool& ok)
+   FeatureContext    BuildFeatureContext(const MarketSnapshot& signal_market,
+                                         const MarketSnapshot& structure_market,
+                                         const MarketSnapshot& entry_market,
+                                         const FeatureSet& signal_features,
+                                         const FeatureSet& structure_features,
+                                         const FeatureSet& entry_features,
+                                         const PortfolioState& portfolio_state,
+                                         bool& ok)
      {
       FeatureContext ctx;
       ctx.valid=false;
@@ -392,11 +400,33 @@ public:
       ctx.signal_market=signal_market;
       ctx.structure_market=structure_market;
       ctx.entry_market=entry_market;
+      ctx.signal_features=signal_features;
+      ctx.structure_features=structure_features;
+      ctx.entry_features=entry_features;
       ctx.portfolio_state=portfolio_state;
 
       if(!signal_market.valid || !structure_market.valid || !entry_market.valid)
         {
          ctx.reason="Invalid market snapshot";
+         return ctx;
+        }
+      if(!signal_features.valid || !structure_features.valid || !entry_features.valid)
+        {
+         ctx.reason="Required feature set invalid";
+         return ctx;
+        }
+
+      if(signal_features.symbol!=m_symbol ||
+         structure_features.symbol!=m_symbol ||
+         entry_features.symbol!=m_symbol ||
+         signal_features.timeframe!=m_signal_tf ||
+         structure_features.timeframe!=m_structure_tf ||
+         entry_features.timeframe!=m_entry_tf ||
+         signal_features.bar_time!=signal_market.closed_bar_time ||
+         structure_features.bar_time!=structure_market.closed_bar_time ||
+         entry_features.bar_time!=entry_market.closed_bar_time)
+        {
+         ctx.reason="Feature set symbol/timeframe/bar mismatch";
          return ctx;
         }
 
@@ -420,7 +450,9 @@ public:
 
       ctx.momentum=m_momentum_engine.Calculate(signal_market);
 
-      ctx.news=m_news_service.Evaluate(m_symbol, signal_market.closed_bar_time, portfolio_state);
+      // Economic-calendar timestamps use trade-server time; a closed bar's
+      // timestamp can be behind the actual news window.
+      ctx.news=m_news_service.Evaluate(m_symbol, TimeTradeServer(), portfolio_state);
 
       ctx.structure=m_bias_engine.Calculate(ctx, structure_market, ctx.profile);
 
@@ -431,24 +463,24 @@ public:
       return ctx;
      }
 
- private:
-    bool LoadRates(string symbol,
-                   ENUM_TIMEFRAMES timeframe,
-                   int count,
-                   MqlRates& rates[])
-      {
-       ArrayFree(rates);
-       ResetLastError();
-       int copied=CopyRates(symbol, timeframe, 0, count, rates);
-       if(copied <= 0)
-          return false;
+private:
+   bool              LoadRates(string symbol,
+                               ENUM_TIMEFRAMES timeframe,
+                               int count,
+                               MqlRates& rates[])
+     {
+      ArrayFree(rates);
+      ResetLastError();
+      int copied=CopyRates(symbol, timeframe, 0, count, rates);
+      if(copied <= 0)
+         return false;
 
-       return true;
-      }
+      return true;
+     }
 
-    bool CheckHardGates(const FeatureContext& ctx,
-                       GateResults& gates,
-                       string& failure_reason) const
+   bool              CheckHardGates(const FeatureContext& ctx,
+                                    GateResults& gates,
+                                    string& failure_reason) const
      {
       gates.data_sufficient=true;
       gates.data_fresh=true;
@@ -529,28 +561,30 @@ public:
          reasons += " trade_not_allowed";
         }
 
-       if(m_use_spread_filter && ctx.signal_market.spread_points > 0)
-         {
-          double spread_points = ctx.signal_market.spread_points;
-          double max_spread=0;
+      if(m_use_spread_filter && ctx.signal_market.spread_points > 0)
+        {
+         double spread_points = ctx.signal_market.spread_points;
+         double max_spread=0;
 
-          if(m_max_spread_points>0)
-             max_spread=m_max_spread_points;
-          else if(m_style==STYLE_SCALPING)
-             max_spread=20.0;
-          else if(m_style==STYLE_DAY_TRADING)
-             max_spread=50.0;
-          else
-             max_spread=100.0;
+         if(m_max_spread_points>0)
+            max_spread=m_max_spread_points;
+         else
+            if(m_style==STYLE_SCALPING)
+               max_spread=20.0;
+            else
+               if(m_style==STYLE_DAY_TRADING)
+                  max_spread=50.0;
+               else
+                  max_spread=100.0;
 
-          if(spread_points > max_spread)
-            {
-             gates.spread_acceptable=false;
-             if(gates.first_failure_reason=="")
-                gates.first_failure_reason="SPREAD_TOO_HIGH";
-             reasons += " spread="+DoubleToString(spread_points,1);
-            }
-         }
+         if(spread_points > max_spread)
+           {
+            gates.spread_acceptable=false;
+            if(gates.first_failure_reason=="")
+               gates.first_failure_reason="SPREAD_TOO_HIGH";
+            reasons += " spread="+DoubleToString(spread_points,1);
+           }
+        }
 
 
       gates.details=reasons;
@@ -563,8 +597,8 @@ public:
              gates.spread_acceptable;
      }
 
-   double CalculateBiasScore(const StructureFeatures& structure,
-                            const FeatureContext& ctx) const
+   double            CalculateBiasScore(const StructureFeatures& structure,
+                                        const FeatureContext& ctx) const
      {
       if(!structure.valid)
          return 0.0;
@@ -585,8 +619,8 @@ public:
         }
      }
 
-   double CalculateLiquidityScore(const LiquidityFeatures& liquidity,
-                                  ENUM_SIGNAL_DIRECTION direction) const
+   double            CalculateLiquidityScore(const LiquidityFeatures& liquidity,
+         ENUM_SIGNAL_DIRECTION direction) const
      {
       if(!liquidity.valid)
          return 0.0;
@@ -597,19 +631,20 @@ public:
             !liquidity.event_consumed)
             return 1.0;
         }
-      else if(direction==SIGNAL_SHORT)
-        {
-         if(liquidity.recent_event==LIQ_EVENT_SHORT_SWEEP &&
-            !liquidity.event_consumed)
-            return 1.0;
-        }
+      else
+         if(direction==SIGNAL_SHORT)
+           {
+            if(liquidity.recent_event==LIQ_EVENT_SHORT_SWEEP &&
+               !liquidity.event_consumed)
+               return 1.0;
+           }
 
       return 0.0;
      }
 
-   double CalculateProfileScore(const ProfileFeatures& profile,
-                               ENUM_SIGNAL_DIRECTION direction,
-                               double price) const
+   double            CalculateProfileScore(const ProfileFeatures& profile,
+                                           ENUM_SIGNAL_DIRECTION direction,
+                                           double price) const
      {
       if(!profile.valid || profile.poc<=0)
          return 0.0;
@@ -620,30 +655,35 @@ public:
         {
          if(price > profile.vah)
             score=1.0;
-          else if(price > profile.poc && price <= profile.vah)
-             score=0.7;
-          else if(price >= profile.val && price <= profile.vah)
-             score=0.3;
          else
-            score=-0.2;
+            if(price > profile.poc && price <= profile.vah)
+               score=0.7;
+            else
+               if(price >= profile.val && price <= profile.vah)
+                  score=0.3;
+               else
+                  score=-0.2;
         }
-      else if(direction==SIGNAL_SHORT)
-        {
-         if(price < profile.val)
-            score=1.0;
-          else if(price < profile.poc && price >= profile.val)
-             score=0.7;
-          else if(price >= profile.val && price <= profile.vah)
-             score=0.3;
-         else
-            score=-0.2;
-        }
+      else
+         if(direction==SIGNAL_SHORT)
+           {
+            if(price < profile.val)
+               score=1.0;
+            else
+               if(price < profile.poc && price >= profile.val)
+                  score=0.7;
+               else
+                  if(price >= profile.val && price <= profile.vah)
+                     score=0.3;
+                  else
+                     score=-0.2;
+           }
 
       return score;
      }
 
-   double CalculateRegimeScore(const RegimeFeatures& regime,
-                               ENUM_TRADING_STYLE style) const
+   double            CalculateRegimeScore(const RegimeFeatures& regime,
+                                          ENUM_TRADING_STYLE style) const
      {
       if(!regime.valid)
          return 0.0;
@@ -662,12 +702,12 @@ public:
             return 0.1;
          case HYBRID_REGIME_INSUFFICIENT_DATA:
          default:
-             return 0.0;
+            return 0.0;
         }
      }
 
-   double CalculateMomentumScore(const MomentumFeatures& momentum,
-                                 ENUM_SIGNAL_DIRECTION direction) const
+   double            CalculateMomentumScore(const MomentumFeatures& momentum,
+         ENUM_SIGNAL_DIRECTION direction) const
      {
       if(!momentum.valid)
          return 0.0;
@@ -676,32 +716,45 @@ public:
         {
          switch(momentum.state)
            {
-            case MOMENTUM_BULLISH: return 0.9;
-            case MOMENTUM_EXHAUSTING: return 0.3;
-            case MOMENTUM_WEAK: return 0.2;
-            case MOMENTUM_CONFLICTED: return 0.0;
-            case MOMENTUM_BEARISH: return -0.5;
-            default: return 0.0;
+            case MOMENTUM_BULLISH:
+               return 0.9;
+            case MOMENTUM_EXHAUSTING:
+               return 0.3;
+            case MOMENTUM_WEAK:
+               return 0.2;
+            case MOMENTUM_CONFLICTED:
+               return 0.0;
+            case MOMENTUM_BEARISH:
+               return -0.5;
+            default:
+               return 0.0;
            }
         }
-      else if(direction==SIGNAL_SHORT)
-        {
-         switch(momentum.state)
+      else
+         if(direction==SIGNAL_SHORT)
            {
-            case MOMENTUM_BEARISH: return 0.9;
-            case MOMENTUM_EXHAUSTING: return 0.3;
-            case MOMENTUM_WEAK: return 0.2;
-            case MOMENTUM_CONFLICTED: return 0.0;
-            case MOMENTUM_BULLISH: return -0.5;
-            default: return 0.0;
+            switch(momentum.state)
+              {
+               case MOMENTUM_BEARISH:
+                  return 0.9;
+               case MOMENTUM_EXHAUSTING:
+                  return 0.3;
+               case MOMENTUM_WEAK:
+                  return 0.2;
+               case MOMENTUM_CONFLICTED:
+                  return 0.0;
+               case MOMENTUM_BULLISH:
+                  return -0.5;
+               default:
+                  return 0.0;
+              }
            }
-        }
 
       return 0.0;
      }
 
-   double CalculateDivergenceScore(const DivergenceFeatures& divergence,
-                                   ENUM_SIGNAL_DIRECTION direction) const
+   double            CalculateDivergenceScore(const DivergenceFeatures& divergence,
+         ENUM_SIGNAL_DIRECTION direction) const
      {
       if(!divergence.valid || divergence.divergence==DIVERGENCE_NONE)
          return 0.0;
@@ -715,60 +768,74 @@ public:
             divergence.divergence==DIVERGENCE_HIDDEN_BEARISH)
             return -0.5;
         }
-      else if(direction==SIGNAL_SHORT)
-        {
-         if(divergence.divergence==DIVERGENCE_REGULAR_BEARISH ||
-            divergence.divergence==DIVERGENCE_HIDDEN_BEARISH)
-            return 0.8;
-         if(divergence.divergence==DIVERGENCE_REGULAR_BULLISH ||
-            divergence.divergence==DIVERGENCE_HIDDEN_BULLISH)
-            return -0.5;
-        }
+      else
+         if(direction==SIGNAL_SHORT)
+           {
+            if(divergence.divergence==DIVERGENCE_REGULAR_BEARISH ||
+               divergence.divergence==DIVERGENCE_HIDDEN_BEARISH)
+               return 0.8;
+            if(divergence.divergence==DIVERGENCE_REGULAR_BULLISH ||
+               divergence.divergence==DIVERGENCE_HIDDEN_BULLISH)
+               return -0.5;
+           }
 
       return 0.0;
      }
 
-   double CalculateEntryScore(double entry_price,
-                              double stop,
-                              double target,
-                              ENUM_SIGNAL_DIRECTION direction,
-                              const FeatureContext& ctx) const
+   double            CalculateEntryScore(double entry_price,
+                                         double stop,
+                                         double target,
+                                         ENUM_SIGNAL_DIRECTION direction,
+                                         const FeatureContext& ctx) const
      {
-      if(!ctx.signal_market.valid)
+      if(!ctx.signal_market.valid ||
+         !ctx.entry_market.valid ||
+         !ctx.entry_features.valid)
          return 0.0;
 
       double bid=ctx.signal_market.bid;
       double ask=ctx.signal_market.ask;
-
+      // Entry-TF EMA alignment is a soft confirmation, not a hard veto.
+      double alignment=0.5;
+      if(direction==SIGNAL_LONG &&
+         ctx.entry_features.ema_fast>ctx.entry_features.ema_slow)
+         alignment=1.0;
+      else
+         if(direction==SIGNAL_SHORT &&
+            ctx.entry_features.ema_fast<ctx.entry_features.ema_slow)
+            alignment=1.0;
       if(direction==SIGNAL_LONG)
         {
          double distance=MathAbs(entry_price - ask);
          double max_distance=getEntryTolerance(m_style);
 
          if(distance <= max_distance)
-            return 1.0;
-         else if(distance <= max_distance * 2)
-            return 0.5;
+            return alignment;
          else
-            return 0.0;
+            if(distance <= max_distance * 2)
+               return alignment * 0.5;
+            else
+               return 0.0;
         }
-      else if(direction==SIGNAL_SHORT)
-        {
-         double distance=MathAbs(entry_price - bid);
-         double max_distance=getEntryTolerance(m_style);
+      else
+         if(direction==SIGNAL_SHORT)
+           {
+            double distance=MathAbs(entry_price - bid);
+            double max_distance=getEntryTolerance(m_style);
 
-         if(distance <= max_distance)
-            return 1.0;
-         else if(distance <= max_distance * 2)
-            return 0.5;
-         else
-            return 0.0;
-        }
+            if(distance <= max_distance)
+               return alignment;
+            else
+               if(distance <= max_distance * 2)
+                  return alignment * 0.5;
+               else
+                  return 0.0;
+           }
 
       return 0.0;
      }
 
-   double getEntryTolerance(ENUM_TRADING_STYLE style) const
+   double            getEntryTolerance(ENUM_TRADING_STYLE style) const
      {
       switch(style)
         {
@@ -784,10 +851,10 @@ public:
      }
 
 public:
-   HybridDecision Evaluate(const string symbol,
-                           const FeatureContext& ctx,
-                           const MarketSnapshot& signal_market,
-                           bool& ok)
+   HybridDecision    Evaluate(const string symbol,
+                              const FeatureContext& ctx,
+                              const MarketSnapshot& signal_market,
+                              bool& ok)
      {
       HybridDecision decision;
       decision.valid=false;
@@ -798,10 +865,10 @@ public:
       decision.bias=BIAS_INSUFFICIENT_DATA;
       decision.long_score=0;
       decision.short_score=0;
-       decision.context=ctx;
-       decision.plan.valid=false;
-       decision.gates.data_sufficient=true;
-       decision.gates.data_fresh=true;
+      decision.context=ctx;
+      decision.plan.valid=false;
+      decision.gates.data_sufficient=true;
+      decision.gates.data_fresh=true;
       decision.evidence_summary="";
       decision.main_reason="";
       decision.decision_time=TimeCurrent();
@@ -936,37 +1003,40 @@ public:
          selected_direction=SIGNAL_LONG;
          selected_score=long_score;
         }
-      else if(short_score >= m_min_score &&
-              short_score >= long_score + m_conflict_threshold)
-        {
-         selected_direction=SIGNAL_SHORT;
-         selected_score=short_score;
-        }
-      else if(MathAbs(score_diff) < m_conflict_threshold)
-        {
-         decision.status=DECISION_CONFLICTED_SIGNAL;
-         decision.gates=gates;
-         decision.main_reason="LONG_SHORT_CONFLICT";
-         decision.evidence_summary +=
-            " score_diff="+DoubleToString(score_diff,1)+
-            " below threshold="+DoubleToString(m_conflict_threshold,1);
-         decision.valid=true;
-         ok=true;
-         return decision;
-        }
-      else if(long_score < m_min_score && short_score < m_min_score)
-        {
-         decision.status=DECISION_NO_TRADE;
-         decision.gates=gates;
-         decision.main_reason="SCORE_BELOW_THRESHOLD";
-         decision.evidence_summary +=
-            " long="+DoubleToString(long_score,1)+
-            " short="+DoubleToString(short_score,1)+
-            " min="+DoubleToString(m_min_score,1);
-         decision.valid=true;
-         ok=true;
-         return decision;
-        }
+      else
+         if(short_score >= m_min_score &&
+            short_score >= long_score + m_conflict_threshold)
+           {
+            selected_direction=SIGNAL_SHORT;
+            selected_score=short_score;
+           }
+         else
+            if(MathAbs(score_diff) < m_conflict_threshold)
+              {
+               decision.status=DECISION_CONFLICTED_SIGNAL;
+               decision.gates=gates;
+               decision.main_reason="LONG_SHORT_CONFLICT";
+               decision.evidence_summary +=
+                  " score_diff="+DoubleToString(score_diff,1)+
+                  " below threshold="+DoubleToString(m_conflict_threshold,1);
+               decision.valid=true;
+               ok=true;
+               return decision;
+              }
+            else
+               if(long_score < m_min_score && short_score < m_min_score)
+                 {
+                  decision.status=DECISION_NO_TRADE;
+                  decision.gates=gates;
+                  decision.main_reason="SCORE_BELOW_THRESHOLD";
+                  decision.evidence_summary +=
+                     " long="+DoubleToString(long_score,1)+
+                     " short="+DoubleToString(short_score,1)+
+                     " min="+DoubleToString(m_min_score,1);
+                  decision.valid=true;
+                  ok=true;
+                  return decision;
+                 }
 
       if(selected_direction==SIGNAL_NONE)
         {
@@ -1067,7 +1137,7 @@ public:
      }
 
 private:
-   datetime GetSetupExpiry(datetime bar_time) const
+   datetime          GetSetupExpiry(datetime bar_time) const
      {
       switch(m_active_style)
         {
@@ -1082,7 +1152,7 @@ private:
         }
      }
 
-   datetime GetSetupInvalidation(datetime bar_time) const
+   datetime          GetSetupInvalidation(datetime bar_time) const
      {
       switch(m_active_style)
         {
@@ -1097,100 +1167,109 @@ private:
         }
      }
 
-   double GetStopBuffer(ENUM_TRADING_STYLE style) const
+   double            GetStopBuffer(ENUM_TRADING_STYLE style) const
      {
       switch(style)
         {
-         case STYLE_SCALPING: return 1.0;
-         case STYLE_DAY_TRADING: return 1.5;
-         case STYLE_SWING_TRADING: return 2.0;
-         default: return 1.0;
+         case STYLE_SCALPING:
+            return 1.0;
+         case STYLE_DAY_TRADING:
+            return 1.5;
+         case STYLE_SWING_TRADING:
+            return 2.0;
+         default:
+            return 1.0;
         }
      }
 
-   double GetTargetBuffer(ENUM_TRADING_STYLE style) const
+   double            GetTargetBuffer(ENUM_TRADING_STYLE style) const
      {
       switch(style)
         {
-         case STYLE_SCALPING: return 1.0;
-         case STYLE_DAY_TRADING: return 2.0;
-         case STYLE_SWING_TRADING: return 3.0;
-         default: return 1.0;
+         case STYLE_SCALPING:
+            return 1.0;
+         case STYLE_DAY_TRADING:
+            return 2.0;
+         case STYLE_SWING_TRADING:
+            return 3.0;
+         default:
+            return 1.0;
         }
      }
 
-   bool BuildTradePlan(ENUM_SIGNAL_DIRECTION direction,
-                       const FeatureContext& ctx,
-                       double entry,
-                       double& stop,
-                       double& target,
-                       double& rr,
-                       string& reason)
+   bool              BuildTradePlan(ENUM_SIGNAL_DIRECTION direction,
+                                    const FeatureContext& ctx,
+                                    double entry,
+                                    double& stop,
+                                    double& target,
+                                    double& rr,
+                                    string& reason)
      {
-       stop=0;
-       target=0;
-       rr=0;
-       reason="";
+      stop=0;
+      target=0;
+      rr=0;
+      reason="";
 
-       if(entry<=0.0 || !MathIsValidNumber(entry))
-         {
-          reason="Invalid entry price";
-          return false;
-         }
+      if(entry<=0.0 || !MathIsValidNumber(entry))
+        {
+         reason="Invalid entry price";
+         return false;
+        }
 
-       double buffer_atr = 0.0;
-       if(ctx.momentum.valid && ctx.momentum.atr > 0)
-          buffer_atr = ctx.momentum.atr;
-       if(buffer_atr <= 0)
-          buffer_atr = ctx.signal_market.closed_bar.high -
+      double buffer_atr = 0.0;
+      if(ctx.momentum.valid && ctx.momentum.atr > 0)
+         buffer_atr = ctx.momentum.atr;
+      if(buffer_atr <= 0)
+         buffer_atr = ctx.signal_market.closed_bar.high -
                       ctx.signal_market.closed_bar.low;
-       if(buffer_atr <= 0)
-          buffer_atr = ctx.structure_market.closed_bar.high -
+      if(buffer_atr <= 0)
+         buffer_atr = ctx.structure_market.closed_bar.high -
                       ctx.structure_market.closed_bar.low;
-       if(buffer_atr <= 0)
-          buffer_atr = GetTickSize() * 10;
+      if(buffer_atr <= 0)
+         buffer_atr = GetTickSize() * 10;
 
-       if(buffer_atr <= 0 || !MathIsValidNumber(buffer_atr))
-         {
-          reason="Invalid volatility input for trade plan";
-          return false;
-         }
-       double stop_buffer_points = GetStopBuffer(m_active_style) * buffer_atr;
-       double target_buffer_points = GetTargetBuffer(m_active_style) * buffer_atr;
+      if(buffer_atr <= 0 || !MathIsValidNumber(buffer_atr))
+        {
+         reason="Invalid volatility input for trade plan";
+         return false;
+        }
+      double stop_buffer_points = GetStopBuffer(m_active_style) * buffer_atr;
+      double target_buffer_points = GetTargetBuffer(m_active_style) * buffer_atr;
 
       if(direction==SIGNAL_LONG)
         {
          stop = NormalizeDouble(
-            ctx.signal_market.closed_bar.low - stop_buffer_points,
-            m_digits);
+                   ctx.signal_market.closed_bar.low - stop_buffer_points,
+                   m_digits);
          target = NormalizeDouble(
-            entry + target_buffer_points,
-            m_digits);
-        }
-      else if(direction==SIGNAL_SHORT)
-        {
-         stop = NormalizeDouble(
-            ctx.signal_market.closed_bar.high + stop_buffer_points,
-            m_digits);
-         target = NormalizeDouble(
-            entry - target_buffer_points,
-            m_digits);
+                     entry + target_buffer_points,
+                     m_digits);
         }
       else
-        {
-         reason="Invalid direction for trade plan";
-         return false;
-        }
+         if(direction==SIGNAL_SHORT)
+           {
+            stop = NormalizeDouble(
+                      ctx.signal_market.closed_bar.high + stop_buffer_points,
+                      m_digits);
+            target = NormalizeDouble(
+                        entry - target_buffer_points,
+                        m_digits);
+           }
+         else
+           {
+            reason="Invalid direction for trade plan";
+            return false;
+           }
 
       stop=CAlgoUtils::NormalizePriceToTick(
-         stop, m_tick_size,
-         (direction==SIGNAL_SHORT),
-         m_digits);
+              stop, m_tick_size,
+              (direction==SIGNAL_SHORT),
+              m_digits);
 
       target=CAlgoUtils::NormalizePriceToTick(
-         target, m_tick_size,
-         (direction==SIGNAL_LONG),
-         m_digits);
+                target, m_tick_size,
+                (direction==SIGNAL_LONG),
+                m_digits);
 
       if(stop<=0 || target<=0)
         {
@@ -1229,11 +1308,11 @@ private:
       return true;
      }
 
-   bool ValidateSLTP(double stop,
-                     double target,
-                     double entry,
-                     ENUM_SIGNAL_DIRECTION direction,
-                     string& reason)
+   bool              ValidateSLTP(double stop,
+                                  double target,
+                                  double entry,
+                                  ENUM_SIGNAL_DIRECTION direction,
+                                  string& reason)
      {
       reason="";
 
@@ -1264,24 +1343,25 @@ private:
             return false;
            }
         }
-      else if(direction==SIGNAL_SHORT)
-        {
-         if(stop <= entry)
-           {
-            reason="Short stop at or below entry";
-            return false;
-           }
-         if(target >= entry)
-           {
-            reason="Short target at or above entry";
-            return false;
-           }
-        }
       else
-        {
-         reason="Invalid direction";
-         return false;
-        }
+         if(direction==SIGNAL_SHORT)
+           {
+            if(stop <= entry)
+              {
+               reason="Short stop at or below entry";
+               return false;
+              }
+            if(target >= entry)
+              {
+               reason="Short target at or above entry";
+               return false;
+              }
+           }
+         else
+           {
+            reason="Invalid direction";
+            return false;
+           }
 
       double point=m_point > 0 ? m_point : m_tick_size;
       if(point<=0)
@@ -1329,7 +1409,7 @@ private:
       return true;
      }
 
-   double ctx_bid() const
+   double            ctx_bid() const
      {
       MqlTick tick;
       if(!SymbolInfoTick(m_symbol, tick))
@@ -1337,7 +1417,7 @@ private:
       return tick.bid;
      }
 
-   double ctx_ask() const
+   double            ctx_ask() const
      {
       MqlTick tick;
       if(!SymbolInfoTick(m_symbol, tick))
@@ -1346,36 +1426,36 @@ private:
      }
 
 public:
-   bool NormalizeSignalStopsToTick(TradePlan& plan)
+   bool              NormalizeSignalStopsToTick(TradePlan& plan)
      {
       if(!plan.valid || plan.stop<=0 || plan.target<=0 || plan.entry<=0)
          return false;
 
       plan.stop=CAlgoUtils::NormalizePriceToTick(
-         plan.stop, m_tick_size,
-         (plan.direction==SIGNAL_SHORT),
-         m_digits);
+                   plan.stop, m_tick_size,
+                   (plan.direction==SIGNAL_SHORT),
+                   m_digits);
 
       plan.target=CAlgoUtils::NormalizePriceToTick(
-         plan.target, m_tick_size,
-         (plan.direction==SIGNAL_LONG),
-         m_digits);
+                     plan.target, m_tick_size,
+                     (plan.direction==SIGNAL_LONG),
+                     m_digits);
 
       return plan.stop > 0 && plan.target > 0;
      }
 
-   void MarkPlanConsumed(TradePlan& plan)
+   void              MarkPlanConsumed(TradePlan& plan)
      {
       plan.consumed=true;
       m_last_signal_consumed=true;
      }
 
-   bool IsPlanConsumed(const TradePlan& plan) const
+   bool              IsPlanConsumed(const TradePlan& plan) const
      {
       return plan.consumed;
      }
 
-   bool IsPlanExpired(const TradePlan& plan, datetime current_time) const
+   bool              IsPlanExpired(const TradePlan& plan, datetime current_time) const
      {
       return current_time > plan.expiry_time;
      }
@@ -1385,16 +1465,21 @@ public:
       return m_active_style;
      }
 
-   string GetStyleName() const
+   string            GetStyleName() const
      {
       switch(m_active_style)
         {
-         case STYLE_SCALPING: return "SCALPING";
-         case STYLE_DAY_TRADING: return "DAY TRADING";
-         case STYLE_SWING_TRADING: return "SWING TRADING";
-         default: return "UNKNOWN";
+         case STYLE_SCALPING:
+            return "SCALPING";
+         case STYLE_DAY_TRADING:
+            return "DAY TRADING";
+         case STYLE_SWING_TRADING:
+            return "SWING TRADING";
+         default:
+            return "UNKNOWN";
         }
      }
   };
 
 #endif
+//+------------------------------------------------------------------+
