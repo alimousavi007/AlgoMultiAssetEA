@@ -409,10 +409,10 @@ public:
      }
 
    bool              Initialize(const string in_symbol,
-                                const ENUM_TRADING_STYLE in_style,
-                                const ENUM_TIMEFRAMES in_structure_tf,
-                                const ENUM_TIMEFRAMES in_signal_tf,
-                                const ENUM_TIMEFRAMES in_entry_tf)
+                   const ENUM_TRADING_STYLE in_style,
+                   const ENUM_TIMEFRAMES in_structure_tf,
+                   const ENUM_TIMEFRAMES in_signal_tf,
+                   const ENUM_TIMEFRAMES in_entry_tf)
      {
       valid=false;
       last_failure="";
@@ -429,21 +429,21 @@ public:
          return false;
         }
 
-      if(!market_structure.Initialize() ||
-         !market_signal.Initialize() ||
-         !market_entry.Initialize())
-        {
-         last_failure="MarketData.Initialize failed";
-         return false;
-        }
+       if(!market_structure.Initialize() ||
+          !market_signal.Initialize() ||
+          !market_entry.Initialize())
+         {
+          last_failure="MarketData.Initialize failed";
+          return false;
+         }
 
-      if(!feature_structure.InitializeFor(symbol, structure_tf) ||
-         !feature_signal.InitializeFor(symbol, signal_tf) ||
-         !feature_entry.InitializeFor(symbol, entry_tf))
-        {
-         last_failure="FeatureEngine.Initialize failed";
-         return false;
-        }
+       if(!feature_structure.InitializeFor(symbol, structure_tf) ||
+          !feature_signal.InitializeFor(symbol, signal_tf) ||
+          !feature_entry.InitializeFor(symbol, entry_tf))
+         {
+          last_failure="FeatureEngine.Initialize failed";
+          return false;
+         }
 
 
       if(!hybrid_engine.Initialize(
@@ -489,15 +489,15 @@ public:
          10,
          InpMomentumLookback);
 
-      hybrid_engine.SetNewsParams(
-         InpNewsBlackoutMinutesBefore,
-         InpNewsBlackoutMinutesAfter,
-         InpNewsCooldownMinutes,
-         InpNewsImpactThreshold,
-         InpNewsPreventNewEntries,
-         InpNewsClosePositions);
-      hybrid_engine.SetNewsEnabled(InpNewsEnabled);
-      hybrid_engine.SetSpreadFilterParams(InpUseSpreadFilter, (double)InpMaxSpreadPoints);
+       hybrid_engine.SetNewsParams(
+          InpNewsBlackoutMinutesBefore,
+          InpNewsBlackoutMinutesAfter,
+          InpNewsCooldownMinutes,
+          InpNewsImpactThreshold,
+          InpNewsPreventNewEntries,
+          InpNewsClosePositions);
+       hybrid_engine.SetNewsEnabled(InpNewsEnabled);
+       hybrid_engine.SetSpreadFilterParams(InpUseSpreadFilter, (double)InpMaxSpreadPoints);
 
 
       hybrid_engine.SetBiasParams(2, 50);
@@ -838,7 +838,7 @@ void ProcessHybridDecision(CSymbolRuntime& runtime,
 
    ExecutionResult result;
    bool execution_ok = g_executor.Execute(request, result);
-   g_logger.Trade(result);
+    g_logger.Trade(result);
 
 // An executor call consumes this setup even when it fails. Automatic
 // retries need an explicit retry policy; do not resubmit the same setup
@@ -846,17 +846,17 @@ void ProcessHybridDecision(CSymbolRuntime& runtime,
    runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
 
    if(!execution_ok || !result.success)
-      return;
-   if(!g_state.UpdateAfterTrade(result))
-      g_logger.Event(
-         LOG_ERROR, "STATE", "STATE_RECONSTRUCT_FAILED",
-         runtime.symbol, "", "",
-         legacy_signal.signal_id,
-         "FAIL", "HISTORY_OR_ACCOUNT_STATE",
-         "Post-trade state reconstruction failed; new entries blocked");
+       return;
+    if(!g_state.UpdateAfterTrade(result))
+       g_logger.Event(
+          LOG_ERROR, "STATE", "STATE_RECONSTRUCT_FAILED",
+          runtime.symbol, "", "",
+          legacy_signal.signal_id,
+          "FAIL", "HISTORY_OR_ACCOUNT_STATE",
+          "Post-trade state reconstruction failed; new entries blocked");
 
-   runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
-  }
+    runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+   }
 
 
 //+------------------------------------------------------------------+
@@ -1619,5 +1619,4 @@ int OnTesterInit()
 void OnTesterDeinit()
   {
   }
-//+------------------------------------------------------------------+
 //+------------------------------------------------------------------+
