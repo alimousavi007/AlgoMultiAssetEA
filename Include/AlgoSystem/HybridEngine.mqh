@@ -30,9 +30,10 @@ private:
    string             m_symbol;
    ENUM_TRADING_STYLE m_style;
 
-   ENUM_TIMEFRAMES    m_structure_tf;
-   ENUM_TIMEFRAMES    m_signal_tf;
-   ENUM_TIMEFRAMES    m_entry_tf;
+    ENUM_TIMEFRAMES    m_context_tf;
+    ENUM_TIMEFRAMES    m_structure_tf;
+    ENUM_TIMEFRAMES    m_setup_tf;
+    ENUM_TIMEFRAMES    m_entry_tf;
 
    int                m_lookback;
 
@@ -45,7 +46,11 @@ private:
    double             m_min_score;
    double             m_conflict_threshold;
 
-   bool               m_initialized;
+     int                m_freshness_context_seconds;
+     int                m_freshness_structure_seconds;
+     int                m_freshness_setup_seconds;
+     int                m_freshness_entry_seconds;
+     bool               m_freshness_valid;
    datetime           m_last_bar_time;
 
    CVolumeProfileEngine m_profile_engine;
@@ -70,9 +75,10 @@ public:
      {
       m_symbol="";
       m_style=STYLE_DAY_TRADING;
-      m_structure_tf=PERIOD_H4;
-      m_signal_tf=PERIOD_H1;
-      m_entry_tf=PERIOD_M15;
+       m_context_tf=PERIOD_H4;
+       m_structure_tf=PERIOD_H1;
+       m_setup_tf=PERIOD_H1;
+       m_entry_tf=PERIOD_M15;
       m_lookback=100;
       m_tick_size=0;
       m_point=0;
@@ -83,7 +89,11 @@ public:
       m_min_rr=1.5;
       m_min_score=70.0;
       m_conflict_threshold=15.0;
-      m_initialized=false;
+       m_freshness_context_seconds=300;
+       m_freshness_structure_seconds=300;
+       m_freshness_setup_seconds=300;
+        m_freshness_entry_seconds=60;
+        m_freshness_valid=true;
       m_last_bar_time=0;
       m_setup_id_counter_symbol="";
       m_setup_sequence=0;
@@ -93,19 +103,21 @@ public:
       m_active_style=STYLE_DAY_TRADING;
      }
 
-   void              SetParameters(ENUM_TRADING_STYLE style,
-                                   ENUM_TIMEFRAMES structure_tf,
-                                   ENUM_TIMEFRAMES signal_tf,
-                                   ENUM_TIMEFRAMES entry_tf,
-                                   double min_rr,
-                                   double min_score,
-                                   double conflict_threshold,
-                                   int lookback)
-     {
-      m_style=style;
-      m_structure_tf=structure_tf;
-      m_signal_tf=signal_tf;
-      m_entry_tf=entry_tf;
+    void              SetParameters(ENUM_TRADING_STYLE style,
+                                    ENUM_TIMEFRAMES context_tf,
+                                    ENUM_TIMEFRAMES structure_tf,
+                                    ENUM_TIMEFRAMES setup_tf,
+                                    ENUM_TIMEFRAMES entry_tf,
+                                    double min_rr,
+                                    double min_score,
+                                    double conflict_threshold,
+                                    int lookback)
+      {
+       m_style=style;
+       m_context_tf=context_tf;
+       m_structure_tf=structure_tf;
+       m_setup_tf=setup_tf;
+       m_entry_tf=entry_tf;
       m_min_rr=min_rr;
       m_min_score=min_score;
       m_conflict_threshold=conflict_threshold;
@@ -194,21 +206,38 @@ public:
 
    void              SetMinScore(double min_score) { m_min_score = min_score; }
    void              SetConflictThreshold(double threshold) { m_conflict_threshold = threshold; }
-   void              SetMinRR(double min_rr) { m_min_rr = min_rr; }
+    void              SetFreshnessParams(int context_seconds,
+                                         int structure_seconds,
+                                         int setup_seconds,
+                                         int entry_seconds)
+      {
+       m_freshness_valid = (context_seconds>0 && structure_seconds>0 &&
+                            setup_seconds>0 && entry_seconds>0);
+       if(m_freshness_valid)
+         {
+          m_freshness_context_seconds=context_seconds;
+          m_freshness_structure_seconds=structure_seconds;
+          m_freshness_setup_seconds=setup_seconds;
+          m_freshness_entry_seconds=entry_seconds;
+         }
+      }
+    bool              IsFreshnessValid() const { return m_freshness_valid; }
 
    void              SetLookback(int lookback) { m_lookback = lookback; }
 
-   bool              Initialize(const string symbol,
-                                ENUM_TRADING_STYLE style,
-                                ENUM_TIMEFRAMES structure_tf,
-                                ENUM_TIMEFRAMES signal_tf,
-                                ENUM_TIMEFRAMES entry_tf)
-     {
-      m_symbol=symbol;
-      m_style=style;
-      m_structure_tf=structure_tf;
-      m_signal_tf=signal_tf;
-      m_entry_tf=entry_tf;
+    bool              Initialize(const string symbol,
+                                 ENUM_TRADING_STYLE style,
+                                 ENUM_TIMEFRAMES context_tf,
+                                 ENUM_TIMEFRAMES structure_tf,
+                                 ENUM_TIMEFRAMES setup_tf,
+                                 ENUM_TIMEFRAMES entry_tf)
+      {
+       m_symbol=symbol;
+       m_style=style;
+       m_context_tf=context_tf;
+       m_structure_tf=structure_tf;
+       m_setup_tf=setup_tf;
+       m_entry_tf=entry_tf;
       m_active_style=style;
       m_setup_id_counter_symbol=symbol;
       m_setup_sequence=0;
@@ -371,22 +400,25 @@ public:
      }
 
 public:
-   FeatureContext    BuildFeatureContext(const MarketSnapshot& signal_market,
-                                         const MarketSnapshot& structure_market,
-                                         const MarketSnapshot& entry_market,
-                                         const FeatureSet& signal_features,
-                                         const FeatureSet& structure_features,
-                                         const FeatureSet& entry_features,
-                                         const PortfolioState& portfolio_state,
-                                         bool& ok)
+    FeatureContext    BuildFeatureContext(const MarketSnapshot& context_market,
+                                          const MarketSnapshot& structure_market,
+                                          const MarketSnapshot& setup_market,
+                                          const MarketSnapshot& entry_market,
+                                          const FeatureSet& context_features,
+                                          const FeatureSet& structure_features,
+                                          const FeatureSet& setup_features,
+                                          const FeatureSet& entry_features,
+                                          const PortfolioState& portfolio_state,
+                                          bool& ok)
      {
       FeatureContext ctx;
       ctx.valid=false;
       ctx.symbol=m_symbol;
       ctx.style=m_active_style;
-      ctx.structure_tf=m_structure_tf;
-      ctx.signal_tf=m_signal_tf;
-      ctx.entry_tf=m_entry_tf;
+       ctx.context_tf=m_context_tf;
+       ctx.structure_tf=m_structure_tf;
+       ctx.setup_tf=m_setup_tf;
+       ctx.entry_tf=m_entry_tf;
       ctx.evaluation_time=TimeCurrent();
       ctx.reason="";
       ok=false;
@@ -501,9 +533,10 @@ private:
 
       string reasons="";
 
-      if(!ctx.signal_market.valid ||
-         !ctx.structure_market.valid ||
-         !ctx.entry_market.valid)
+       if(!ctx.signal_market.valid ||
+          !ctx.structure_market.valid ||
+          !ctx.setup_market.valid ||
+          !ctx.entry_market.valid)
         {
          gates.data_sufficient=false;
          if(gates.first_failure_reason=="")
@@ -519,14 +552,68 @@ private:
          reasons += " signal_market_invalid";
         }
 
-      if(TimeCurrent() - ctx.signal_market.current_time >
-         (datetime)300)
-        {
-         gates.data_fresh=false;
-         if(gates.first_failure_reason=="")
-            gates.first_failure_reason="STALE_MARKET_DATA";
-         reasons += " stale_data";
-        }
+       if(!m_freshness_valid)
+         {
+          gates.data_fresh=false;
+          if(gates.first_failure_reason=="")
+             gates.first_failure_reason="FRESHNESS_CONFIG_INVALID";
+          reasons += " freshness_config_invalid";
+         }
+
+       // Context role freshness (closed bar)
+       if(m_freshness_valid &&
+          ctx.context_market.valid &&
+          (TimeCurrent() - ctx.context_market.closed_bar_time) >
+          (datetime)m_freshness_context_seconds)
+         {
+          gates.data_fresh=false;
+          if(gates.first_failure_reason=="")
+             gates.first_failure_reason="STALE_CONTEXT_DATA";
+          reasons += " stale_context";
+         }
+
+       // Structure role freshness (closed bar)
+       if(m_freshness_valid &&
+          ctx.structure_market.valid &&
+          (TimeCurrent() - ctx.structure_market.closed_bar_time) >
+          (datetime)m_freshness_structure_seconds)
+         {
+          gates.data_fresh=false;
+          if(gates.first_failure_reason=="")
+             gates.first_failure_reason="STALE_STRUCTURE_DATA";
+          reasons += " stale_structure";
+         }
+
+       // Setup role freshness (closed bar)
+       if(m_freshness_valid &&
+          ctx.setup_market.valid &&
+          (TimeCurrent() - ctx.setup_market.closed_bar_time) >
+          (datetime)m_freshness_setup_seconds)
+         {
+          gates.data_fresh=false;
+          if(gates.first_failure_reason=="")
+             gates.first_failure_reason="STALE_SETUP_DATA";
+          reasons += " stale_setup";
+         }
+
+       // Entry role freshness
+       if(m_freshness_valid && ctx.entry_market.valid)
+         {
+          datetime entry_source_time = ctx.entry_market.closed_bar_time;
+          // Scalp uses live tick timestamp for entry
+          if(m_active_style == STYLE_SCALPING)
+             entry_source_time = ctx.entry_market.current_time;
+          if((TimeCurrent() - entry_source_time) >
+             (datetime)m_freshness_entry_seconds)
+            {
+             gates.data_fresh=false;
+             if(gates.first_failure_reason=="")
+                gates.first_failure_reason="STALE_ENTRY_DATA";
+             reasons += " stale_entry";
+            }
+         }
+
+       // Legacy single stale check removed; per-role checks above.
 
       if(ctx.profile.valid==false)
         {
@@ -1455,7 +1542,12 @@ public:
       return plan.consumed;
      }
 
-   bool              IsPlanExpired(const TradePlan& plan, datetime current_time) const
+    bool              IsSetupFresh(datetime setup_time) const
+      {
+       if(!m_freshness_valid || setup_time<=0)
+          return false;
+       return (TimeCurrent() - setup_time) <= (datetime)m_freshness_setup_seconds;
+      }
      {
       return current_time > plan.expiry_time;
      }

@@ -40,17 +40,20 @@ public:
 
    int MaxConsecutiveLosses;
 
-   ENUM_TIMEFRAMES ScalpStructureTF;
-   ENUM_TIMEFRAMES ScalpSignalTF;
-   ENUM_TIMEFRAMES ScalpEntryTF;
+    ENUM_TIMEFRAMES ScalpContextTF;
+    ENUM_TIMEFRAMES ScalpStructureTF;
+    ENUM_TIMEFRAMES ScalpSetupTF;
+    ENUM_TIMEFRAMES ScalpEntryTF;
 
-   ENUM_TIMEFRAMES DayStructureTF;
-   ENUM_TIMEFRAMES DaySignalTF;
-   ENUM_TIMEFRAMES DayEntryTF;
+    ENUM_TIMEFRAMES DayContextTF;
+    ENUM_TIMEFRAMES DayStructureTF;
+    ENUM_TIMEFRAMES DaySetupTF;
+    ENUM_TIMEFRAMES DayEntryTF;
 
-   ENUM_TIMEFRAMES SwingStructureTF;
-   ENUM_TIMEFRAMES SwingSignalTF;
-   ENUM_TIMEFRAMES SwingEntryTF;
+    ENUM_TIMEFRAMES SwingContextTF;
+    ENUM_TIMEFRAMES SwingStructureTF;
+    ENUM_TIMEFRAMES SwingSetupTF;
+    ENUM_TIMEFRAMES SwingEntryTF;
 
    CAlgoConfig()
      {

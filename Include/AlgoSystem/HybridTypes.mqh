@@ -299,17 +299,20 @@ struct FeatureContext
 
    ENUM_TRADING_STYLE style;
 
-   ENUM_TIMEFRAMES    structure_tf;
-   ENUM_TIMEFRAMES    signal_tf;
-   ENUM_TIMEFRAMES    entry_tf;
+    ENUM_TIMEFRAMES    context_tf;
+    ENUM_TIMEFRAMES    structure_tf;
+    ENUM_TIMEFRAMES    setup_tf;
+    ENUM_TIMEFRAMES    entry_tf;
 
-   MarketSnapshot     signal_market;
-   MarketSnapshot     structure_market;
-   MarketSnapshot     entry_market;
+    MarketSnapshot     context_market;
+    MarketSnapshot     structure_market;
+    MarketSnapshot     setup_market;
+    MarketSnapshot     entry_market;
 
-   FeatureSet         signal_features;
-   FeatureSet         structure_features;
-   FeatureSet         entry_features;
+    FeatureSet         context_features;
+    FeatureSet         structure_features;
+    FeatureSet         setup_features;
+    FeatureSet         entry_features;
 
    ProfileFeatures    profile;
    LiquidityFeatures  liquidity;

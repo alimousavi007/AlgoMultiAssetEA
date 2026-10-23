@@ -129,7 +129,10 @@ input double InpTrailingATRMultiplier=2.0;
 input bool   InpTimeExit=false;
 input int    InpMaxHoldingMinutes=240;
 
-// Deprecation alias for legacy parameter name
+input int    InpFreshnessContextSeconds=300;
+input int    InpFreshnessStructureSeconds=300;
+input int    InpFreshnessSetupSeconds=300;
+input int    InpFreshnessEntrySeconds=60;
 #define InpMinimumSignalScore InpMinScore
 
 //==================================================================
@@ -164,30 +167,34 @@ string TimeframeText(ENUM_TIMEFRAMES tf)
 //|                                                                  |
 //+------------------------------------------------------------------+
 void SelectStyleTimeframes(ENUM_TRADING_STYLE style,
+                           ENUM_TIMEFRAMES &context_tf,
                            ENUM_TIMEFRAMES &structure_tf,
-                           ENUM_TIMEFRAMES &signal_tf,
+                           ENUM_TIMEFRAMES &setup_tf,
                            ENUM_TIMEFRAMES &entry_tf)
-  {
-   if(style==STYLE_SCALPING)
-     {
-      structure_tf=PERIOD_M15;
-      signal_tf=PERIOD_M5;
-      entry_tf=PERIOD_M1;
-      return;
-     }
+   {
+    if(style==STYLE_SCALPING)
+      {
+       context_tf=PERIOD_M15;
+       structure_tf=PERIOD_M5;
+       setup_tf=PERIOD_M5;
+       entry_tf=PERIOD_M1;
+       return;
+      }
 
-   if(style==STYLE_SWING_TRADING)
-     {
-      structure_tf=PERIOD_D1;
-      signal_tf=PERIOD_H4;
-      entry_tf=PERIOD_H1;
-      return;
-     }
+    if(style==STYLE_SWING_TRADING)
+      {
+       context_tf=PERIOD_D1;
+       structure_tf=PERIOD_H4;
+       setup_tf=PERIOD_H4;
+       entry_tf=PERIOD_H1;
+       return;
+      }
 
-   structure_tf=PERIOD_H4;
-   signal_tf=PERIOD_H1;
-   entry_tf=PERIOD_M15;
-  }
+    context_tf=PERIOD_H4;
+    structure_tf=PERIOD_H1;
+    setup_tf=PERIOD_H1;
+    entry_tf=PERIOD_M15;
+   }
 
 //+------------------------------------------------------------------+
 //|                                                                  |
@@ -218,11 +225,17 @@ bool ValidInputSet()
    if(InpValueAreaPercent<=0.0 || InpValueAreaPercent>=1.0)
       return false;
 
-   if(InpProfileSessionBars<=0 || InpProfileRollingBars<=0)
-      return false;
+    if(InpProfileSessionBars<=0 || InpProfileRollingBars<=0)
+       return false;
 
-   return true;
-  }
+    if(InpFreshnessContextSeconds<=0 ||
+       InpFreshnessStructureSeconds<=0 ||
+       InpFreshnessSetupSeconds<=0 ||
+       InpFreshnessEntrySeconds<=0)
+       return false;
+
+    return true;
+   }
 
 //+------------------------------------------------------------------+
 //|                                                                  |
@@ -380,17 +393,20 @@ class CSymbolRuntime
 public:
    string            symbol;
    ENUM_TRADING_STYLE style;
-   ENUM_TIMEFRAMES   structure_tf;
-   ENUM_TIMEFRAMES   signal_tf;
-   ENUM_TIMEFRAMES   entry_tf;
+    ENUM_TIMEFRAMES   context_tf;
+    ENUM_TIMEFRAMES   structure_tf;
+    ENUM_TIMEFRAMES   setup_tf;
+    ENUM_TIMEFRAMES   entry_tf;
 
-   CMarketDataEngine market_structure;
-   CMarketDataEngine market_signal;
-   CMarketDataEngine market_entry;
+    CMarketDataEngine market_context;
+    CMarketDataEngine market_structure;
+    CMarketDataEngine market_setup;
+    CMarketDataEngine market_entry;
 
-   CFeatureEngine    feature_structure;
-   CFeatureEngine    feature_signal;
-   CFeatureEngine    feature_entry;
+    CFeatureEngine    feature_context;
+    CFeatureEngine    feature_structure;
+    CFeatureEngine    feature_setup;
+    CFeatureEngine    feature_entry;
 
    CHybridSignalEngine hybrid_engine;
 
@@ -401,61 +417,67 @@ public:
      {
       symbol="";
       style=STYLE_DAY_TRADING;
-      structure_tf=PERIOD_CURRENT;
-      signal_tf=PERIOD_CURRENT;
-      entry_tf=PERIOD_CURRENT;
+       context_tf=PERIOD_CURRENT;
+       structure_tf=PERIOD_CURRENT;
+       setup_tf=PERIOD_CURRENT;
+       entry_tf=PERIOD_CURRENT;
       valid=false;
       last_failure="";
      }
 
-   bool              Initialize(const string in_symbol,
-                   const ENUM_TRADING_STYLE in_style,
-                   const ENUM_TIMEFRAMES in_structure_tf,
-                   const ENUM_TIMEFRAMES in_signal_tf,
-                   const ENUM_TIMEFRAMES in_entry_tf)
-     {
-      valid=false;
-      last_failure="";
+    bool              Initialize(const string in_symbol,
+                    const ENUM_TRADING_STYLE in_style,
+                    const ENUM_TIMEFRAMES in_context_tf,
+                    const ENUM_TIMEFRAMES in_structure_tf,
+                    const ENUM_TIMEFRAMES in_setup_tf,
+                    const ENUM_TIMEFRAMES in_entry_tf)
+      {
+       valid=false;
+       last_failure="";
 
-      symbol=in_symbol;
-      style=in_style;
-      structure_tf=in_structure_tf;
-      signal_tf=in_signal_tf;
-      entry_tf=in_entry_tf;
+       symbol=in_symbol;
+       style=in_style;
+       context_tf=in_context_tf;
+       structure_tf=in_structure_tf;
+       setup_tf=in_setup_tf;
+       entry_tf=in_entry_tf;
 
-      if(symbol=="")
-        {
-         last_failure="Empty symbol";
-         return false;
-        }
-
-       if(!market_structure.Initialize() ||
-          !market_signal.Initialize() ||
-          !market_entry.Initialize())
+       if(symbol=="")
          {
-          last_failure="MarketData.Initialize failed";
+          last_failure="Empty symbol";
           return false;
          }
 
-       if(!feature_structure.InitializeFor(symbol, structure_tf) ||
-          !feature_signal.InitializeFor(symbol, signal_tf) ||
-          !feature_entry.InitializeFor(symbol, entry_tf))
+        if(!market_context.Initialize() ||
+           !market_structure.Initialize() ||
+           !market_setup.Initialize() ||
+           !market_entry.Initialize())
+          {
+           last_failure="MarketData.Initialize failed";
+           return false;
+          }
+
+        if(!feature_context.InitializeFor(symbol, context_tf) ||
+           !feature_structure.InitializeFor(symbol, structure_tf) ||
+           !feature_setup.InitializeFor(symbol, setup_tf) ||
+           !feature_entry.InitializeFor(symbol, entry_tf))
+          {
+           last_failure="FeatureEngine.Initialize failed";
+           return false;
+          }
+
+
+       if(!hybrid_engine.Initialize(
+             symbol,
+             style,
+             context_tf,
+             structure_tf,
+             setup_tf,
+             entry_tf))
          {
-          last_failure="FeatureEngine.Initialize failed";
+          last_failure="HybridEngine.Initialize failed";
           return false;
          }
-
-
-      if(!hybrid_engine.Initialize(
-            symbol,
-            style,
-            structure_tf,
-            signal_tf,
-            entry_tf))
-        {
-         last_failure="HybridEngine.Initialize failed";
-         return false;
-        }
 
       hybrid_engine.SetVolumeProfileParams(
          InpProfileSessionBars,
@@ -503,10 +525,14 @@ public:
       hybrid_engine.SetBiasParams(2, 50);
       hybrid_engine.SetMinScore(InpMinScore);
       hybrid_engine.SetConflictThreshold(InpConflictThreshold);
-      hybrid_engine.SetMinRR(InpMinRR);
-
-      market_entry.IsNewClosedBar(symbol,entry_tf);
-      market_signal.IsNewClosedBar(symbol,signal_tf);
+       hybrid_engine.SetMinRR(InpMinRR);
+       hybrid_engine.SetFreshnessParams(
+          InpFreshnessContextSeconds,
+          InpFreshnessStructureSeconds,
+          InpFreshnessSetupSeconds,
+          InpFreshnessEntrySeconds);
+ 
+       market_entry.IsNewClosedBar(symbol,entry_tf);
 
       valid=true;
       return true;
@@ -557,7 +583,7 @@ void UpdateDashboardForChart()
       MarketSnapshot market;
       ResetLastError();
 
-      if(!g_runtime[i].market_signal.GetSnapshot(
+       if(!g_runtime[i].market_context.GetSnapshot(
             g_runtime[i].symbol,
             g_runtime[i].signal_tf,
             market))
@@ -586,7 +612,7 @@ void ShowRuntimeGateStatus(CSymbolRuntime &runtime,
       runtime.symbol!=ChartSymbol(0))
       return;
 
-   string signal_tf=TimeframeText(runtime.signal_tf);
+    string signal_tf=TimeframeText(runtime.setup_tf);
    string entry_tf=TimeframeText(runtime.entry_tf);
 
    string dashboard_status=
@@ -672,14 +698,23 @@ void ProcessHybridDecision(CSymbolRuntime& runtime,
       return;
      }
 
-   if(runtime.hybrid_engine.IsPlanExpired(decision.plan, TimeCurrent()))
-     {
-      g_logger.Event(
-         LOG_WARNING, "HYBRID", "PLAN_EXPIRED", runtime.symbol, "", "",
-         decision.plan.setup_id, "REJECT", "PLAN_EXPIRED",
-         "Setup expired");
-      return;
-     }
+    if(runtime.hybrid_engine.IsPlanExpired(decision.plan, TimeCurrent()))
+      {
+       g_logger.Event(
+          LOG_WARNING, "HYBRID", "PLAN_EXPIRED", runtime.symbol, "", "",
+          decision.plan.setup_id, "REJECT", "PLAN_EXPIRED",
+          "Setup expired");
+       return;
+      }
+
+    if(!runtime.hybrid_engine.IsSetupFresh(decision.plan.signal_time))
+      {
+       g_logger.Event(
+          LOG_WARNING, "HYBRID", "SETUP_STALE", runtime.symbol, "", "",
+          decision.plan.setup_id, "REJECT", "STALE_SETUP",
+          "Setup freshness revalidation failed");
+       return;
+      }
 
    if(runtime.hybrid_engine.IsPlanConsumed(decision.plan))
      {
@@ -881,19 +916,21 @@ void ProcessRuntime(CSymbolRuntime& runtime)
       return;
      }
 
-   MarketSnapshot signal_market;
-   MarketSnapshot structure_market;
-   MarketSnapshot entry_market;
-   FeatureSet signal_features;
-   FeatureSet structure_features;
-   FeatureSet entry_features;
+    MarketSnapshot context_market;
+    MarketSnapshot structure_market;
+    MarketSnapshot setup_market;
+    MarketSnapshot entry_market;
+    FeatureSet context_features;
+    FeatureSet structure_features;
+    FeatureSet setup_features;
+    FeatureSet entry_features;
    string reason="";
 
    ResetLastError();
-   if(!runtime.market_signal.GetSnapshot(
-         runtime.symbol,
-         runtime.signal_tf,
-         signal_market))
+    if(!runtime.market_context.GetSnapshot(
+          runtime.symbol,
+          runtime.context_tf,
+          context_market))
      {
       g_logger.Event(
          LOG_ERROR, "MARKET", "MARKET_SNAPSHOT_FAILED",
@@ -922,7 +959,22 @@ void ProcessRuntime(CSymbolRuntime& runtime)
      }
 
    ResetLastError();
-   if(!runtime.market_entry.GetSnapshot(
+    if(!runtime.market_setup.GetSnapshot(
+          runtime.symbol,
+          runtime.setup_tf,
+          setup_market))
+      {
+       g_logger.Event(
+          LOG_ERROR, "MARKET", "MARKET_SNAPSHOT_FAILED",
+          runtime.symbol, "", "",
+          "", "FAIL", "SETUP_SNAPSHOT",
+          "Market setup snapshot failed", GetLastError());
+       ResetLastError();
+       ShowRuntimeGateStatus(runtime, "BLOCKED: SETUP DATA");
+       return;
+      }
+
+    if(!runtime.market_entry.GetSnapshot(
          runtime.symbol,
          runtime.entry_tf,
          entry_market))
@@ -938,7 +990,7 @@ void ProcessRuntime(CSymbolRuntime& runtime)
      }
 
    ResetLastError();
-   if(!runtime.feature_signal.Calculate(signal_market, signal_features))
+    if(!runtime.feature_context.Calculate(context_market, context_features))
      {
       g_logger.Event(
          LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
@@ -963,7 +1015,18 @@ void ProcessRuntime(CSymbolRuntime& runtime)
       return;
      }
    ResetLastError();
-   if(!runtime.feature_entry.Calculate(entry_market, entry_features))
+    if(!runtime.feature_setup.Calculate(setup_market, setup_features))
+      {
+       g_logger.Event(
+          LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
+          runtime.symbol, "", "",
+          "", "FAIL", "SETUP_FEATURES",
+          "Setup feature calculation failed", GetLastError());
+       ResetLastError();
+       ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
+       return;
+      }
+    if(!runtime.feature_entry.Calculate(entry_market, entry_features))
      {
       g_logger.Event(
          LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
@@ -1008,15 +1071,17 @@ void ProcessRuntime(CSymbolRuntime& runtime)
      }
 
    bool ok=false;
-   FeatureContext ctx = runtime.hybrid_engine.BuildFeatureContext(
-                           signal_market,
-                           structure_market,
-                           entry_market,
-                           signal_features,
-                           structure_features,
-                           entry_features,
-                           portfolio_state,
-                           ok);
+    FeatureContext ctx = runtime.hybrid_engine.BuildFeatureContext(
+                            context_market,
+                            structure_market,
+                            setup_market,
+                            entry_market,
+                            context_features,
+                            structure_features,
+                            setup_features,
+                            entry_features,
+                            portfolio_state,
+                            ok);
 
    if(!ok || !ctx.valid)
      {
@@ -1088,19 +1153,22 @@ int InitializePendingRuntimes()
    roles[1]="SILVER";
    roles[2]="BITCOIN";
 
-   ENUM_TIMEFRAMES structure_tf;
-   ENUM_TIMEFRAMES signal_tf;
-   ENUM_TIMEFRAMES entry_tf;
-   SelectStyleTimeframes(
-      InpTradingStyle,
-      structure_tf,
-      signal_tf,
-      entry_tf);
+    ENUM_TIMEFRAMES context_tf;
+    ENUM_TIMEFRAMES structure_tf;
+    ENUM_TIMEFRAMES setup_tf;
+    ENUM_TIMEFRAMES entry_tf;
+    SelectStyleTimeframes(
+       InpTradingStyle,
+       context_tf,
+       structure_tf,
+       setup_tf,
+       entry_tf);
 
-   ENUM_TIMEFRAMES timeframes[3];
-   timeframes[0]=structure_tf;
-   timeframes[1]=signal_tf;
-   timeframes[2]=entry_tf;
+    ENUM_TIMEFRAMES timeframes[4];
+    timeframes[0]=context_tf;
+    timeframes[1]=structure_tf;
+    timeframes[2]=setup_tf;
+    timeframes[3]=entry_tf;
 
    bool tester_single_symbol =
       (MQLInfoInteger(MQL_TESTER)!=0);
@@ -1212,12 +1280,13 @@ int InitializePendingRuntimes()
         }
 
       g_runtime_wait_state[i]="";
-      if(!g_runtime[i].Initialize(
-            symbols[i],
-            InpTradingStyle,
-            structure_tf,
-            signal_tf,
-            entry_tf))
+       if(!g_runtime[i].Initialize(
+             symbols[i],
+             InpTradingStyle,
+             context_tf,
+             structure_tf,
+             setup_tf,
+             entry_tf))
         {
          string failure=g_runtime[i].last_failure;
          if(failure!=g_runtime_init_failure[i])
