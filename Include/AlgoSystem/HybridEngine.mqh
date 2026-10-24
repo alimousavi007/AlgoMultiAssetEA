@@ -1,4 +1,4 @@
-﻿//+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
 //|                                                      ProjectName |
 //|                                      Copyright 2020, CompanyName |
 //|                                       http://www.companyname.net |
@@ -254,22 +254,22 @@ public:
       if(m_tick_size<=0 || m_point<=0 || m_digits<=0)
          return false;
 
-      if(!m_profile_engine.Initialize(symbol, signal_tf))
+      if(!m_profile_engine.Initialize(symbol, setup_tf))
          return false;
 
-      if(!m_liquidity_engine.Initialize(symbol, signal_tf))
+      if(!m_liquidity_engine.Initialize(symbol, structure_tf))
          return false;
 
-      if(!m_regime_engine.Initialize(symbol, signal_tf))
+      if(!m_regime_engine.Initialize(symbol, context_tf))
          return false;
 
-      if(!m_divergence_engine.Initialize(symbol, signal_tf))
+      if(!m_divergence_engine.Initialize(symbol, entry_tf))
          return false;
 
-      if(!m_momentum_engine.Initialize(symbol, signal_tf))
+      if(!m_momentum_engine.Initialize(symbol, entry_tf))
          return false;
 
-      if(!m_bias_engine.Initialize(symbol, structure_tf, signal_tf))
+      if(!m_bias_engine.Initialize(symbol, structure_tf))
          return false;
 
       if(!m_news_service.Initialize())
@@ -429,62 +429,67 @@ public:
          return ctx;
         }
 
-      ctx.signal_market=signal_market;
-      ctx.structure_market=structure_market;
-      ctx.entry_market=entry_market;
-      ctx.signal_features=signal_features;
-      ctx.structure_features=structure_features;
-      ctx.entry_features=entry_features;
+       ctx.context_market=context_market;
+       ctx.structure_market=structure_market;
+       ctx.setup_market=setup_market;
+       ctx.entry_market=entry_market;
+       ctx.context_features=context_features;
+       ctx.structure_features=structure_features;
+       ctx.setup_features=setup_features;
+       ctx.entry_features=entry_features;
       ctx.portfolio_state=portfolio_state;
 
-      if(!signal_market.valid || !structure_market.valid || !entry_market.valid)
-        {
-         ctx.reason="Invalid market snapshot";
-         return ctx;
-        }
-      if(!signal_features.valid || !structure_features.valid || !entry_features.valid)
-        {
-         ctx.reason="Required feature set invalid";
-         return ctx;
-        }
+       if(!context_market.valid || !structure_market.valid || !setup_market.valid || !entry_market.valid)
+         {
+          ctx.reason="Invalid market snapshot";
+          return ctx;
+         }
+       if(!context_features.valid || !structure_features.valid || !setup_features.valid || !entry_features.valid)
+         {
+          ctx.reason="Required feature set invalid";
+          return ctx;
+         }
 
-      if(signal_features.symbol!=m_symbol ||
-         structure_features.symbol!=m_symbol ||
-         entry_features.symbol!=m_symbol ||
-         signal_features.timeframe!=m_signal_tf ||
-         structure_features.timeframe!=m_structure_tf ||
-         entry_features.timeframe!=m_entry_tf ||
-         signal_features.bar_time!=signal_market.closed_bar_time ||
-         structure_features.bar_time!=structure_market.closed_bar_time ||
-         entry_features.bar_time!=entry_market.closed_bar_time)
-        {
-         ctx.reason="Feature set symbol/timeframe/bar mismatch";
-         return ctx;
-        }
+       if(context_features.symbol!=m_symbol ||
+          structure_features.symbol!=m_symbol ||
+          setup_features.symbol!=m_symbol ||
+          entry_features.symbol!=m_symbol ||
+          context_features.timeframe!=m_context_tf ||
+          structure_features.timeframe!=m_structure_tf ||
+          setup_features.timeframe!=m_setup_tf ||
+          entry_features.timeframe!=m_entry_tf ||
+          context_features.bar_time!=context_market.closed_bar_time ||
+          structure_features.bar_time!=structure_market.closed_bar_time ||
+          setup_features.bar_time!=setup_market.closed_bar_time ||
+          entry_features.bar_time!=entry_market.closed_bar_time)
+         {
+          ctx.reason="Feature set symbol/timeframe/bar mismatch";
+          return ctx;
+         }
 
-      MqlRates signal_rates[];
-      if(!LoadRates(m_symbol, m_signal_tf, m_lookback+10, signal_rates))
+      MqlRates context_rates[];
+      if(!LoadRates(m_symbol, m_context_tf, m_lookback+10, context_rates))
         {
          ctx.reason="Could not load signal rates";
          return ctx;
         }
 
-      ctx.profile=m_profile_engine.Calculate(signal_market, true);
+      if(setup_market.valid) ctx.profile=m_profile_engine.Calculate(setup_market, true); else { ctx.profile.valid=false; ctx.profile.reason="SETUP_MARKET_INVALID"; }
 
-      ctx.liquidity=m_liquidity_engine.Calculate(ctx);
+      if(structure_market.valid) ctx.liquidity=m_liquidity_engine.Calculate(structure_market, ctx); else { ctx.liquidity.valid=false; ctx.liquidity.reason="STRUCTURE_MARKET_INVALID"; }
 
-      ctx.regime=m_regime_engine.Calculate(signal_market, ctx.signal_features);
+      if(context_market.valid && ctx.context_features.valid) ctx.regime=m_regime_engine.Calculate(context_market, ctx.context_features); else { ctx.regime.valid=false; ctx.regime.reason="CONTEXT_INVALID"; }
 
       MqlRates divergence_rates[];
-      if(ArrayResize(divergence_rates, ArraySize(signal_rates)) > 0)
-         ArrayCopy(divergence_rates, signal_rates);
-      ctx.divergence=m_divergence_engine.Calculate(signal_market, divergence_rates);
+      if(ArrayResize(divergence_rates, ArraySize(context_rates)) > 0)
+         ArrayCopy(divergence_rates, context_rates);
+      if(entry_market.valid) { MqlRates divergence_rates2[]; if(ArrayResize(divergence_rates2, ArraySize(context_rates))>0) ArrayCopy(divergence_rates2, context_rates); ctx.divergence=m_divergence_engine.Calculate(entry_market, divergence_rates2); } else { ctx.divergence.valid=false; ctx.divergence.reason="ENTRY_MARKET_INVALID"; }
 
-      ctx.momentum=m_momentum_engine.Calculate(signal_market);
+      if(entry_market.valid) ctx.momentum=m_momentum_engine.Calculate(entry_market); else { ctx.momentum.valid=false; ctx.momentum.reason="ENTRY_MARKET_INVALID"; }
 
       // Economic-calendar timestamps use trade-server time; a closed bar's
       // timestamp can be behind the actual news window.
-      ctx.news=m_news_service.Evaluate(m_symbol, TimeTradeServer(), portfolio_state);
+      ctx.news=m_news_service.Evaluate(m_symbol, TimeTradeServer(), portfolio_state); // gate only
 
       ctx.structure=m_bias_engine.Calculate(ctx, structure_market, ctx.profile);
 
@@ -533,7 +538,7 @@ private:
 
       string reasons="";
 
-       if(!ctx.signal_market.valid ||
+       if(!ctx.context_market.valid ||
           !ctx.structure_market.valid ||
           !ctx.setup_market.valid ||
           !ctx.entry_market.valid)
@@ -544,12 +549,12 @@ private:
          reasons += " invalid_market_data";
         }
 
-      if(!ctx.signal_market.valid)
+      if(!ctx.context_market.valid)
         {
          gates.data_sufficient=false;
          if(gates.first_failure_reason=="")
             gates.first_failure_reason="SIGNAL_MARKET_INVALID";
-         reasons += " signal_market_invalid";
+         reasons += " context_market_invalid";
         }
 
        if(!m_freshness_valid)
@@ -640,7 +645,7 @@ private:
          reasons += " news_blocked";
         }
 
-      if(!ctx.signal_market.properties.trade_allowed)
+      if(!ctx.context_market.properties.trade_allowed)
         {
          gates.setup_valid=false;
          if(gates.first_failure_reason=="")
@@ -648,9 +653,9 @@ private:
          reasons += " trade_not_allowed";
         }
 
-      if(m_use_spread_filter && ctx.signal_market.spread_points > 0)
+      if(m_use_spread_filter && ctx.context_market.spread_points > 0)
         {
-         double spread_points = ctx.signal_market.spread_points;
+         double spread_points = ctx.context_market.spread_points;
          double max_spread=0;
 
          if(m_max_spread_points>0)
@@ -875,13 +880,13 @@ private:
                                          ENUM_SIGNAL_DIRECTION direction,
                                          const FeatureContext& ctx) const
      {
-      if(!ctx.signal_market.valid ||
+      if(!ctx.context_market.valid ||
          !ctx.entry_market.valid ||
          !ctx.entry_features.valid)
          return 0.0;
 
-      double bid=ctx.signal_market.bid;
-      double ask=ctx.signal_market.ask;
+      double bid=ctx.context_market.bid;
+      double ask=ctx.context_market.ask;
       // Entry-TF EMA alignment is a soft confirmation, not a hard veto.
       double alignment=0.5;
       if(direction==SIGNAL_LONG &&
@@ -940,7 +945,7 @@ private:
 public:
    HybridDecision    Evaluate(const string symbol,
                               const FeatureContext& ctx,
-                              const MarketSnapshot& signal_market,
+                              const MarketSnapshot& context_market,
                               bool& ok)
      {
       HybridDecision decision;
@@ -984,9 +989,33 @@ public:
          return decision;
         }
 
-      double bias_score=CalculateBiasScore(ctx.structure, ctx);
+       if(!ctx.regime.valid)
+         {
+          decision.status=DECISION_NO_TRADE;
+          decision.main_reason="REGIME_INVALID";
+          decision.valid=true;
+          ok=true;
+          return decision;
+         }
+       if(!ctx.structure.valid || !ctx.profile.valid)
+         {
+          decision.status=DECISION_NO_TRADE;
+          decision.main_reason="SETUP_STRUCTURE_INVALID";
+          decision.valid=true;
+          ok=true;
+          return decision;
+         }
+       if(!ctx.liquidity.valid)
+         {
+          decision.status=DECISION_NO_TRADE;
+          decision.main_reason="LIQUIDITY_INVALID";
+          decision.valid=true;
+          ok=true;
+          return decision;
+         }
+       double bias_score=CalculateBiasScore(ctx.structure, ctx);
 
-      double entry_price=ctx.signal_market.closed_bar.close;
+      double entry_price=ctx.context_market.closed_bar.close;
 
       double profile_long_score=CalculateProfileScore(ctx.profile, SIGNAL_LONG, entry_price);
       double profile_short_score=CalculateProfileScore(ctx.profile, SIGNAL_SHORT, entry_price);
@@ -1002,7 +1031,25 @@ public:
       double divergence_long_score=CalculateDivergenceScore(ctx.divergence, SIGNAL_LONG);
       double divergence_short_score=CalculateDivergenceScore(ctx.divergence, SIGNAL_SHORT);
 
-      double entry_long_score=CalculateEntryScore(entry_price, 0, 0, SIGNAL_LONG, ctx);
+      if(!ctx.entry_market.valid || !ctx.entry_features.valid)
+        {
+         decision.status=DECISION_NO_TRADE;
+         decision.main_reason="ENTRY_INVALID";
+         decision.valid=true;
+         ok=true;
+         return decision;
+        }
+      if(m_active_style == STYLE_SCALPING)
+        {
+         if(ctx.entry_market.current_time <= 0)
+           {
+            decision.status=DECISION_NO_TRADE;
+            decision.main_reason="ENTRY_TICK_INVALID";
+            decision.valid=true;
+            ok=true;
+            return decision;
+           }
+        }
       double entry_short_score=CalculateEntryScore(entry_price, 0, 0, SIGNAL_SHORT, ctx);
 
       double bias_weight=0.20;
@@ -1065,7 +1112,7 @@ public:
 
       bool is_duplicate =
          (m_last_signal_direction != SIGNAL_NONE) &&
-         (m_last_signal_time == ctx.signal_market.closed_bar_time) &&
+         (m_last_signal_time == ctx.context_market.closed_bar_time) &&
          (m_last_signal_consumed);
 
       if(is_duplicate)
@@ -1190,13 +1237,13 @@ public:
       plan.score_long=long_score;
       plan.score_short=short_score;
       plan.setup_id=GenerateSetupID();
-      plan.signal_time=ctx.signal_market.closed_bar_time;
+      plan.signal_time=ctx.context_market.closed_bar_time;
       plan.entry=entry_price;
       plan.stop=stop;
       plan.target=target;
       plan.reward_to_risk=rr;
-      plan.expiry_time=GetSetupExpiry(ctx.signal_market.closed_bar_time);
-      plan.invalidation_time=GetSetupInvalidation(ctx.signal_market.closed_bar_time);
+      plan.expiry_time=GetSetupExpiry(ctx.context_market.closed_bar_time);
+      plan.invalidation_time=GetSetupInvalidation(ctx.context_market.closed_bar_time);
       plan.consumed=false;
       plan.reason="OK";
       plan.rejection_reason="";
@@ -1217,7 +1264,7 @@ public:
       ok=true;
 
       m_last_signal_direction=selected_direction;
-      m_last_signal_time=ctx.signal_market.closed_bar_time;
+      m_last_signal_time=ctx.context_market.closed_bar_time;
       m_last_signal_consumed=false;
 
       return decision;
@@ -1307,8 +1354,8 @@ private:
       if(ctx.momentum.valid && ctx.momentum.atr > 0)
          buffer_atr = ctx.momentum.atr;
       if(buffer_atr <= 0)
-         buffer_atr = ctx.signal_market.closed_bar.high -
-                      ctx.signal_market.closed_bar.low;
+         buffer_atr = ctx.context_market.closed_bar.high -
+                      ctx.context_market.closed_bar.low;
       if(buffer_atr <= 0)
          buffer_atr = ctx.structure_market.closed_bar.high -
                       ctx.structure_market.closed_bar.low;
@@ -1326,7 +1373,7 @@ private:
       if(direction==SIGNAL_LONG)
         {
          stop = NormalizeDouble(
-                   ctx.signal_market.closed_bar.low - stop_buffer_points,
+                   ctx.context_market.closed_bar.low - stop_buffer_points,
                    m_digits);
          target = NormalizeDouble(
                      entry + target_buffer_points,
@@ -1336,7 +1383,7 @@ private:
          if(direction==SIGNAL_SHORT)
            {
             stop = NormalizeDouble(
-                      ctx.signal_market.closed_bar.high + stop_buffer_points,
+                      ctx.context_market.closed_bar.high + stop_buffer_points,
                       m_digits);
             target = NormalizeDouble(
                         entry - target_buffer_points,

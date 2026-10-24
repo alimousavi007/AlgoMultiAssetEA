@@ -15,7 +15,7 @@ class CBiasEngine
 private:
    string             m_symbol;
    ENUM_TIMEFRAMES    m_structure_tf;
-   ENUM_TIMEFRAMES    m_signal_tf;
+   
 
    int                m_swings_required;
    int                m_lookback;
@@ -35,7 +35,7 @@ public:
      {
       m_symbol="";
       m_structure_tf=PERIOD_H4;
-      m_signal_tf=PERIOD_H1;
+      
       m_swings_required=2;
       m_lookback=50;
       m_tick_size=0;
@@ -59,7 +59,7 @@ public:
      {
       m_symbol=symbol;
       m_structure_tf=structure_tf;
-      m_signal_tf=signal_tf;
+      
       m_initialized=true;
 
       ResetLastError();

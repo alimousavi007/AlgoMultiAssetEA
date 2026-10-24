@@ -133,6 +133,7 @@ input int    InpFreshnessContextSeconds=300;
 input int    InpFreshnessStructureSeconds=300;
 input int    InpFreshnessSetupSeconds=300;
 input int    InpFreshnessEntrySeconds=60;
+input string InpFreshnessOverrides="";
 #define InpMinimumSignalScore InpMinScore
 
 //==================================================================
@@ -197,9 +198,95 @@ void SelectStyleTimeframes(ENUM_TRADING_STYLE style,
    }
 
 //+------------------------------------------------------------------+
-//|                                                                  |
+//| Resolve per-symbol freshness override                             |
+//| Format: "SYM:CONTEXT=sec,STRUCTURE=sec,SETUP=sec,ENTRY=sec;..."   |
+//| Returns true if valid (defaults or valid override).               |
 //+------------------------------------------------------------------+
-bool ValidInputSet()
+bool ResolveFreshnessForSymbol(const string symbol,
+                               int &ctx_sec,
+                               int &struct_sec,
+                               int &setup_sec,
+                               int &entry_sec,
+                               bool &is_override)
+  {
+   ctx_sec=InpFreshnessContextSeconds;
+   struct_sec=InpFreshnessStructureSeconds;
+   setup_sec=InpFreshnessSetupSeconds;
+   entry_sec=InpFreshnessEntrySeconds;
+   is_override=false;
+
+   if(InpFreshnessOverrides=="")
+      return true;
+
+   // find block for symbol
+   string blocks[];
+   int n=StringSplit(InpFreshnessOverrides, ';', blocks);
+   string found_block="";
+   int found_count=0;
+   for(int i=0;i<n;i++)
+     {
+      string b=blocks[i];
+      // trim
+      StringTrimLeft(b);
+      StringTrimRight(b);
+      if(b=="")
+         continue;
+      // split symbol and rest at first ':'
+      int colon=StringFind(b, ":");
+      if(colon<0)
+         continue;
+      string sym=StringSubstr(b,0,colon);
+      StringTrimLeft(sym);
+      StringTrimRight(sym);
+      if(sym==symbol)
+        {
+         found_count++;
+         found_block=StringSubstr(b,colon+1);
+        }
+     }
+   if(found_count==0)
+      return true; // defaults
+   if(found_count>1)
+      return false; // duplicate override -> fail-closed
+
+   is_override=true;
+   // parse role entries
+   string entries[];
+   int en=StringSplit(found_block, ',', entries);
+   bool has_ctx=false, has_struct=false, has_setup=false, has_entry=false;
+   for(int i=0;i<en;i++)
+     {
+      string e=entries[i];
+      StringTrimLeft(e);
+      StringTrimRight(e);
+      if(e=="")
+         continue;
+      int eq=StringFind(e, "=");
+      if(eq<0)
+         return false;
+      string key=StringSubstr(e,0,eq);
+      string val=StringSubstr(e,eq+1);
+      StringTrimLeft(key); StringTrimRight(key);
+      StringTrimLeft(val); StringTrimRight(val);
+      int v=(int)StringToInteger(val);
+      if(v<=0)
+         return false;
+      if(key=="CONTEXT" || key=="C")
+        { if(has_ctx) return false; ctx_sec=v; has_ctx=true; }
+      else if(key=="STRUCTURE" || key=="S")
+        { if(has_struct) return false; struct_sec=v; has_struct=true; }
+      else if(key=="SETUP" || key=="U")
+        { if(has_setup) return false; setup_sec=v; has_setup=true; }
+      else if(key=="ENTRY" || key=="E")
+        { if(has_entry) return false; entry_sec=v; has_entry=true; }
+      else
+        return false; // unknown role
+     }
+   if(!has_ctx || !has_struct || !has_setup || !has_entry)
+      return false; // incomplete
+   return true;
+  }
+
   {
    if(InpGoldSymbol=="" &&
       InpSilverSymbol=="" &&
@@ -425,12 +512,16 @@ public:
       last_failure="";
      }
 
-    bool              Initialize(const string in_symbol,
-                    const ENUM_TRADING_STYLE in_style,
-                    const ENUM_TIMEFRAMES in_context_tf,
-                    const ENUM_TIMEFRAMES in_structure_tf,
-                    const ENUM_TIMEFRAMES in_setup_tf,
-                    const ENUM_TIMEFRAMES in_entry_tf)
+     bool              Initialize(const string in_symbol,
+                     const ENUM_TRADING_STYLE in_style,
+                     const ENUM_TIMEFRAMES in_context_tf,
+                     const ENUM_TIMEFRAMES in_structure_tf,
+                     const ENUM_TIMEFRAMES in_setup_tf,
+                     const ENUM_TIMEFRAMES in_entry_tf,
+                     const int in_freshness_context,
+                     const int in_freshness_structure,
+                     const int in_freshness_setup,
+                     const int in_freshness_entry)
       {
        valid=false;
        last_failure="";
@@ -527,10 +618,10 @@ public:
       hybrid_engine.SetConflictThreshold(InpConflictThreshold);
        hybrid_engine.SetMinRR(InpMinRR);
        hybrid_engine.SetFreshnessParams(
-          InpFreshnessContextSeconds,
-          InpFreshnessStructureSeconds,
-          InpFreshnessSetupSeconds,
-          InpFreshnessEntrySeconds);
+          in_freshness_context,
+          in_freshness_structure,
+          in_freshness_setup,
+          in_freshness_entry);
  
        market_entry.IsNewClosedBar(symbol,entry_tf);
 
@@ -757,7 +848,7 @@ void ProcessHybridDecision(CSymbolRuntime& runtime,
 
    if(MathAbs(entry - current_price) > max_entry_dist)
      {
-      int digits=(int)runtime.market_signal.GetSymbolDigits(runtime.symbol);
+      int digits=(int)runtime.market_context.GetSymbolDigits(runtime.symbol);
       g_logger.Event(
          LOG_WARNING, "HYBRID", "ENTRY_TOO_FAR",
          runtime.symbol, "", "", decision.plan.setup_id,
@@ -773,7 +864,7 @@ void ProcessHybridDecision(CSymbolRuntime& runtime,
    legacy_signal.direction=normalized_plan.direction;
    legacy_signal.strategy=STRATEGY_TREND_PULLBACK;
    legacy_signal.symbol=runtime.symbol;
-   legacy_signal.timeframe=runtime.signal_tf;
+   legacy_signal.timeframe=runtime.context_tf;
    legacy_signal.regime=(ENUM_REGIME_TYPE)decision.regime;
    legacy_signal.score=(normalized_plan.direction==SIGNAL_LONG) ?
                        decision.long_score : decision.short_score;
@@ -1037,9 +1128,9 @@ void ProcessRuntime(CSymbolRuntime& runtime)
       ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
       return;
      }
-   if(!runtime.market_signal.IsNewClosedBar(
+   if(!runtime.market_context.IsNewClosedBar(
          runtime.symbol,
-         runtime.signal_tf))
+         runtime.context_tf))
      {
       ShowRuntimeGateStatus(runtime, "WAITING: SIGNAL BAR");
       return;
@@ -1094,7 +1185,7 @@ void ProcessRuntime(CSymbolRuntime& runtime)
      }
 
    HybridDecision decision = runtime.hybrid_engine.Evaluate(
-                                runtime.symbol, ctx, signal_market, ok);
+                                runtime.symbol, ctx, context_market, ok);
 
    ProcessHybridDecision(runtime, decision, portfolio_state);
   }
@@ -1279,14 +1370,29 @@ int InitializePendingRuntimes()
          continue;
         }
 
-      g_runtime_wait_state[i]="";
-       if(!g_runtime[i].Initialize(
-             symbols[i],
-             InpTradingStyle,
-             context_tf,
-             structure_tf,
-             setup_tf,
-             entry_tf))
+       g_runtime_wait_state[i]="";
+        int rt_ctx=0, rt_struct=0, rt_setup=0, rt_entry=0;
+        bool rt_override=false;
+        if(!ResolveFreshnessForSymbol(symbols[i], rt_ctx, rt_struct, rt_setup, rt_entry, rt_override))
+          {
+           g_logger.Event(
+              LOG_WARNING, "INIT", "INIT_FRESHNESS_INVALID",
+              symbols[i], "", roles[i], "",
+              "FAIL", "FRESHNESS_CONFIG",
+              "Invalid freshness override; new entries blocked");
+           continue;
+          }
+        if(!g_runtime[i].Initialize(
+              symbols[i],
+              InpTradingStyle,
+              context_tf,
+              structure_tf,
+              setup_tf,
+              entry_tf,
+              rt_ctx,
+              rt_struct,
+              rt_setup,
+              rt_entry))
         {
          string failure=g_runtime[i].last_failure;
          if(failure!=g_runtime_init_failure[i])
