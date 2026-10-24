@@ -791,6 +791,7 @@ void ProcessHybridDecision(CSymbolRuntime& runtime,
 
     if(runtime.hybrid_engine.IsPlanExpired(decision.plan, TimeCurrent()))
       {
+       decision.plan.state=SETUP_STATE_EXPIRED;
        g_logger.Event(
           LOG_WARNING, "HYBRID", "PLAN_EXPIRED", runtime.symbol, "", "",
           decision.plan.setup_id, "REJECT", "PLAN_EXPIRED",
@@ -798,8 +799,19 @@ void ProcessHybridDecision(CSymbolRuntime& runtime,
        return;
       }
 
+    if(decision.plan.structural_invalidated)
+      {
+       decision.plan.state=SETUP_STATE_INVALIDATED;
+       g_logger.Event(
+          LOG_WARNING, "HYBRID", "SETUP_INVALIDATED", runtime.symbol, "", "",
+          decision.plan.setup_id, "REJECT", "SETUP_INVALIDATED",
+          "Setup structurally invalidated");
+       return;
+      }
+
     if(!runtime.hybrid_engine.IsSetupFresh(decision.plan.signal_time))
       {
+       decision.plan.state=SETUP_STATE_REJECTED;
        g_logger.Event(
           LOG_WARNING, "HYBRID", "SETUP_STALE", runtime.symbol, "", "",
           decision.plan.setup_id, "REJECT", "STALE_SETUP",

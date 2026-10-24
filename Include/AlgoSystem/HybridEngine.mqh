@@ -61,8 +61,10 @@ private:
    CNewsRiskService  m_news_service;
    CBiasEngine       m_bias_engine;
 
-   string             m_setup_id_counter_symbol;
-   int                m_setup_sequence;
+    string             m_setup_id_counter_symbol;
+    int                m_setup_sequence;
+    datetime           m_last_setup_bar_time;
+    string             m_last_setup_key;
 
    datetime           m_last_signal_time;
    ENUM_SIGNAL_DIRECTION m_last_signal_direction;
@@ -95,8 +97,10 @@ public:
         m_freshness_entry_seconds=60;
         m_freshness_valid=true;
       m_last_bar_time=0;
-      m_setup_id_counter_symbol="";
-      m_setup_sequence=0;
+       m_setup_id_counter_symbol="";
+       m_setup_sequence=0;
+       m_last_setup_bar_time=0;
+       m_last_setup_key="";
       m_last_signal_time=0;
       m_last_signal_direction=SIGNAL_NONE;
       m_last_signal_consumed=false;
@@ -239,8 +243,10 @@ public:
        m_setup_tf=setup_tf;
        m_entry_tf=entry_tf;
       m_active_style=style;
-      m_setup_id_counter_symbol=symbol;
-      m_setup_sequence=0;
+       m_setup_id_counter_symbol=symbol;
+       m_setup_sequence=0;
+       m_last_setup_bar_time=0;
+       m_last_setup_key="";
 
       ResetLastError();
       m_tick_size=SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
@@ -310,18 +316,22 @@ private:
      }
 
 public:
-   string            GenerateSetupID()
-     {
-      m_setup_sequence++;
-      MqlDateTime dt;
-      TimeToStruct(TimeCurrent(), dt);
-      string ticket_str=IntegerToString(dt.year)+IntegerToString(dt.mon)+IntegerToString(dt.day)+IntegerToString(dt.hour)+IntegerToString(dt.min)+IntegerToString(dt.sec);
-      return m_setup_id_counter_symbol +
-             "_" +
-             IntegerToString(m_setup_sequence) +
-             "_" +
-             ticket_str;
-     }
+    string            GenerateSetupID(datetime bar_time,
+                                       ENUM_SIGNAL_DIRECTION direction,
+                                       double entry_price)
+      {
+       m_setup_sequence++;
+       // Use opportunity-level identity: bar time + direction + entry level
+       string key=IntegerToString((long)bar_time)+"_"+IntegerToString((int)direction)+"_"+DoubleToString(NormalizeDouble(entry_price,m_digits),m_digits);
+       // Keep same identity for same opportunity across recalculations
+       if(m_last_setup_key==key && m_last_setup_bar_time==bar_time)
+         {
+          return m_setup_id_counter_symbol + "_" + key;
+         }
+       m_last_setup_key=key;
+       m_last_setup_bar_time=bar_time;
+       return m_setup_id_counter_symbol + "_" + key + "_" + IntegerToString(m_setup_sequence);
+      }
 
    bool              LoadMarketSnapshot(const string symbol,
                                         ENUM_TIMEFRAMES tf,
@@ -1172,15 +1182,34 @@ public:
                   return decision;
                  }
 
-      if(selected_direction==SIGNAL_NONE)
-        {
-         decision.status=DECISION_NO_TRADE;
-         decision.gates=gates;
-         decision.main_reason="NO_VALID_DIRECTION";
-         decision.valid=true;
-         ok=true;
-         return decision;
-        }
+       if(selected_direction==SIGNAL_NONE)
+         {
+          decision.status=DECISION_NO_TRADE;
+          decision.gates=gates;
+          decision.main_reason="NO_VALID_DIRECTION";
+          decision.valid=true;
+          ok=true;
+          return decision;
+         }
+
+       if(!ctx.entry_market.valid)
+         {
+          decision.status=DECISION_NO_TRADE;
+          decision.gates=gates;
+          decision.main_reason="ENTRY_INVALID";
+          decision.valid=true;
+          ok=true;
+          return decision;
+         }
+       if(m_active_style == STYLE_SCALPING && ctx.entry_market.current_time <= 0)
+         {
+          decision.status=DECISION_NO_TRADE;
+          decision.gates=gates;
+          decision.main_reason="ENTRY_TICK_INVALID";
+          decision.valid=true;
+          ok=true;
+          return decision;
+         }
 
       double stop=0;
       double target=0;
@@ -1227,34 +1256,42 @@ public:
          return decision;
         }
 
-      TradePlan plan;
-      plan.valid=true;
-      plan.status = (selected_direction==SIGNAL_LONG ?
-                     DECISION_BUY_CANDIDATE : DECISION_SELL_CANDIDATE);
-      plan.symbol=symbol;
-      plan.style=m_active_style;
-      plan.direction=selected_direction;
-      plan.score_long=long_score;
-      plan.score_short=short_score;
-      plan.setup_id=GenerateSetupID();
-      plan.signal_time=ctx.context_market.closed_bar_time;
-      plan.entry=entry_price;
-      plan.stop=stop;
-      plan.target=target;
-      plan.reward_to_risk=rr;
-      plan.expiry_time=GetSetupExpiry(ctx.context_market.closed_bar_time);
-      plan.invalidation_time=GetSetupInvalidation(ctx.context_market.closed_bar_time);
-      plan.consumed=false;
-      plan.reason="OK";
-      plan.rejection_reason="";
-      plan.evidence_summary=decision.evidence_summary;
-      plan.profile_used=ctx.profile;
-      plan.liquidity_used=ctx.liquidity;
-      plan.structure_used=ctx.structure;
-      plan.regime_used=ctx.regime;
-      plan.divergence_used=ctx.divergence;
-      plan.momentum_used=ctx.momentum;
-      plan.news_used=ctx.news;
+       TradePlan plan;
+       plan.valid=true;
+       plan.status = (selected_direction==SIGNAL_LONG ?
+                      DECISION_BUY_CANDIDATE : DECISION_SELL_CANDIDATE);
+       plan.symbol=symbol;
+       plan.style=m_active_style;
+       plan.direction=selected_direction;
+       plan.score_long=long_score;
+       plan.score_short=short_score;
+       plan.setup_id=GenerateSetupID(ctx.setup_market.closed_bar_time, selected_direction, entry_price);
+       plan.signal_time=ctx.setup_market.closed_bar_time;
+       plan.entry=entry_price;
+       plan.stop=stop;
+       plan.target=target;
+       plan.reward_to_risk=rr;
+       plan.expiry_time=GetSetupExpiry(ctx.setup_market.closed_bar_time);
+       plan.invalidation_time=GetSetupInvalidation(ctx.setup_market.closed_bar_time);
+       plan.consumed=false;
+       plan.reason="OK";
+       plan.rejection_reason="";
+       plan.evidence_summary=decision.evidence_summary;
+       plan.profile_used=ctx.profile;
+       plan.liquidity_used=ctx.liquidity;
+       plan.structure_used=ctx.structure;
+       plan.regime_used=ctx.regime;
+       plan.divergence_used=ctx.divergence;
+       plan.momentum_used=ctx.momentum;
+       plan.news_used=ctx.news;
+       plan.state=SETUP_STATE_DETECTED;
+       plan.detected_time=TimeCurrent();
+       plan.last_revalidated=TimeCurrent();
+       plan.structural_invalidated=false;
+       plan.state=SETUP_STATE_DETECTED;
+       plan.detected_time=TimeCurrent();
+       plan.last_revalidated=TimeCurrent();
+       plan.structural_invalidated=false;
 
       decision.plan=plan;
       decision.gates=gates;
@@ -1578,11 +1615,12 @@ public:
       return plan.stop > 0 && plan.target > 0;
      }
 
-   void              MarkPlanConsumed(TradePlan& plan)
-     {
-      plan.consumed=true;
-      m_last_signal_consumed=true;
-     }
+    void              MarkPlanConsumed(TradePlan& plan)
+      {
+       plan.consumed=true;
+       plan.state=SETUP_STATE_CONSUMED;
+       m_last_signal_consumed=true;
+      }
 
    bool              IsPlanConsumed(const TradePlan& plan) const
      {

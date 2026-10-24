@@ -50,9 +50,18 @@ enum ENUM_VOLUME_DATA_MODE
   };
 
 //+------------------------------------------------------------------+
-//| News State                                                        |
+//| Setup Lifecycle States                                            |
 //+------------------------------------------------------------------+
-enum ENUM_NEWS_STATE
+enum ENUM_SETUP_STATE
+  {
+   SETUP_STATE_NONE = 0,
+   SETUP_STATE_DETECTED,
+   SETUP_STATE_VALID,
+   SETUP_STATE_EXPIRED,
+   SETUP_STATE_INVALIDATED,
+   SETUP_STATE_CONSUMED,
+   SETUP_STATE_REJECTED
+  };
    {
     NEWS_DISABLED = -1,
     NEWS_UNAVAILABLE = 0,
@@ -357,17 +366,22 @@ struct TradePlan
    bool              consumed;
 
    string            reason;
-   string            rejection_reason;
-   string            evidence_summary;
+    string            rejection_reason;
+    string            evidence_summary;
 
-   ProfileFeatures    profile_used;
-   LiquidityFeatures  liquidity_used;
-   StructureFeatures  structure_used;
-   RegimeFeatures     regime_used;
-   DivergenceFeatures divergence_used;
-   MomentumFeatures   momentum_used;
-   NewsFeatures       news_used;
-  };
+    ProfileFeatures    profile_used;
+    LiquidityFeatures  liquidity_used;
+    StructureFeatures  structure_used;
+    RegimeFeatures     regime_used;
+    DivergenceFeatures divergence_used;
+    MomentumFeatures   momentum_used;
+    NewsFeatures       news_used;
+
+    ENUM_SETUP_STATE   state;
+    datetime           detected_time;
+    datetime           last_revalidated;
+    bool               structural_invalidated;
+   };
 
 //+------------------------------------------------------------------+
 //| Gate Results                                                      |
