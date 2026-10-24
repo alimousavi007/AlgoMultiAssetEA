@@ -1124,16 +1124,16 @@ public:
          (m_last_signal_time == ctx.context_market.closed_bar_time) &&
          (m_last_signal_consumed);
 
-      if(is_duplicate)
-        {
-         decision.status=DECISION_NO_TRADE;
-         decision.gates=gates;
-         decision.main_reason="DUPLICATE_SIGNAL";
-         decision.evidence_summary += " duplicate_signal_detected";
-         decision.valid=true;
-         ok=true;
-         return decision;
-        }
+       if(plan.consumed)
+         {
+          decision.status=DECISION_NO_TRADE;
+          decision.gates=gates;
+          decision.main_reason="DUPLICATE_SIGNAL";
+          decision.evidence_summary += " duplicate_signal_detected";
+          decision.valid=true;
+          ok=true;
+          return decision;
+         }
 
       ENUM_SIGNAL_DIRECTION selected_direction=SIGNAL_NONE;
       double selected_score=0;
@@ -1287,6 +1287,7 @@ public:
        plan.detected_time=TimeCurrent();
        plan.last_revalidated=TimeCurrent();
        plan.structural_invalidated=false;
+       plan.liquidity_used=ctx.liquidity;
        plan.state=SETUP_STATE_DETECTED;
        plan.detected_time=TimeCurrent();
        plan.last_revalidated=TimeCurrent();
@@ -1616,6 +1617,10 @@ public:
 
     void              MarkPlanConsumed(TradePlan& plan)
       {
+       if(plan.consumed || plan.state==SETUP_STATE_CONSUMED)
+          return;
+       if(plan.state==SETUP_STATE_EXPIRED || plan.state==SETUP_STATE_INVALIDATED || plan.state==SETUP_STATE_REJECTED)
+          return;
        plan.consumed=true;
        plan.state=SETUP_STATE_CONSUMED;
        m_last_signal_consumed=true;
@@ -1632,9 +1637,57 @@ public:
           return false;
        return (TimeCurrent() - setup_time) <= (datetime)m_freshness_setup_seconds;
       }
-     {
-      return current_time > plan.expiry_time;
-     }
+
+    bool              IsPlanExpired(const TradePlan& plan, datetime current_time) const
+      {
+       if(plan.expiry_time <= 0)
+          return false;
+       return current_time > plan.expiry_time;
+      }
+
+    bool              IsStructuralInvalidated(const TradePlan& plan) const
+      {
+       if(!plan.valid)
+          return false;
+       if(plan.structural_invalidated)
+          return true;
+       if(!plan.liquidity_used.valid)
+          return true;
+       if(!plan.symbol.IsEmpty() && plan.symbol != m_symbol)
+          return true;
+       MqlTick tick_check;
+       if(!SymbolInfoTick(m_symbol, tick_check))
+          return true;
+       if(tick_check.bid <= 0.0 && tick_check.ask <= 0.0)
+          return true;
+       double price = plan.entry;
+       if(plan.direction == SIGNAL_LONG)
+         {
+          if(tick_check.bid > 0.0)
+             price = tick_check.bid;
+          else
+             return true;
+         }
+       else if(plan.direction == SIGNAL_SHORT)
+         {
+          if(tick_check.ask > 0.0)
+             price = tick_check.ask;
+          else
+             return true;
+         }
+       else
+         {
+          if(tick_check.bid > 0.0)
+             price = tick_check.bid;
+          else if(tick_check.ask > 0.0)
+             price = tick_check.ask;
+          else
+             return true;
+         }
+       if(m_liquidity_engine.IsLevelInvalidated(plan.liquidity_used, price, plan.direction))
+          return true;
+       return false;
+      }
 
    ENUM_TRADING_STYLE GetActiveStyle() const
      {

@@ -806,17 +806,18 @@ void ProcessHybridDecision(CSymbolRuntime& runtime,
        g_logger.Event(
           LOG_WARNING, "HYBRID", "SETUP_INVALIDATED", runtime.symbol, "", "",
           decision.plan.setup_id, "REJECT", "SETUP_INVALIDATED",
-          "Setup structurally invalidated");
+          "Structural/invalidation check blocked entry due to evidence state");
        return;
       }
 
-    if(decision.plan.structural_invalidated)
+    if(decision.plan.structural_invalidated || runtime.hybrid_engine.IsStructuralInvalidated(decision.plan))
       {
+       decision.plan.structural_invalidated=true;
        decision.plan.state=SETUP_STATE_INVALIDATED;
        g_logger.Event(
           LOG_WARNING, "HYBRID", "SETUP_INVALIDATED", runtime.symbol, "", "",
           decision.plan.setup_id, "REJECT", "SETUP_INVALIDATED",
-          "Setup structurally invalidated");
+          "Structural/invalidation check blocked entry due to evidence state");
        return;
       }
 
@@ -830,14 +831,14 @@ void ProcessHybridDecision(CSymbolRuntime& runtime,
        return;
       }
 
-   if(runtime.hybrid_engine.IsPlanConsumed(decision.plan))
-     {
-      g_logger.Event(
-         LOG_DEBUG, "HYBRID", "PLAN_CONSUMED", runtime.symbol, "", "",
-         decision.plan.setup_id, "NOOP", "CONSUMED",
-         "Plan already consumed");
-      return;
-     }
+    if(runtime.hybrid_engine.IsPlanConsumed(decision.plan) || decision.plan.state==SETUP_STATE_CONSUMED)
+      {
+       g_logger.Event(
+          LOG_DEBUG, "HYBRID", "PLAN_CONSUMED", runtime.symbol, "", "",
+          decision.plan.setup_id, "NOOP", "CONSUMED",
+          "Plan already consumed");
+       return;
+      }
 
    TradePlan normalized_plan = decision.plan;
    string norm_reason="";
