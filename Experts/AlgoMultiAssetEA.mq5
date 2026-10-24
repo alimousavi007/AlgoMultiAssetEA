@@ -799,6 +799,17 @@ void ProcessHybridDecision(CSymbolRuntime& runtime,
        return;
       }
 
+    if(runtime.hybrid_engine.IsStructuralInvalidated(decision.plan))
+      {
+       decision.plan.state=SETUP_STATE_INVALIDATED;
+       decision.plan.structural_invalidated=true;
+       g_logger.Event(
+          LOG_WARNING, "HYBRID", "SETUP_INVALIDATED", runtime.symbol, "", "",
+          decision.plan.setup_id, "REJECT", "SETUP_INVALIDATED",
+          "Setup structurally invalidated");
+       return;
+      }
+
     if(decision.plan.structural_invalidated)
       {
        decision.plan.state=SETUP_STATE_INVALIDATED;

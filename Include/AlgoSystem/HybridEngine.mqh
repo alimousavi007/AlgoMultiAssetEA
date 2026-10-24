@@ -321,9 +321,8 @@ public:
                                        double entry_price)
       {
        m_setup_sequence++;
-       // Use opportunity-level identity: bar time + direction + entry level
-       string key=IntegerToString((long)bar_time)+"_"+IntegerToString((int)direction)+"_"+DoubleToString(NormalizeDouble(entry_price,m_digits),m_digits);
-       // Keep same identity for same opportunity across recalculations
+       string entry_key=DoubleToString(NormalizeDouble(entry_price, m_digits), m_digits);
+       string key=IntegerToString((long)bar_time)+"_"+IntegerToString((int)direction)+"_"+entry_key;
        if(m_last_setup_key==key && m_last_setup_bar_time==bar_time)
          {
           return m_setup_id_counter_symbol + "_" + key;
