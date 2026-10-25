@@ -20,21 +20,23 @@ Never guess an MQL5 API. Use the source headers and official documentation only.
 
 Normalize all prices and volumes against the **actual symbol specification** at runtime:
 
-- `SymbolInfoDouble(symbol, SYMBOL_DIGITS)` / `SYMBOL_POINT` / `SYMBOL_TRADE_TICK_SIZE`
-- `SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN)` / `SYMBOL_VOLUME_MAX` / `SYMBOL_VOLUME_STEP`
-- `SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL)` / `SYMBOL_TRADE_FREEZE_LEVEL`
-- `SymbolInfoInteger(symbol, SYMBOL_TRADE_MODE)`
+- `SymbolInfoInteger(symbol, SYMBOL_DIGITS)` for digits (integer property).
+- `SymbolInfoDouble(symbol, SYMBOL_POINT)` and `SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE)` for point/tick size.
+- `SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN)`, `SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX)`, `SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP)` for volume constraints.
+- `SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL)`, `SymbolInfoInteger(symbol, SYMBOL_TRADE_FREEZE_LEVEL)`, `SymbolInfoInteger(symbol, SYMBOL_TRADE_MODE)` for integer trading constraints.
 
-Do not assume standard contract sizes, tick values, or lot steps.
+Do not assume standard contract sizes, tick values, volume steps, or contract sizes. Use the actual symbol specifications as the source of truth.
 
 ## Trade Retcode Discipline
 
-A successful function return (`true`/`OrderSend` result) is **not**, by itself, proof that a trade was executed successfully.
+A successful function return or a retcode alone is **not**, by itself, proof that a trade was executed successfully or that the intended full volume was filled.
 
 Always:
-- Capture and inspect the actual `trade.retcode()` / `OrderGetInteger(ORDER_RETCODE)` / `DealGetInteger(DEAL_RETCODE)`
-- Distinguish `TRADE_RETCODE_DONE` from partial fills, requotes, rejections, and broker-specific codes
-- Log the retcode and its meaning for every execution attempt
+- For the Standard Library CTrade, inspect ResultRetcode() and ResultRetcodeDescription() and use documented result accessors.
+- For direct OrderSend calls, inspect the actual MqlTradeResult.retcode.
+- Distinguish rejection, requote, partial execution, successful order handling, and confirmed deal/position evidence using properties and events actually supported by MQL5 (e.g. OrderGetInteger, DealGetInteger, HistoryOrderSelect, PositionSelect).
+- Distinguish TRADE_RETCODE_DONE from partial fills, requotes, rejections, and broker-specific codes.
+- Log the retcode and its meaning for every execution attempt. Do not invent API names.
 
 ## Risk Pipeline Components (Explicit)
 

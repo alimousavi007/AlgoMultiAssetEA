@@ -53,11 +53,9 @@ Never invent source behavior, API capabilities, broker behavior, test results, o
 
 The EA is multi-symbol and currently works with configured XAU, XAG and BTC symbols.
 
-Profile timeframes:
+**Active Hybrid architecture (current):** four independent roles: Context, Structure, Setup, and Entry. Setup is independent from Structure even if configured timeframes coincide. Exact role-to-timeframe mappings remain undecided. Do not assume the former three-role (SCALP/DAY/SWING) mapping as an approved Hybrid contract.
 
-SCALP: M15 structure → M5 signal → M1 entry
-DAY:   H4 structure  → H1 signal → M15 entry
-SWING: D1 structure  → H4 signal → H1 entry
+Existing components (Trend/Pullback, Breakout, Momentum, Mean Reversion, Relative Value) are repository components; do not assume they fully represent the active Hybrid signal path without tracing implementation.
 
 Current feature layer includes:
 

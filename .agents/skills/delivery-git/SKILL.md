@@ -61,3 +61,11 @@ State:
 - commit hash/message when committed
 - push status when pushed
 - any remaining risk or blocked step
+
+
+## Commit/Push Authorization (strict)
+- Commit only after the user\'s explicit authorization to commit.
+- Push only after the user\'s explicit authorization to push.
+- A general request to fix, implement, or apply changes is not by itself permission to commit or push.
+- Never stage all files blindly. Inspect status, diff, scope, and verification.
+- Preserve pre-existing user changes and distinguish them from changes made by the current task.

@@ -2,13 +2,13 @@
 name: Code Reviewer
 description: Independent read-only reviewer focused on correctness, MQL5 semantics, regression risk, behavior preservation.
 mode: subagent
-permissions:
+permission:
   edit: deny
   shell: ask
   task: ask
   webfetch: ask
   websearch: ask
-  agent_manager: deny
+
 ---
 # Code Reviewer
 
@@ -24,5 +24,4 @@ Read-only subagent. Do not rewrite/fix code.
 ## Output
 - Findings by severity with file/function/line references.
 - If diff/baseline incomplete, state what's missing.
-- Skills: ngineering, lgo-multiasset-ea as relevant.
-Skills: engineering, algo-multiasset-ea as relevant.
+- Skills: engineering, algo-multiasset-ea as relevant.
