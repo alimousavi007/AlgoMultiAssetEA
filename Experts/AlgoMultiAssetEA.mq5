@@ -622,7 +622,7 @@ public:
           in_freshness_structure,
           in_freshness_setup,
           in_freshness_entry);
- 
+
        market_entry.IsNewClosedBar(symbol,entry_tf);
 
       valid=true;
@@ -799,29 +799,36 @@ void ProcessHybridDecision(CSymbolRuntime& runtime,
        return;
       }
 
-    if(runtime.hybrid_engine.IsStructuralInvalidated(decision.plan))
+    double struct_price = decision.plan.entry;
+    ENUM_STRUCTURAL_EVIDENCE_RESULT struct_res = runtime.hybrid_engine.EvaluateStructuralEvidence(decision.plan, struct_price);
+    if(struct_res == EVIDENCE_STRUCTURAL_INVALIDATION_CONFIRMED)
       {
        decision.plan.state=SETUP_STATE_INVALIDATED;
        decision.plan.structural_invalidated=true;
        g_logger.Event(
           LOG_WARNING, "HYBRID", "SETUP_INVALIDATED", runtime.symbol, "", "",
           decision.plan.setup_id, "REJECT", "SETUP_INVALIDATED",
-          "Structural/invalidation check blocked entry due to evidence state");
+          "Structural invalidation confirmed by evidence");
        return;
       }
-
-    if(decision.plan.structural_invalidated || runtime.hybrid_engine.IsStructuralInvalidated(decision.plan))
+    if(struct_res == EVIDENCE_INVALID_PLAN)
       {
-       decision.plan.structural_invalidated=true;
-       decision.plan.state=SETUP_STATE_INVALIDATED;
        g_logger.Event(
-          LOG_WARNING, "HYBRID", "SETUP_INVALIDATED", runtime.symbol, "", "",
-          decision.plan.setup_id, "REJECT", "SETUP_INVALIDATED",
-          "Structural/invalidation check blocked entry due to evidence state");
+          LOG_WARNING, "HYBRID", "INVALID_PLAN", runtime.symbol, "", "",
+          decision.plan.setup_id, "REJECT", "INVALID_PLAN",
+          "Plan invalid for structural evidence evaluation");
        return;
       }
+if(struct_res != EVIDENCE_SUFFICIENT_NO_INVALIDATION)
+        {
+         g_logger.Event(
+            LOG_WARNING, "HYBRID", "STRUCT_EVIDENCE_BLOCK", runtime.symbol, "", "",
+            decision.plan.setup_id, "REJECT", EnumToString(struct_res),
+            "Entry blocked by structural evidence: " + EnumToString(struct_res));
+         return;
+        }
 
-    if(!runtime.hybrid_engine.IsSetupFresh(decision.plan.signal_time))
+     if(!runtime.hybrid_engine.IsSetupFresh(decision.plan.signal_time))
       {
        decision.plan.state=SETUP_STATE_REJECTED;
        g_logger.Event(

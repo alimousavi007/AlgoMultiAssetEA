@@ -62,6 +62,20 @@ enum ENUM_SETUP_STATE
    SETUP_STATE_CONSUMED,
    SETUP_STATE_REJECTED
   };
+
+enum ENUM_STRUCTURAL_EVIDENCE_RESULT
+  {
+   EVIDENCE_NONE = 0,
+   EVIDENCE_TICK_UNAVAILABLE,
+   EVIDENCE_TICK_STALE_OR_UNVERIFIED,
+   EVIDENCE_LEVEL_MISSING,
+   EVIDENCE_LEVEL_STALE_OR_UNVERIFIED,
+   EVIDENCE_SYMBOL_OR_TIMEFRAME_MISMATCH,
+   EVIDENCE_INVALID_PLAN,
+   EVIDENCE_INSUFFICIENT_EVIDENCE,
+   EVIDENCE_STRUCTURAL_INVALIDATION_CONFIRMED,
+   EVIDENCE_SUFFICIENT_NO_INVALIDATION
+  };
    {
     NEWS_DISABLED = -1,
     NEWS_UNAVAILABLE = 0,
@@ -201,6 +215,8 @@ struct LiquidityFeatures
    ENUM_TIMEFRAMES   timeframe;
    datetime          bar_time;
    string            reason;
+   string            snapshot_id;
+   string            producer_role;
   };
 
 //+------------------------------------------------------------------+
@@ -371,6 +387,7 @@ struct TradePlan
 
     ProfileFeatures    profile_used;
     LiquidityFeatures  liquidity_used;
+    string             liquidity_snapshot_id;
     StructureFeatures  structure_used;
     RegimeFeatures     regime_used;
     DivergenceFeatures divergence_used;

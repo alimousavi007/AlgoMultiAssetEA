@@ -21,7 +21,7 @@ Read-only subagent for evidence-based risk investigation.
 - Apply first-failure semantics; report only when condition executed and failed.
 
 ## Requirements
-- Apply trading-risk,  aalgo-multiasset-ea, signal-pipeline-forensics when relevant.
+- Apply trading-risk, algo-multiasset-ea, signal-pipeline-forensics when relevant.
 - Report values, file/function/line, logs, unresolved unknowns.
 - Never loosen thresholds, modify formulas, edit files, run tests, or perform trading ops.
 - Never treat candidate as proof of approval/execution.

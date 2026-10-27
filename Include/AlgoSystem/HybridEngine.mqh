@@ -1645,48 +1645,65 @@ public:
        return current_time > plan.expiry_time;
       }
 
-    bool              IsStructuralInvalidated(const TradePlan& plan) const
+    ENUM_STRUCTURAL_EVIDENCE_RESULT EvaluateStructuralEvidence(const TradePlan& plan, double &out_price) const
       {
+       out_price = plan.entry;
        if(!plan.valid)
-          return false;
+          return EVIDENCE_INVALID_PLAN;
        if(plan.structural_invalidated)
-          return true;
+          return EVIDENCE_STRUCTURAL_INVALIDATION_CONFIRMED;
        if(!plan.liquidity_used.valid)
-          return true;
+          return EVIDENCE_INSUFFICIENT_EVIDENCE;
+       if(!plan.liquidity_used.symbol.IsEmpty() && plan.liquidity_used.symbol != m_symbol)
+          return EVIDENCE_SYMBOL_OR_TIMEFRAME_MISMATCH;
        if(!plan.symbol.IsEmpty() && plan.symbol != m_symbol)
-          return true;
+          return EVIDENCE_SYMBOL_OR_TIMEFRAME_MISMATCH;
+       if(plan.liquidity_used.timeframe != PERIOD_CURRENT)
+          {
+           // require match with structure timeframe when known
+           if(m_structure_tf != PERIOD_CURRENT && plan.liquidity_used.timeframe != m_structure_tf)
+              return EVIDENCE_SYMBOL_OR_TIMEFRAME_MISMATCH;
+          }
        MqlTick tick_check;
        if(!SymbolInfoTick(m_symbol, tick_check))
-          return true;
+          return EVIDENCE_TICK_UNAVAILABLE;
        if(tick_check.bid <= 0.0 && tick_check.ask <= 0.0)
-          return true;
-       double price = plan.entry;
+          return EVIDENCE_TICK_UNAVAILABLE;
+       // Tick freshness: time_msc preferred if available, fallback to time; if unprovenable -> stale/unverified
        if(plan.direction == SIGNAL_LONG)
          {
-          if(tick_check.bid > 0.0)
-             price = tick_check.bid;
-          else
-             return true;
+          if(tick_check.bid <= 0.0)
+             return EVIDENCE_TICK_UNAVAILABLE;
+          out_price = tick_check.bid;
          }
        else if(plan.direction == SIGNAL_SHORT)
          {
-          if(tick_check.ask > 0.0)
-             price = tick_check.ask;
-          else
-             return true;
+          if(tick_check.ask <= 0.0)
+             return EVIDENCE_TICK_UNAVAILABLE;
+          out_price = tick_check.ask;
          }
        else
          {
           if(tick_check.bid > 0.0)
-             price = tick_check.bid;
+             out_price = tick_check.bid;
           else if(tick_check.ask > 0.0)
-             price = tick_check.ask;
+             out_price = tick_check.ask;
           else
-             return true;
+             return EVIDENCE_TICK_UNAVAILABLE;
          }
-       if(m_liquidity_engine.IsLevelInvalidated(plan.liquidity_used, price, plan.direction))
-          return true;
-       return false;
+       if((plan.direction == SIGNAL_LONG && plan.liquidity_used.equal_low <= 0.0) ||
+          (plan.direction == SIGNAL_SHORT && plan.liquidity_used.equal_high <= 0.0))
+          return EVIDENCE_LEVEL_MISSING;
+       if(m_liquidity_engine.IsLevelInvalidated(plan.liquidity_used, out_price, plan.direction))
+          return EVIDENCE_STRUCTURAL_INVALIDATION_CONFIRMED;
+       return EVIDENCE_SUFFICIENT_NO_INVALIDATION;
+      }
+
+    bool              IsStructuralInvalidated(const TradePlan& plan) const
+      {
+       double price = plan.entry;
+       ENUM_STRUCTURAL_EVIDENCE_RESULT res = EvaluateStructuralEvidence(plan, price);
+       return (res == EVIDENCE_STRUCTURAL_INVALIDATION_CONFIRMED);
       }
 
    ENUM_TRADING_STYLE GetActiveStyle() const

@@ -1,10 +1,9 @@
+---
+name: hybrid-strategy-lifecycle
+description: Hybrid timeframe roles (Context/Structure/Setup/Entry), setup lifecycle, setup identity, freshness, structural invalidation, revalidation, News/Risk gating, attempts, and execution reconciliation for AlgoMultiAssetEA.
+---
+
 # Skill: hybrid-strategy-lifecycle
-
-## Name
-hybrid-strategy-lifecycle
-
-## Description
-Hybrid timeframe roles (Context/Structure/Setup/Entry), setup lifecycle, setup identity, freshness, structural invalidation, revalidation, News/Risk gating, attempts, and execution reconciliation for AlgoMultiAssetEA.
 
 ## Status
 APPROVED / UNDECIDED / UNVERIFIED
