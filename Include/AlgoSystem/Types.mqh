@@ -161,6 +161,7 @@ struct ExecutionRequest
    string comment;
 
    string signal_id;
+   string attempt_id;
   };
 
 struct ExecutionResult
@@ -177,6 +178,11 @@ struct ExecutionResult
    double executed_volume;
 
    string message;
+
+   bool partial_fill;
+   double requested_volume;
+   bool reconciliation_required;
+   string failure_class;
   };
 
 struct PositionState

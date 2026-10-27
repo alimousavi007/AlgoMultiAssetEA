@@ -502,55 +502,128 @@ private:
       return true;
      }
 
-   //+----------------------------------------------------------------+
-   //| Retcode is execution success                                   |
-   //+----------------------------------------------------------------+
-   bool IsSuccessfulRetcode(
-      const uint retcode) const
-     {
-      if(retcode==TRADE_RETCODE_DONE)
-         return true;
+    //+----------------------------------------------------------------+
+    //| Retcode classification                                         |
+    //+----------------------------------------------------------------+
+    bool IsSuccessfulRetcode(
+       const uint retcode) const
+      {
+       if(retcode==TRADE_RETCODE_DONE)
+          return true;
 
-      if(retcode==TRADE_RETCODE_DONE_PARTIAL)
-         return true;
+       if(retcode==TRADE_RETCODE_DONE_PARTIAL)
+          return true;
 
-      if(retcode==TRADE_RETCODE_PLACED)
-         return true;
+       if(retcode==TRADE_RETCODE_PLACED)
+          return true;
 
-      if(retcode==TRADE_RETCODE_NO_CHANGES)
-         return true;
+       if(retcode==TRADE_RETCODE_NO_CHANGES)
+          return true;
 
-      return false;
-     }
+       return false;
+      }
 
-   //+----------------------------------------------------------------+
-   //| Copy CTrade result                                             |
-   //+----------------------------------------------------------------+
-   void FillExecutionResult(
-      ExecutionResult &result) const
-     {
-      result.retcode=
-         m_trade.ResultRetcode();
+    bool IsFinalFailureRetcode(
+       const uint retcode) const
+      {
+       if(retcode==0)
+          return false;
 
-      result.order_ticket=
-         m_trade.ResultOrder();
+       if(retcode==TRADE_RETCODE_DONE ||
+          retcode==TRADE_RETCODE_DONE_PARTIAL ||
+          retcode==TRADE_RETCODE_PLACED ||
+          retcode==TRADE_RETCODE_NO_CHANGES)
+          return false;
 
-      result.deal_ticket=
-         m_trade.ResultDeal();
+       // Ambiguous/network related codes often need reconciliation; treat as non-final here
+       // Common ambiguous: timeout/connection issues - classify conservatively
+       if(retcode==TRADE_RETCODE_TIMEOUT ||
+          retcode==TRADE_RETCODE_CONNECTION ||
+          retcode==TRADE_RETCODE_INVALID_PRICES ||
+          retcode==TRADE_RETCODE_PRICE_CHANGED ||
+          retcode==TRADE_RETCODE_PRICE_OFF ||
+          retcode==TRADE_RETCODE_REQUOTE)
+          return false;
 
-      result.executed_price=
-         m_trade.ResultPrice();
+       // Most other retcodes are final rejections/errors
+       return true;
+      }
 
-      result.executed_volume=
-         m_trade.ResultVolume();
+    bool IsAmbiguousRetcode(
+       const uint retcode) const
+      {
+       if(retcode==TRADE_RETCODE_TIMEOUT ||
+          retcode==TRADE_RETCODE_CONNECTION ||
+          retcode==TRADE_RETCODE_INVALID_PRICES ||
+          retcode==TRADE_RETCODE_PRICE_CHANGED ||
+          retcode==TRADE_RETCODE_PRICE_OFF ||
+          retcode==TRADE_RETCODE_REQUOTE)
+          return true;
 
-      result.message=
-         m_trade.ResultRetcodeDescription();
+       return false;
+      }
 
-      result.success=
-         IsSuccessfulRetcode(
-            result.retcode);
-     }
+    //+----------------------------------------------------------------+
+    //| Copy CTrade result                                             |
+    //+----------------------------------------------------------------+
+    void FillExecutionResult(
+       ExecutionResult &result,
+       const double requested_volume=0.0) const
+      {
+       result.retcode=
+          m_trade.ResultRetcode();
+
+       result.order_ticket=
+          m_trade.ResultOrder();
+
+       result.deal_ticket=
+          m_trade.ResultDeal();
+
+       result.executed_price=
+          m_trade.ResultPrice();
+
+       result.executed_volume=
+          m_trade.ResultVolume();
+
+       result.message=
+          m_trade.ResultRetcodeDescription();
+
+       result.success=
+          IsSuccessfulRetcode(
+             result.retcode);
+
+       result.requested_volume = requested_volume;
+       result.partial_fill = (result.retcode == TRADE_RETCODE_DONE_PARTIAL);
+       if(result.partial_fill)
+         {
+          result.failure_class = "PARTIAL_FILL";
+         }
+       else if(IsAmbiguousRetcode(result.retcode))
+         {
+          result.reconciliation_required = true;
+          result.failure_class = "AMBIGUOUS";
+         }
+       else if(!result.success && result.retcode != 0)
+         {
+          if(IsFinalFailureRetcode(result.retcode))
+            {
+             result.failure_class = "FINAL_FAILURE";
+            }
+          else
+            {
+             result.reconciliation_required = true;
+             result.failure_class = "UNKNOWN";
+            }
+         }
+       else if(result.success)
+         {
+          result.failure_class = "SUCCESS";
+         }
+       else
+         {
+          result.failure_class = "UNKNOWN";
+         }
+      }
 
 public:
 
@@ -637,6 +710,10 @@ public:
       result.executed_volume=0.0;
 
       result.message="";
+      result.partial_fill=false;
+      result.requested_volume=0.0;
+      result.reconciliation_required=false;
+      result.failure_class="";
 
       if(!Validate(request))
         {
@@ -688,28 +765,28 @@ public:
 
          ResetLastError();
 
-         bool request_result=
-            m_trade.PositionOpen(
-               request.symbol,
-               order_type,
-               request.volume,
-               price,
-               request.stop_loss,
-               request.take_profit,
-               request.comment);
+       bool request_result=
+          m_trade.PositionOpen(
+             request.symbol,
+             order_type,
+             request.volume,
+             price,
+             request.stop_loss,
+             request.take_profit,
+             request.comment);
 
-         FillExecutionResult(result);
+       FillExecutionResult(result, request.volume);
 
-         if(!request_result &&
-            result.retcode==0)
-           {
-            result.message=
-               "PositionOpen failed before server execution";
+       if(!request_result &&
+          result.retcode==0)
+         {
+          result.message=
+             "PositionOpen failed before server execution";
 
-            return false;
-           }
+          return false;
+         }
 
-         return result.success;
+       return result.success;
         }
 
       //--- close
@@ -717,26 +794,26 @@ public:
         {
          ResetLastError();
 
-         bool request_result=
-            m_trade.PositionClose(
-               request.position_ticket,
-               m_deviation_points);
+       bool request_result=
+          m_trade.PositionClose(
+             request.position_ticket,
+             m_deviation_points);
 
-         FillExecutionResult(result);
+       FillExecutionResult(result, 0.0);
 
-         if(!request_result &&
-            result.retcode==0)
-           {
-            result.message=
-               "PositionClose failed before server execution";
+       if(!request_result &&
+          result.retcode==0)
+         {
+          result.message=
+             "PositionClose failed before server execution";
 
-            return false;
-           }
+          return false;
+         }
 
-         result.position_ticket=
-            request.position_ticket;
+       result.position_ticket=
+          request.position_ticket;
 
-         return result.success;
+       return result.success;
         }
 
       //--- modify
@@ -771,27 +848,27 @@ public:
 
          ResetLastError();
 
-         bool request_result=
-            m_trade.PositionModify(
-               request.position_ticket,
-               sl,
-               tp);
+       bool request_result=
+          m_trade.PositionModify(
+             request.position_ticket,
+             sl,
+             tp);
 
-         FillExecutionResult(result);
+       FillExecutionResult(result, 0.0);
 
-         result.position_ticket=
-            request.position_ticket;
+       result.position_ticket=
+          request.position_ticket;
 
-         if(!request_result &&
-            result.retcode==0)
-           {
-            result.message=
-               "PositionModify failed before server execution";
+       if(!request_result &&
+          result.retcode==0)
+         {
+          result.message=
+             "PositionModify failed before server execution";
 
-            return false;
-           }
+          return false;
+         }
 
-         return result.success;
+       return result.success;
         }
 
       result.message=

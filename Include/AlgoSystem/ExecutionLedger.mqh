@@ -1,0 +1,837 @@
+#ifndef __ALGOSYSTEM_EXECUTIONLEDGER_MQH__
+#define __ALGOSYSTEM_EXECUTIONLEDGER_MQH__
+
+#include "Types.mqh"
+#include <Files\File.mqh>
+
+//+------------------------------------------------------------------+
+//| Execution Ledger States                                          |
+//+------------------------------------------------------------------+
+enum ENUM_EXEC_ATTEMPT_STATE
+  {
+   EXEC_STATE_NONE = 0,
+   EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED,
+   EXEC_STATE_SUBMISSION_MAY_HAVE_OCCURRED,
+   EXEC_STATE_SUBMITTED,
+   EXEC_STATE_PARTIAL_FILL,
+   EXEC_STATE_COMPLETED,
+   EXEC_STATE_FINAL_FAILURE,
+   EXEC_STATE_RECONCILIATION_REQUIRED,
+   EXEC_STATE_ABORTED
+  };
+
+//+------------------------------------------------------------------+
+//| Execution Attempt Record                                         |
+//+------------------------------------------------------------------+
+struct ExecutionAttemptRecord
+  {
+   string                attempt_id;
+   string                setup_id;
+   string                symbol;
+   ulong                 magic;
+   ENUM_ORDER_INTENT     intent;
+   ENUM_SIGNAL_DIRECTION direction;
+   double                requested_volume;
+   double                executed_volume;
+   double                remaining_volume;
+   double                entry_price;
+   double                stop_loss;
+   double                take_profit;
+   datetime              created_at;
+   datetime              submission_bound_at;
+   datetime              submitted_at;
+   datetime              broker_response_at;
+   datetime              observed_at;
+   datetime              resolved_at;
+   uint                  last_retcode;
+   string                last_retcode_desc;
+   ulong                 broker_order_ticket;
+   ulong                 broker_deal_ticket;
+   ulong                 broker_position_ticket;
+   string                failure_class;
+   ENUM_EXEC_ATTEMPT_STATE state;
+   bool                  submission_allowed;
+   string                last_reason;
+   int                   schema_version;
+  };
+
+//+------------------------------------------------------------------+
+//| Execution Ledger                                                  |
+//+------------------------------------------------------------------+
+class CExecutionLedger
+  {
+private:
+   int                m_db_handle;
+   bool               m_initialized;
+   bool               m_db_available;
+   string             m_db_filename;
+   int                m_schema_version;
+   int                m_open_attempts_count;
+   
+   bool               CreateSchema();
+   bool               MigrateSchema();
+   bool               ExecuteSQL(const string sql);
+   string             GenerateAttemptId();
+   string             EscapeSQL(const string s) const;
+   
+public:
+                     CExecutionLedger();
+                    ~CExecutionLedger();
+   
+   bool               Initialize(const string db_name="execution_ledger.sqlite");
+   void               Deinitialize();
+   
+   bool               IsInitialized() const { return m_initialized && m_db_available; }
+   bool               IsAvailable() const { return m_db_available; }
+   
+   // Intent and submission tracking
+   bool               CreateIntent(ExecutionAttemptRecord &record);
+   bool               MarkSubmissionBound(const string attempt_id, const string reason="");
+   bool               CanSubmit(const string attempt_id, string &reason);
+   bool               RecordSubmission(const string attempt_id);
+   
+   // Result tracking
+   bool               RecordResult(const string attempt_id, const ExecutionResult &result, const string reason="");
+   bool               MarkReconciliationRequired(const string attempt_id, const string reason);
+   bool               ResolveAttempt(const string attempt_id, ENUM_EXEC_ATTEMPT_STATE final_state, const string reason);
+   
+   // Recovery and reconciliation
+   int                RecoverUnresolved(int &out_count);
+   bool               GetAttempt(const string attempt_id, ExecutionAttemptRecord &record);
+   bool               HasUnresolvedForSymbol(const string symbol, bool include_ambiguous=true);
+   bool               HasBlockingUnresolved(string &blocking_reason);
+   
+   // State history
+   bool               LogStateTransition(const string attempt_id, ENUM_EXEC_ATTEMPT_STATE old_state, 
+                                         ENUM_EXEC_ATTEMPT_STATE new_state, const string reason, 
+                                         uint retcode=0);
+  };
+
+//+------------------------------------------------------------------+
+//| Constructor                                                       |
+//+------------------------------------------------------------------+
+CExecutionLedger::CExecutionLedger()
+  {
+   m_db_handle = INVALID_HANDLE;
+   m_initialized = false;
+   m_db_available = false;
+   m_db_filename = "";
+   m_schema_version = 1;
+   m_open_attempts_count = 0;
+  }
+
+//+------------------------------------------------------------------+
+//| Destructor                                                        |
+//+------------------------------------------------------------------+
+CExecutionLedger::~CExecutionLedger()
+  {
+   Deinitialize();
+  }
+
+//+------------------------------------------------------------------+
+//| Initialize                                                        |
+//+------------------------------------------------------------------+
+bool CExecutionLedger::Initialize(const string db_name)
+  {
+   if(m_initialized)
+      return m_db_available;
+      
+   m_db_filename = db_name;
+   m_db_handle = DatabaseOpen(m_db_filename, DATABASE_OPEN_READWRITE | DATABASE_OPEN_CREATE);
+   
+   if(m_db_handle == INVALID_HANDLE)
+     {
+      m_db_available = false;
+      m_initialized = true;
+      return false;
+     }
+   
+   m_db_available = true;
+   
+   // Check schema
+   if(!CreateSchema())
+     {
+      DatabaseClose(m_db_handle);
+      m_db_handle = INVALID_HANDLE;
+      m_db_available = false;
+      m_initialized = true;
+      return false;
+     }
+   
+   if(!MigrateSchema())
+     {
+      // Migration failure is serious - don't proceed
+      DatabaseClose(m_db_handle);
+      m_db_handle = INVALID_HANDLE;
+      m_db_available = false;
+      m_initialized = true;
+      return false;
+     }
+   
+   m_initialized = true;
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Deinitialize                                                      |
+//+------------------------------------------------------------------+
+void CExecutionLedger::Deinitialize()
+  {
+   if(m_db_handle != INVALID_HANDLE)
+     {
+      DatabaseClose(m_db_handle);
+      m_db_handle = INVALID_HANDLE;
+     }
+   m_db_available = false;
+   m_initialized = false;
+  }
+
+//+------------------------------------------------------------------+
+//| Escape SQL                                                        |
+//+------------------------------------------------------------------+
+string CExecutionLedger::EscapeSQL(const string s) const
+  {
+   string result = s;
+   StringReplace(result, "'", "''");
+   return result;
+  }
+
+//+------------------------------------------------------------------+
+//| Execute SQL                                                       |
+//+------------------------------------------------------------------+
+bool CExecutionLedger::ExecuteSQL(const string sql)
+  {
+   if(m_db_handle == INVALID_HANDLE)
+      return false;
+      
+   int res = DatabaseExecute(m_db_handle, sql);
+   if(res != 0)
+      return false;
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Create Schema                                                     |
+//+------------------------------------------------------------------+
+bool CExecutionLedger::CreateSchema()
+  {
+   if(m_db_handle == INVALID_HANDLE)
+      return false;
+   
+   string sql1 = "CREATE TABLE IF NOT EXISTS execution_attempts ("
+                 "attempt_id TEXT PRIMARY KEY,"
+                 "setup_id TEXT,"
+                 "symbol TEXT,"
+                 "magic INTEGER,"
+                 "intent INTEGER,"
+                 "direction INTEGER,"
+                 "requested_volume DOUBLE,"
+                 "executed_volume DOUBLE,"
+                 "remaining_volume DOUBLE,"
+                 "entry_price DOUBLE,"
+                 "stop_loss DOUBLE,"
+                 "take_profit DOUBLE,"
+                 "created_at INTEGER,"
+                 "submission_bound_at INTEGER,"
+                 "submitted_at INTEGER,"
+                 "broker_response_at INTEGER,"
+                 "observed_at INTEGER,"
+                 "resolved_at INTEGER,"
+                 "last_retcode INTEGER,"
+                 "last_retcode_desc TEXT,"
+                 "broker_order_ticket INTEGER,"
+                 "broker_deal_ticket INTEGER,"
+                 "broker_position_ticket INTEGER,"
+                 "failure_class TEXT,"
+                 "state INTEGER,"
+                 "submission_allowed INTEGER,"
+                 "last_reason TEXT,"
+                 "schema_version INTEGER"
+                 ");";
+   
+   if(!ExecuteSQL(sql1))
+      return false;
+   
+   string sql2 = "CREATE TABLE IF NOT EXISTS execution_state_history ("
+                 "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                 "attempt_id TEXT,"
+                 "old_state INTEGER,"
+                 "new_state INTEGER,"
+                 "transition_at INTEGER,"
+                 "reason TEXT,"
+                 "retcode INTEGER"
+                 ");";
+   
+   if(!ExecuteSQL(sql2))
+      return false;
+   
+   string sql3 = "CREATE TABLE IF NOT EXISTS execution_schema_meta ("
+                 "key TEXT PRIMARY KEY,"
+                 "value TEXT"
+                 ");";
+   
+   if(!ExecuteSQL(sql3))
+      return false;
+   
+   // Check/set schema version
+   string check_sql = "SELECT value FROM execution_schema_meta WHERE key='schema_version';";
+   int handle = DatabasePrepare(m_db_handle, check_sql);
+   if(handle == INVALID_HANDLE)
+      return false;
+   
+   bool has_version = false;
+   if(DatabaseRead(handle))
+     {
+      string ver = DatabaseColumnString(handle, 0);
+      if(ver == IntegerToString(m_schema_version))
+         has_version = true;
+     }
+   DatabaseFinalize(handle);
+   
+   if(!has_version)
+     {
+      string set_ver = "INSERT OR REPLACE INTO execution_schema_meta (key, value) VALUES ('schema_version', '" + IntegerToString(m_schema_version) + "');";
+      if(!ExecuteSQL(set_ver))
+         return false;
+     }
+   
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Migrate Schema                                                    |
+//+------------------------------------------------------------------+
+bool CExecutionLedger::MigrateSchema()
+  {
+   // For now, just validate schema version
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Generate Attempt ID                                               |
+//+------------------------------------------------------------------+
+string CExecutionLedger::GenerateAttemptId()
+  {
+   datetime now = TimeCurrent();
+   string id = "ATT_" + IntegerToString((long)now) + "_" + IntegerToString(MathRand()) + "_" + IntegerToString(GetTickCount());
+   return id;
+  }
+
+//+------------------------------------------------------------------+
+//| Create Intent                                                     |
+//+------------------------------------------------------------------+
+bool CExecutionLedger::CreateIntent(ExecutionAttemptRecord &record)
+  {
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+      return false;
+   
+   if(record.attempt_id == "")
+      record.attempt_id = GenerateAttemptId();
+   
+   record.created_at = TimeCurrent();
+   record.state = EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED;
+   record.submission_allowed = false;
+   record.executed_volume = 0.0;
+   record.remaining_volume = record.requested_volume;
+   record.schema_version = m_schema_version;
+   
+   if(!DatabaseTransactionBegin(m_db_handle))
+      return false;
+   
+   string sql = "INSERT INTO execution_attempts (attempt_id, setup_id, symbol, magic, intent, direction, "
+                "requested_volume, executed_volume, remaining_volume, entry_price, stop_loss, take_profit, "
+                "created_at, state, submission_allowed, schema_version) VALUES ('" +
+                EscapeSQL(record.attempt_id) + "','" +
+                EscapeSQL(record.setup_id) + "','" +
+                EscapeSQL(record.symbol) + "'," +
+                IntegerToString((long)record.magic) + "," +
+                IntegerToString((int)record.intent) + "," +
+                IntegerToString((int)record.direction) + "," +
+                DoubleToString(record.requested_volume, 8) + "," +
+                DoubleToString(record.executed_volume, 8) + "," +
+                DoubleToString(record.remaining_volume, 8) + "," +
+                DoubleToString(record.entry_price, 8) + "," +
+                DoubleToString(record.stop_loss, 8) + "," +
+                DoubleToString(record.take_profit, 8) + "," +
+                IntegerToString((long)record.created_at) + "," +
+                IntegerToString((int)record.state) + "," +
+                IntegerToString(0) + "," +
+                IntegerToString(record.schema_version) + ");";
+   
+   if(!ExecuteSQL(sql))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   
+   if(!LogStateTransition(record.attempt_id, EXEC_STATE_NONE, EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED, "Intent created"))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   
+   if(!DatabaseTransactionCommit(m_db_handle))
+      return false;
+   
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Mark Submission Bound                                             |
+//+------------------------------------------------------------------+
+bool CExecutionLedger::MarkSubmissionBound(const string attempt_id, const string reason)
+  {
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+      return false;
+   
+   ExecutionAttemptRecord rec;
+   if(!GetAttempt(attempt_id, rec))
+      return false;
+   
+   if(rec.state != EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED)
+      return false;
+   
+   if(!DatabaseTransactionBegin(m_db_handle))
+      return false;
+   
+   datetime now = TimeCurrent();
+   string sql = "UPDATE execution_attempts SET submission_bound_at = " + IntegerToString((long)now) + 
+                ", submission_allowed = 1, last_reason = '" + EscapeSQL(reason) + "' WHERE attempt_id = '" + 
+                EscapeSQL(attempt_id) + "' AND state = " + IntegerToString((int)EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED) + ";";
+   
+   if(!ExecuteSQL(sql))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   
+   if(!LogStateTransition(attempt_id, EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED, EXEC_STATE_SUBMISSION_MAY_HAVE_OCCURRED, reason))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   
+   if(!DatabaseTransactionCommit(m_db_handle))
+      return false;
+   
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Can Submit                                                        |
+//+------------------------------------------------------------------+
+bool CExecutionLedger::CanSubmit(const string attempt_id, string &reason)
+  {
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+     {
+      reason = "Ledger not available";
+      return false;
+     }
+   
+   ExecutionAttemptRecord rec;
+   if(!GetAttempt(attempt_id, rec))
+     {
+      reason = "Attempt not found";
+      return false;
+     }
+   
+   if(rec.state == EXEC_STATE_SUBMISSION_MAY_HAVE_OCCURRED || 
+      rec.state == EXEC_STATE_SUBMITTED ||
+      rec.state == EXEC_STATE_RECONCILIATION_REQUIRED ||
+      rec.state == EXEC_STATE_PARTIAL_FILL)
+     {
+      reason = "Attempt in non-submittable state: " + IntegerToString((int)rec.state);
+      return false;
+     }
+   
+   if(rec.state != EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED)
+     {
+      reason = "Invalid state for submission";
+      return false;
+     }
+   
+   if(!rec.submission_allowed)
+     {
+      reason = "Submission not bound";
+      return false;
+     }
+   
+   reason = "OK";
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Record Submission                                                 |
+//+------------------------------------------------------------------+
+bool CExecutionLedger::RecordSubmission(const string attempt_id)
+  {
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+      return false;
+   
+   ExecutionAttemptRecord rec;
+   if(!GetAttempt(attempt_id, rec))
+      return false;
+   
+   if(rec.state != EXEC_STATE_SUBMISSION_MAY_HAVE_OCCURRED)
+      return false;
+   
+   if(!DatabaseTransactionBegin(m_db_handle))
+      return false;
+   
+   datetime now = TimeCurrent();
+   string sql = "UPDATE execution_attempts SET submitted_at = " + IntegerToString((long)now) + 
+                ", state = " + IntegerToString((int)EXEC_STATE_SUBMITTED) + 
+                " WHERE attempt_id = '" + EscapeSQL(attempt_id) + 
+                "' AND state = " + IntegerToString((int)EXEC_STATE_SUBMISSION_MAY_HAVE_OCCURRED) + ";";
+   
+   if(!ExecuteSQL(sql))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   
+   if(!LogStateTransition(attempt_id, EXEC_STATE_SUBMISSION_MAY_HAVE_OCCURRED, EXEC_STATE_SUBMITTED, "Submitted"))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   
+   if(!DatabaseTransactionCommit(m_db_handle))
+      return false;
+   
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Record Result                                                     |
+//+------------------------------------------------------------------+
+bool CExecutionLedger::RecordResult(const string attempt_id, const ExecutionResult &result, const string reason)
+  {
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+      return false;
+   
+   ExecutionAttemptRecord rec;
+   if(!GetAttempt(attempt_id, rec))
+      return false;
+   
+   if(!DatabaseTransactionBegin(m_db_handle))
+      return false;
+   
+   datetime now = TimeCurrent();
+   ENUM_EXEC_ATTEMPT_STATE new_state = rec.state;
+   
+   if(result.reconciliation_required)
+     {
+      new_state = EXEC_STATE_RECONCILIATION_REQUIRED;
+     }
+   else if(result.partial_fill)
+     {
+      new_state = EXEC_STATE_PARTIAL_FILL;
+     }
+   else if(result.success)
+     {
+      new_state = EXEC_STATE_COMPLETED;
+     }
+   else
+     {
+      if(result.failure_class == "FINAL_FAILURE")
+         new_state = EXEC_STATE_FINAL_FAILURE;
+      else
+         new_state = EXEC_STATE_RECONCILIATION_REQUIRED;
+     }
+   
+   string sql = "UPDATE execution_attempts SET broker_response_at = " + IntegerToString((long)now) + 
+                ", observed_at = " + IntegerToString((long)now) + 
+                ", executed_volume = " + DoubleToString(result.executed_volume, 8) + 
+                ", remaining_volume = " + DoubleToString(MathMax(0.0, rec.requested_volume - result.executed_volume), 8) + 
+                ", last_retcode = " + IntegerToString((long)result.retcode) + 
+                ", last_retcode_desc = '" + EscapeSQL(result.message) + "'" +
+                ", broker_order_ticket = " + IntegerToString((long)result.order_ticket) + 
+                ", broker_deal_ticket = " + IntegerToString((long)result.deal_ticket) + 
+                ", broker_position_ticket = " + IntegerToString((long)result.position_ticket) + 
+                ", failure_class = '" + EscapeSQL(result.failure_class) + "'" +
+                ", state = " + IntegerToString((int)new_state) + 
+                ", last_reason = '" + EscapeSQL(reason) + "'" +
+                " WHERE attempt_id = '" + EscapeSQL(attempt_id) + "';";
+   
+   if(!ExecuteSQL(sql))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   
+   if(!LogStateTransition(attempt_id, rec.state, new_state, reason, result.retcode))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   
+   if(!DatabaseTransactionCommit(m_db_handle))
+      return false;
+   
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Mark Reconciliation Required                                      |
+//+------------------------------------------------------------------+
+bool CExecutionLedger::MarkReconciliationRequired(const string attempt_id, const string reason)
+  {
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+      return false;
+   
+   ExecutionAttemptRecord rec;
+   if(!GetAttempt(attempt_id, rec))
+      return false;
+   
+   if(!DatabaseTransactionBegin(m_db_handle))
+      return false;
+   
+   datetime now = TimeCurrent();
+   string sql = "UPDATE execution_attempts SET state = " + IntegerToString((int)EXEC_STATE_RECONCILIATION_REQUIRED) + 
+                ", observed_at = " + IntegerToString((long)now) + 
+                ", last_reason = '" + EscapeSQL(reason) + "'" +
+                " WHERE attempt_id = '" + EscapeSQL(attempt_id) + "';";
+   
+   if(!ExecuteSQL(sql))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   
+   if(!LogStateTransition(attempt_id, rec.state, EXEC_STATE_RECONCILIATION_REQUIRED, reason))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   
+   if(!DatabaseTransactionCommit(m_db_handle))
+      return false;
+   
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Resolve Attempt                                                   |
+//+------------------------------------------------------------------+
+bool CExecutionLedger::ResolveAttempt(const string attempt_id, ENUM_EXEC_ATTEMPT_STATE final_state, const string reason)
+  {
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+      return false;
+   
+   ExecutionAttemptRecord rec;
+   if(!GetAttempt(attempt_id, rec))
+      return false;
+   
+   if(final_state != EXEC_STATE_COMPLETED && final_state != EXEC_STATE_FINAL_FAILURE && final_state != EXEC_STATE_ABORTED)
+      return false;
+   
+   if(!DatabaseTransactionBegin(m_db_handle))
+      return false;
+   
+   datetime now = TimeCurrent();
+   string sql = "UPDATE execution_attempts SET state = " + IntegerToString((int)final_state) + 
+                ", resolved_at = " + IntegerToString((long)now) + 
+                ", last_reason = '" + EscapeSQL(reason) + "'" +
+                " WHERE attempt_id = '" + EscapeSQL(attempt_id) + "';";
+   
+   if(!ExecuteSQL(sql))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   
+   if(!LogStateTransition(attempt_id, rec.state, final_state, reason))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   
+   if(!DatabaseTransactionCommit(m_db_handle))
+      return false;
+   
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Get Attempt                                                       |
+//+------------------------------------------------------------------+
+bool CExecutionLedger::GetAttempt(const string attempt_id, ExecutionAttemptRecord &record)
+  {
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+      return false;
+   
+   string sql = "SELECT attempt_id, setup_id, symbol, magic, intent, direction, requested_volume, "
+                "executed_volume, remaining_volume, entry_price, stop_loss, take_profit, "
+                "created_at, submission_bound_at, submitted_at, broker_response_at, observed_at, resolved_at, "
+                "last_retcode, last_retcode_desc, broker_order_ticket, broker_deal_ticket, broker_position_ticket, "
+                "failure_class, state, submission_allowed, last_reason, schema_version "
+                "FROM execution_attempts WHERE attempt_id = '" + EscapeSQL(attempt_id) + "';";
+   
+   int handle = DatabasePrepare(m_db_handle, sql);
+   if(handle == INVALID_HANDLE)
+      return false;
+   
+   bool found = false;
+   if(DatabaseRead(handle))
+     {
+      record.attempt_id = DatabaseColumnString(handle, 0);
+      record.setup_id = DatabaseColumnString(handle, 1);
+      record.symbol = DatabaseColumnString(handle, 2);
+      record.magic = (ulong)DatabaseColumnLong(handle, 3);
+      record.intent = (ENUM_ORDER_INTENT)DatabaseColumnLong(handle, 4);
+      record.direction = (ENUM_SIGNAL_DIRECTION)DatabaseColumnLong(handle, 5);
+      record.requested_volume = DatabaseColumnDouble(handle, 6);
+      record.executed_volume = DatabaseColumnDouble(handle, 7);
+      record.remaining_volume = DatabaseColumnDouble(handle, 8);
+      record.entry_price = DatabaseColumnDouble(handle, 9);
+      record.stop_loss = DatabaseColumnDouble(handle, 10);
+      record.take_profit = DatabaseColumnDouble(handle, 11);
+      record.created_at = (datetime)DatabaseColumnLong(handle, 12);
+      record.submission_bound_at = (datetime)DatabaseColumnLong(handle, 13);
+      record.submitted_at = (datetime)DatabaseColumnLong(handle, 14);
+      record.broker_response_at = (datetime)DatabaseColumnLong(handle, 15);
+      record.observed_at = (datetime)DatabaseColumnLong(handle, 16);
+      record.resolved_at = (datetime)DatabaseColumnLong(handle, 17);
+      record.last_retcode = (uint)DatabaseColumnLong(handle, 18);
+      record.last_retcode_desc = DatabaseColumnString(handle, 19);
+      record.broker_order_ticket = (ulong)DatabaseColumnLong(handle, 20);
+      record.broker_deal_ticket = (ulong)DatabaseColumnLong(handle, 21);
+      record.broker_position_ticket = (ulong)DatabaseColumnLong(handle, 22);
+      record.failure_class = DatabaseColumnString(handle, 23);
+      record.state = (ENUM_EXEC_ATTEMPT_STATE)DatabaseColumnLong(handle, 24);
+      record.submission_allowed = (DatabaseColumnLong(handle, 25) == 1);
+      record.last_reason = DatabaseColumnString(handle, 26);
+      record.schema_version = (int)DatabaseColumnLong(handle, 27);
+      found = true;
+     }
+   DatabaseFinalize(handle);
+   return found;
+  }
+
+//+------------------------------------------------------------------+
+//| Recover Unresolved                                                |
+//+------------------------------------------------------------------+
+int CExecutionLedger::RecoverUnresolved(int &out_count)
+  {
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+     {
+      out_count = 0;
+      return 0;
+     }
+   
+   string sql = "SELECT COUNT(*) FROM execution_attempts WHERE state IN (" + 
+                IntegerToString((int)EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED) + "," +
+                IntegerToString((int)EXEC_STATE_SUBMISSION_MAY_HAVE_OCCURRED) + "," +
+                IntegerToString((int)EXEC_STATE_SUBMITTED) + "," +
+                IntegerToString((int)EXEC_STATE_PARTIAL_FILL) + "," +
+                IntegerToString((int)EXEC_STATE_RECONCILIATION_REQUIRED) + ");";
+   
+   int handle = DatabasePrepare(m_db_handle, sql);
+   if(handle == INVALID_HANDLE)
+     {
+      out_count = 0;
+      return 0;
+     }
+   
+   int count = 0;
+   if(DatabaseRead(handle))
+      count = (int)DatabaseColumnLong(handle, 0);
+   DatabaseFinalize(handle);
+   
+   out_count = count;
+   return count;
+  }
+
+//+------------------------------------------------------------------+
+//| Has Blocking Unresolved                                           |
+//+------------------------------------------------------------------+
+bool CExecutionLedger::HasBlockingUnresolved(string &blocking_reason)
+  {
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+     {
+      blocking_reason = "Ledger not available";
+      return true;
+     }
+   
+   string sql = "SELECT COUNT(*) FROM execution_attempts WHERE state IN (" + 
+                IntegerToString((int)EXEC_STATE_SUBMISSION_MAY_HAVE_OCCURRED) + "," +
+                IntegerToString((int)EXEC_STATE_SUBMITTED) + "," +
+                IntegerToString((int)EXEC_STATE_RECONCILIATION_REQUIRED) + "," +
+                IntegerToString((int)EXEC_STATE_PARTIAL_FILL) + ");";
+   
+   int handle = DatabasePrepare(m_db_handle, sql);
+   if(handle == INVALID_HANDLE)
+     {
+      blocking_reason = "Ledger query failed";
+      return true;
+     }
+   
+   int count = 0;
+   if(DatabaseRead(handle))
+      count = (int)DatabaseColumnLong(handle, 0);
+   DatabaseFinalize(handle);
+   
+   if(count > 0)
+     {
+      blocking_reason = "Unresolved execution attempts exist";
+      return true;
+     }
+   
+   blocking_reason = "";
+   return false;
+  }
+
+//+------------------------------------------------------------------+
+//| Has Unresolved For Symbol                                         |
+//+------------------------------------------------------------------+
+bool CExecutionLedger::HasUnresolvedForSymbol(const string symbol, bool include_ambiguous)
+  {
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+      return true; // fail closed
+   
+   string sql = "SELECT COUNT(*) FROM execution_attempts WHERE symbol = '" + EscapeSQL(symbol) + 
+                "' AND state IN (" + 
+                IntegerToString((int)EXEC_STATE_SUBMISSION_MAY_HAVE_OCCURRED) + "," +
+                IntegerToString((int)EXEC_STATE_SUBMITTED);
+   
+   if(include_ambiguous)
+      sql += "," + IntegerToString((int)EXEC_STATE_RECONCILIATION_REQUIRED) + "," + IntegerToString((int)EXEC_STATE_PARTIAL_FILL);
+   
+   sql += ");";
+   
+   int handle = DatabasePrepare(m_db_handle, sql);
+   if(handle == INVALID_HANDLE)
+      return true;
+   
+   int count = 0;
+   if(DatabaseRead(handle))
+      count = (int)DatabaseColumnLong(handle, 0);
+   DatabaseFinalize(handle);
+   
+   return count > 0;
+  }
+
+//+------------------------------------------------------------------+
+//| Log State Transition                                              |
+//+------------------------------------------------------------------+
+bool CExecutionLedger::LogStateTransition(const string attempt_id, ENUM_EXEC_ATTEMPT_STATE old_state, 
+                                         ENUM_EXEC_ATTEMPT_STATE new_state, const string reason, 
+                                         uint retcode)
+  {
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+      return false;
+   
+   datetime now = TimeCurrent();
+   string sql = "INSERT INTO execution_state_history (attempt_id, old_state, new_state, transition_at, reason, retcode) VALUES ('" +
+                EscapeSQL(attempt_id) + "'," +
+                IntegerToString((int)old_state) + "," +
+                IntegerToString((int)new_state) + "," +
+                IntegerToString((long)now) + ",'" +
+                EscapeSQL(reason) + "'," +
+                IntegerToString((long)retcode) + ");";
+   
+   return ExecuteSQL(sql);
+  }
+
+#endif

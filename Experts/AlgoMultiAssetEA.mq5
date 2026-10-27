@@ -20,6 +20,7 @@
 #include "../Include/AlgoSystem/RiskEngine.mqh"
 #include "../Include/AlgoSystem/PortfolioRisk.mqh"
 #include "../Include/AlgoSystem/TradeExecutor.mqh"
+#include "../Include/AlgoSystem/ExecutionLedger.mqh"
 #include "../Include/AlgoSystem/PositionManager.mqh"
 #include "../Include/AlgoSystem/Logger.mqh"
 #include "../Include/AlgoSystem/Statistics.mqh"
@@ -637,8 +638,8 @@ CSymbolRuntime g_runtime[3];
 
 CAlgoStateManager   g_state;
 CAlgoPortfolioRisk  g_portfolio_risk;
-CRiskEngine         g_risk_engine;
 CTradeExecutor      g_executor;
+CExecutionLedger    g_execution_ledger;
 CPositionManager    g_position_manager;
 CAlgoLogger         g_logger;
 CHybridDashboard    g_dashboard;
@@ -966,44 +967,131 @@ if(struct_res != EVIDENCE_SUFFICIENT_NO_INVALIDATION)
       return;
      }
 
-   ExecutionRequest request;
-   request.intent =
-      normalized_plan.direction==SIGNAL_LONG ?
-      ORDER_INTENT_OPEN_LONG :
-      ORDER_INTENT_OPEN_SHORT;
-   request.symbol=runtime.symbol;
-   request.direction=normalized_plan.direction;
-   request.strategy=STRATEGY_TREND_PULLBACK;
-   request.volume=risk.calculated_volume;
-   request.price=normalized_plan.entry;
-   request.stop_loss=normalized_plan.stop;
-   request.take_profit=normalized_plan.target;
-   request.position_ticket=0;
-   request.magic=MagicForStyle(runtime.style);
-   request.comment="AlgoMultiAssetEA_Hybrid";
-   request.signal_id=normalized_plan.setup_id;
+    ExecutionRequest request;
+    request.intent =
+       normalized_plan.direction==SIGNAL_LONG ?
+       ORDER_INTENT_OPEN_LONG :
+       ORDER_INTENT_OPEN_SHORT;
+    request.symbol=runtime.symbol;
+    request.direction=normalized_plan.direction;
+    request.strategy=STRATEGY_TREND_PULLBACK;
+    request.volume=risk.calculated_volume;
+    request.price=normalized_plan.entry;
+    request.stop_loss=normalized_plan.stop;
+    request.take_profit=normalized_plan.target;
+    request.position_ticket=0;
+    request.magic=MagicForStyle(runtime.style);
+    request.comment="AlgoMultiAssetEA_Hybrid";
+    request.signal_id=normalized_plan.setup_id;
+    request.attempt_id = normalized_plan.setup_id + "_" + IntegerToString(TimeCurrent()) + "_" + IntegerToString((int)MathRand());
+    
+    // Check ledger for blocking unresolved attempts
+    string ledger_block = "";
+    if(!g_execution_ledger.IsAvailable() || g_execution_ledger.HasBlockingUnresolved(ledger_block))
+      {
+       g_logger.Event(
+          LOG_WARNING, "EXECUTION", "EXECUTION_BLOCKED_LEDGER",
+          request.symbol, "", "",
+          request.signal_id,
+          "REJECT", "LEDGER_BLOCK", ledger_block);
+       runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+       return;
+      }
+    
+    if(g_execution_ledger.HasUnresolvedForSymbol(request.symbol, true))
+      {
+       g_logger.Event(
+          LOG_WARNING, "EXECUTION", "EXECUTION_BLOCKED_UNRESOLVED",
+          request.symbol, "", "",
+          request.signal_id,
+          "REJECT", "UNRESOLVED_ATTEMPT", "Unresolved attempt exists for symbol");
+       runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+       return;
+      }
+    
+    // Create intent in ledger
+    ExecutionAttemptRecord attempt_rec;
+    attempt_rec.attempt_id = request.attempt_id;
+    attempt_rec.setup_id = normalized_plan.setup_id;
+    attempt_rec.symbol = request.symbol;
+    attempt_rec.magic = request.magic;
+    attempt_rec.intent = request.intent;
+    attempt_rec.direction = request.direction;
+    attempt_rec.requested_volume = request.volume;
+    attempt_rec.entry_price = request.price;
+    attempt_rec.stop_loss = request.stop_loss;
+    attempt_rec.take_profit = request.take_profit;
+    
+    if(!g_execution_ledger.CreateIntent(attempt_rec))
+      {
+       g_logger.Event(
+          LOG_ERROR, "EXECUTION", "INTENT_CREATE_FAILED",
+          request.symbol, "", "",
+          request.signal_id,
+          "FAIL", "LEDGER_ERROR", "Failed to create intent in ledger");
+       runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+       return;
+      }
+    
+    // Mark submission bound (after all validations passed)
+    if(!g_execution_ledger.MarkSubmissionBound(request.attempt_id, "Pre-submit validation passed"))
+      {
+       g_logger.Event(
+          LOG_ERROR, "EXECUTION", "SUBMISSION_BOUND_FAILED",
+          request.symbol, "", "",
+          request.signal_id,
+          "FAIL", "LEDGER_ERROR", "Failed to mark submission bound");
+       runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+       return;
+      }
+    
+    string submit_reason = "";
+    if(!g_execution_ledger.CanSubmit(request.attempt_id, submit_reason))
+      {
+       g_logger.Event(
+          LOG_ERROR, "EXECUTION", "SUBMIT_NOT_ALLOWED",
+          request.symbol, "", "",
+          request.signal_id,
+          "FAIL", "LEDGER_ERROR", submit_reason);
+       runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+       return;
+      }
 
-   g_logger.Event(
-      LOG_INFO, "EXECUTION", "EXECUTION_SUBMITTED",
-      request.symbol, "", "",
-      request.signal_id,
-      "SUBMIT", "EXECUTION_READY", "Order execution request ready",
-      0, 0,
-      request.volume,
-      request.stop_loss,
-      request.take_profit);
+    g_logger.Event(
+       LOG_INFO, "EXECUTION", "EXECUTION_SUBMITTED",
+       request.symbol, "", "",
+       request.signal_id,
+       "SUBMIT", "EXECUTION_READY", "Order execution request ready",
+       0, 0,
+       request.volume,
+       request.stop_loss,
+       request.take_profit);
 
-   ExecutionResult result;
-   bool execution_ok = g_executor.Execute(request, result);
-    g_logger.Trade(result);
+    // Record submission in ledger
+    g_execution_ledger.RecordSubmission(request.attempt_id);
+
+    ExecutionResult result;
+    bool execution_ok = g_executor.Execute(request, result);
+     g_logger.Trade(result);
+
+    // Record result in ledger
+    g_execution_ledger.RecordResult(request.attempt_id, result, "Executor result");
 
 // An executor call consumes this setup even when it fails. Automatic
 // retries need an explicit retry policy; do not resubmit the same setup
 // on the next entry bar after an ambiguous broker/transport result.
    runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
 
-   if(!execution_ok || !result.success)
-       return;
+    if(!execution_ok || !result.success)
+        {
+         // If result is ambiguous, ensure reconciliation required
+         if(result.reconciliation_required || result.retcode == TRADE_RETCODE_TIMEOUT || 
+            result.retcode == TRADE_RETCODE_CONNECTION)
+            {
+             g_execution_ledger.MarkReconciliationRequired(request.attempt_id, "Ambiguous result after submit");
+            }
+         return;
+        }
     if(!g_state.UpdateAfterTrade(result))
        g_logger.Event(
           LOG_ERROR, "STATE", "STATE_RECONSTRUCT_FAILED",
@@ -1513,14 +1601,35 @@ ENUM_SYSTEM_INIT_STATUS InitializeSystemWhenReady()
 
    g_executor.SetDeviationPoints(InpDeviationPoints);
 
-   if(!g_executor.Initialize())
-     {
-      g_initialization_started=false;
-      LogInitFailure("TradeExecutor.Initialize");
-      return SYSTEM_INIT_FAILED;
-     }
+    if(!g_executor.Initialize())
+      {
+       g_initialization_started=false;
+       LogInitFailure("TradeExecutor.Initialize");
+       return SYSTEM_INIT_FAILED;
+      }
 
-   g_position_manager.SetExecutor(&g_executor);
+    if(!g_execution_ledger.Initialize("AlgoMultiAssetEA_ExecutionLedger.sqlite"))
+      {
+       // Fail closed for new entries - ledger required for attempt tracking
+       g_initialization_started=false;
+       LogInitFailure("ExecutionLedger.Initialize");
+       return SYSTEM_INIT_FAILED;
+      }
+    
+    int unresolved_count = 0;
+    int unresolved = g_execution_ledger.RecoverUnresolved(unresolved_count);
+    if(unresolved > 0)
+      {
+       string block_reason = "";
+       if(g_execution_ledger.HasBlockingUnresolved(block_reason))
+         {
+          g_logger.Event(
+             LOG_WARNING, "SYSTEM", "UNRESOLVED_ATTEMPTS",
+             _Symbol, "", "", "",
+             "WARNING", "LEDGER_RECONCILE",
+             block_reason + " count=" + IntegerToString(unresolved));
+         }
+      }
 
    g_position_manager.SetBreakEven(
       InpBreakEven,
