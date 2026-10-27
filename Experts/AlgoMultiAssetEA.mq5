@@ -1067,8 +1067,17 @@ if(struct_res != EVIDENCE_SUFFICIENT_NO_INVALIDATION)
        request.stop_loss,
        request.take_profit);
 
-    // Record submission in ledger
-    g_execution_ledger.RecordSubmission(request.attempt_id);
+    // Record submission attempt in ledger before API call
+    if(!g_execution_ledger.RecordSubmission(request.attempt_id))
+      {
+       g_logger.Event(
+          LOG_ERROR, "EXECUTION", "SUBMIT_RECORD_FAILED",
+          request.symbol, "", "",
+          request.signal_id,
+          "FAIL", "LEDGER_ERROR", "Failed to record submission attempt");
+       runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+       return;
+      }
 
     ExecutionResult result;
     bool execution_ok = g_executor.Execute(request, result);
@@ -1629,6 +1638,8 @@ ENUM_SYSTEM_INIT_STATUS InitializeSystemWhenReady()
              "WARNING", "LEDGER_RECONCILE",
              block_reason + " count=" + IntegerToString(unresolved));
          }
+       // Attempt reconciliation for unresolved
+       g_execution_ledger.ReconcileUnresolved(20);
       }
 
    g_position_manager.SetBreakEven(
@@ -1838,9 +1849,17 @@ void OnTimer()
         }
      }
 
-   InitializePendingRuntimes();
+    InitializePendingRuntimes();
 
-   bool risk_state_ready=RefreshTradingState();
+    // Periodic reconciliation for unresolved attempts
+    static datetime last_reconcile = 0;
+    if(TimeCurrent() - last_reconcile > 60)
+      {
+       g_execution_ledger.ReconcileUnresolved(5);
+       last_reconcile = TimeCurrent();
+      }
+
+    bool risk_state_ready=RefreshTradingState();
 
    UpdateDashboardForChart();
 

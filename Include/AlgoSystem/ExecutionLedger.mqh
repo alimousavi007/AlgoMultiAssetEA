@@ -95,11 +95,9 @@ public:
    bool               MarkReconciliationRequired(const string attempt_id, const string reason);
    bool               ResolveAttempt(const string attempt_id, ENUM_EXEC_ATTEMPT_STATE final_state, const string reason);
    
-   // Recovery and reconciliation
-   int                RecoverUnresolved(int &out_count);
-   bool               GetAttempt(const string attempt_id, ExecutionAttemptRecord &record);
-   bool               HasUnresolvedForSymbol(const string symbol, bool include_ambiguous=true);
-   bool               HasBlockingUnresolved(string &blocking_reason);
+   // Broker reconciliation
+   bool               ReconcileAttempt(const string attempt_id);
+   bool               ReconcileUnresolved(int max_attempts=10);
    
    // State history
    bool               LogStateTransition(const string attempt_id, ENUM_EXEC_ATTEMPT_STATE old_state, 
@@ -480,7 +478,6 @@ bool CExecutionLedger::RecordSubmission(const string attempt_id)
    
    datetime now = TimeCurrent();
    string sql = "UPDATE execution_attempts SET submitted_at = " + IntegerToString((long)now) + 
-                ", state = " + IntegerToString((int)EXEC_STATE_SUBMITTED) + 
                 " WHERE attempt_id = '" + EscapeSQL(attempt_id) + 
                 "' AND state = " + IntegerToString((int)EXEC_STATE_SUBMISSION_MAY_HAVE_OCCURRED) + ";";
    
@@ -490,7 +487,17 @@ bool CExecutionLedger::RecordSubmission(const string attempt_id)
       return false;
      }
    
-   if(!LogStateTransition(attempt_id, EXEC_STATE_SUBMISSION_MAY_HAVE_OCCURRED, EXEC_STATE_SUBMITTED, "Submitted"))
+   if(!LogStateTransition(attempt_id, EXEC_STATE_SUBMISSION_MAY_HAVE_OCCURRED, EXEC_STATE_SUBMITTED, "Submission attempted"))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   
+   sql = "UPDATE execution_attempts SET state = " + IntegerToString((int)EXEC_STATE_SUBMITTED) + 
+         " WHERE attempt_id = '" + EscapeSQL(attempt_id) + 
+         "' AND state = " + IntegerToString((int)EXEC_STATE_SUBMISSION_MAY_HAVE_OCCURRED) + ";";
+   
+   if(!ExecuteSQL(sql))
      {
       DatabaseTransactionRollback(m_db_handle);
       return false;
@@ -744,10 +751,152 @@ int CExecutionLedger::RecoverUnresolved(int &out_count)
   }
 
 //+------------------------------------------------------------------+
-//| Has Blocking Unresolved                                           |
+//| Reconcile Attempt                                                 |
 //+------------------------------------------------------------------+
-bool CExecutionLedger::HasBlockingUnresolved(string &blocking_reason)
+bool CExecutionLedger::ReconcileAttempt(const string attempt_id)
   {
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+      return false;
+   
+   ExecutionAttemptRecord rec;
+   if(!GetAttempt(attempt_id, rec))
+      return false;
+   
+   // Only reconcile in specific states
+   if(rec.state != EXEC_STATE_SUBMISSION_MAY_HAVE_OCCURRED && 
+      rec.state != EXEC_STATE_SUBMITTED && 
+      rec.state != EXEC_STATE_RECONCILIATION_REQUIRED &&
+      rec.state != EXEC_STATE_PARTIAL_FILL)
+      return false;
+   
+   // Try to find matching orders/deals
+   // Search in history
+   datetime from_time = rec.created_at - 3600;
+   if(from_time < 0) from_time = 0;
+   datetime to_time = TimeCurrent() + 3600;
+   
+   if(!HistorySelect(from_time, to_time))
+      return false;
+   
+   // Try to match by magic and symbol
+   // First check deals
+   int deals_total = HistoryDealsTotal();
+   bool found_match = false;
+   ulong matched_deal = 0;
+   ulong matched_order = 0;
+   double matched_volume = 0;
+   
+   for(int i = 0; i < deals_total && !found_match; i++)
+     {
+      ulong deal_ticket = HistoryDealGetTicket(i);
+      if(deal_ticket == 0) continue;
+      
+      long deal_magic = 0;
+      if(!HistoryDealGetInteger(deal_ticket, DEAL_MAGIC, deal_magic))
+         continue;
+      if((ulong)deal_magic != rec.magic)
+         continue;
+      
+      string deal_symbol = HistoryDealGetString(deal_ticket, DEAL_SYMBOL);
+      if(deal_symbol != rec.symbol)
+         continue;
+      
+      // Check time proximity (within reasonable window)
+      datetime deal_time = (datetime)HistoryDealGetInteger(deal_ticket, DEAL_TIME);
+      if(deal_time < rec.created_at - 300 || deal_time > TimeCurrent() + 300)
+         continue;
+      
+      // Found potential match
+      matched_deal = deal_ticket;
+      matched_volume = HistoryDealGetDouble(deal_ticket, DEAL_VOLUME);
+      matched_order = HistoryDealGetInteger(deal_ticket, DEAL_ORDER);
+      found_match = true;
+     }
+   
+   if(!found_match)
+     {
+      // No evidence found - do not auto-resolve to failure
+      if(rec.state == EXEC_STATE_RECONCILIATION_REQUIRED)
+         return false;
+      // Mark as reconciliation required if we don't have evidence
+      if(rec.state == EXEC_STATE_SUBMITTED)
+         {
+          MarkReconciliationRequired(attempt_id, "No broker evidence found during reconciliation");
+         }
+      return false;
+     }
+   
+   // Found match
+   if(!DatabaseTransactionBegin(m_db_handle))
+      return false;
+   
+   datetime now = TimeCurrent();
+   ENUM_EXEC_ATTEMPT_STATE new_state = EXEC_STATE_COMPLETED;
+   if(matched_volume < rec.requested_volume - 0.00001)
+      new_state = EXEC_STATE_PARTIAL_FILL;
+   
+   string sql = "UPDATE execution_attempts SET broker_deal_ticket = " + IntegerToString((long)matched_deal) + 
+                ", broker_order_ticket = " + IntegerToString((long)matched_order) + 
+                ", executed_volume = " + DoubleToString(matched_volume, 8) + 
+                ", remaining_volume = " + DoubleToString(MathMax(0.0, rec.requested_volume - matched_volume), 8) + 
+                ", broker_response_at = " + IntegerToString((long)now) + 
+                ", observed_at = " + IntegerToString((long)now) + 
+                ", resolved_at = " + IntegerToString((long)now) + 
+                ", state = " + IntegerToString((int)new_state) + 
+                ", last_reason = 'Reconciled with broker history' " +
+                " WHERE attempt_id = '" + EscapeSQL(attempt_id) + "';";
+   
+   if(!ExecuteSQL(sql))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   
+   if(!LogStateTransition(attempt_id, rec.state, new_state, "Broker reconciliation matched"))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   
+   if(!DatabaseTransactionCommit(m_db_handle))
+      return false;
+   
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Reconcile Unresolved                                              |
+//+------------------------------------------------------------------+
+bool CExecutionLedger::ReconcileUnresolved(int max_attempts)
+  {
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+      return false;
+   
+   string sql = "SELECT attempt_id FROM execution_attempts WHERE state IN (" + 
+                IntegerToString((int)EXEC_STATE_SUBMITTED) + "," +
+                IntegerToString((int)EXEC_STATE_RECONCILIATION_REQUIRED) + "," +
+                IntegerToString((int)EXEC_STATE_PARTIAL_FILL) + 
+                ") ORDER BY created_at ASC LIMIT " + IntegerToString(max_attempts) + ";";
+   
+   int handle = DatabasePrepare(m_db_handle, sql);
+   if(handle == INVALID_HANDLE)
+      return false;
+   
+   string attempts[];
+   int count = 0;
+   while(DatabaseRead(handle))
+     {
+      ArrayResize(attempts, count + 1);
+      attempts[count] = DatabaseColumnString(handle, 0);
+      count++;
+     }
+   DatabaseFinalize(handle);
+   
+   for(int i = 0; i < count; i++)
+      ReconcileAttempt(attempts[i]);
+   
+   return true;
+  }
    if(!m_db_available || m_db_handle == INVALID_HANDLE)
      {
       blocking_reason = "Ledger not available";
