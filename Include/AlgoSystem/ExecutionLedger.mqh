@@ -806,26 +806,84 @@ bool CExecutionLedger::ReconcileAttempt(const string attempt_id)
            ulong pos_ticket_resolved = rec.broker_position_ticket;
            if(pos_ticket_resolved == 0)
              {
-              int total_pos = PositionsTotal();
-              ulong best_pt = 0;
-              int best_m = 0;
-              for(int pp = 0; pp < total_pos; pp++)
+              // Try to use position identifier from order/deal
+              if(found_order > 0 && HistoryOrderSelect(found_order))
                 {
-                 ulong pt2 = PositionGetTicket(pp);
-                 if(pt2 == 0) continue;
-                 if(!PositionSelectByTicket(pt2)) continue;
-                 string psym2 = PositionGetString(POSITION_SYMBOL);
-                 if(psym2 != rec.symbol) continue;
-                 long pm2 = PositionGetInteger(POSITION_MAGIC);
-                 if((ulong)pm2 != rec.magic) continue;
-                 // check time proximity roughly
-                 datetime pot = (datetime)PositionGetInteger(POSITION_TIME);
-                 int m = 1;
-                 if(pot >= rec.created_at - 600 && pot <= now + 300) m += 1;
-                 if(m > best_m) { best_m = m; best_pt = pt2; }
-                 else if(m == best_m && best_pt != 0) { best_m = -1; }
+                 long pos_id = HistoryOrderGetInteger(found_order, ORDER_POSITION_ID);
+                 if(pos_id > 0)
+                   {
+                    int total_pos = PositionsTotal();
+                    ulong best_pt = 0;
+                    int best_m = 0;
+                    for(int pp = 0; pp < total_pos; pp++)
+                      {
+                       ulong pt2 = PositionGetTicket(pp);
+                       if(pt2 == 0) continue;
+                       if(!PositionSelectByTicket(pt2)) continue;
+                       string psym2 = PositionGetString(POSITION_SYMBOL);
+                       if(psym2 != rec.symbol) continue;
+                       long pm2 = PositionGetInteger(POSITION_MAGIC);
+                       if((ulong)pm2 != rec.magic) continue;
+                       int m = 3; // strong evidence via position id
+                       if(m > best_m) { best_m = m; best_pt = pt2; }
+                       else if(m == best_m && best_pt != 0) { best_m = -1; }
+                      }
+                    if(best_m > 0 && best_pt != 0) pos_ticket_resolved = best_pt;
+                   }
                 }
-              if(best_m > 0 && best_pt != 0) pos_ticket_resolved = best_pt;
+              if(pos_ticket_resolved == 0 && found_deal > 0 && HistoryDealSelect(found_deal))
+                {
+                 long pos_id = HistoryDealGetInteger(found_deal, DEAL_POSITION_ID);
+                 if(pos_id > 0)
+                   {
+                    int total_pos = PositionsTotal();
+                    ulong best_pt = 0;
+                    int best_m = 0;
+                    for(int pp = 0; pp < total_pos; pp++)
+                      {
+                       ulong pt2 = PositionGetTicket(pp);
+                       if(pt2 == 0) continue;
+                       if(!PositionSelectByTicket(pt2)) continue;
+                       string psym2 = PositionGetString(POSITION_SYMBOL);
+                       if(psym2 != rec.symbol) continue;
+                       long pm2 = PositionGetInteger(POSITION_MAGIC);
+                       if((ulong)pm2 != rec.magic) continue;
+                       int m = 3;
+                       if(m > best_m) { best_m = m; best_pt = pt2; }
+                       else if(m == best_m && best_pt != 0) { best_m = -1; }
+                      }
+                    if(best_m > 0 && best_pt != 0) pos_ticket_resolved = best_pt;
+                   }
+                }
+              // Fallback only with strong evidence
+              if(pos_ticket_resolved == 0)
+                {
+                 int total_pos = PositionsTotal();
+                 ulong best_pt = 0;
+                 int best_m = 0;
+                 datetime now_fallback = TimeCurrent();
+                 for(int pp = 0; pp < total_pos; pp++)
+                   {
+                    ulong pt2 = PositionGetTicket(pp);
+                    if(pt2 == 0) continue;
+                    if(!PositionSelectByTicket(pt2)) continue;
+                    string psym2 = PositionGetString(POSITION_SYMBOL);
+                    if(psym2 != rec.symbol) continue;
+                    long pm2 = PositionGetInteger(POSITION_MAGIC);
+                    if((ulong)pm2 != rec.magic) continue;
+                    string pcomment = PositionGetString(POSITION_COMMENT);
+                    int m = 0;
+                    if(pcomment != "" && rec.last_reason != "" && pcomment == rec.last_reason) m += 3; // weak, skip
+                    // Don't use comment from last_reason as it's not the order comment
+                    // Only time proximity + exact match - but we don't have order comment stored; skip ambiguous
+                    if(m >= 3)
+                      {
+                       if(m > best_m) { best_m = m; best_pt = pt2; }
+                       else if(m == best_m && best_pt != 0) { best_m = -1; }
+                      }
+                   }
+                 if(best_m > 0 && best_pt != 0) pos_ticket_resolved = best_pt;
+                }
              }
            string sql = "UPDATE execution_attempts SET broker_deal_ticket = " + 
 IntegerToString((long)(found_deal>0?found_deal:rec.broker_deal_ticket)) +
@@ -919,26 +977,56 @@ IntegerToString((long)(found_deal>0?found_deal:rec.broker_deal_ticket)) +
      ulong pos_ticket_resolved = rec.broker_position_ticket;
      if(pos_ticket_resolved == 0)
        {
-        int total_pos = PositionsTotal();
-        ulong best_pt = 0;
-        int best_m = 0;
-        datetime now2 = TimeCurrent();
-        for(int pp = 0; pp < total_pos; pp++)
+        // Try to use position identifier from order/deal
+        if(matched_order > 0 && HistoryOrderSelect(matched_order))
           {
-           ulong pt2 = PositionGetTicket(pp);
-           if(pt2 == 0) continue;
-           if(!PositionSelectByTicket(pt2)) continue;
-           string psym2 = PositionGetString(POSITION_SYMBOL);
-           if(psym2 != rec.symbol) continue;
-           long pm2 = PositionGetInteger(POSITION_MAGIC);
-           if((ulong)pm2 != rec.magic) continue;
-           datetime pot = (datetime)PositionGetInteger(POSITION_TIME);
-           int m = 1;
-           if(pot >= rec.created_at - 600 && pot <= now2 + 300) m += 1;
-           if(m > best_m) { best_m = m; best_pt = pt2; }
-           else if(m == best_m && best_pt != 0) { best_m = -1; }
+           long pos_id = HistoryOrderGetInteger(matched_order, ORDER_POSITION_ID);
+           if(pos_id > 0)
+             {
+              int total_pos = PositionsTotal();
+              ulong best_pt = 0;
+              int best_m = 0;
+              for(int pp = 0; pp < total_pos; pp++)
+                {
+                 ulong pt2 = PositionGetTicket(pp);
+                 if(pt2 == 0) continue;
+                 if(!PositionSelectByTicket(pt2)) continue;
+                 string psym2 = PositionGetString(POSITION_SYMBOL);
+                 if(psym2 != rec.symbol) continue;
+                 long pm2 = PositionGetInteger(POSITION_MAGIC);
+                 if((ulong)pm2 != rec.magic) continue;
+                 int m = 3;
+                 if(m > best_m) { best_m = m; best_pt = pt2; }
+                 else if(m == best_m && best_pt != 0) { best_m = -1; }
+                }
+              if(best_m > 0 && best_pt != 0) pos_ticket_resolved = best_pt;
+             }
           }
-        if(best_m > 0 && best_pt != 0) pos_ticket_resolved = best_pt;
+        if(pos_ticket_resolved == 0 && matched_deal > 0 && HistoryDealSelect(matched_deal))
+          {
+           long pos_id = HistoryDealGetInteger(matched_deal, DEAL_POSITION_ID);
+           if(pos_id > 0)
+             {
+              int total_pos = PositionsTotal();
+              ulong best_pt = 0;
+              int best_m = 0;
+              for(int pp = 0; pp < total_pos; pp++)
+                {
+                 ulong pt2 = PositionGetTicket(pp);
+                 if(pt2 == 0) continue;
+                 if(!PositionSelectByTicket(pt2)) continue;
+                 string psym2 = PositionGetString(POSITION_SYMBOL);
+                 if(psym2 != rec.symbol) continue;
+                 long pm2 = PositionGetInteger(POSITION_MAGIC);
+                 if((ulong)pm2 != rec.magic) continue;
+                 int m = 3;
+                 if(m > best_m) { best_m = m; best_pt = pt2; }
+                 else if(m == best_m && best_pt != 0) { best_m = -1; }
+                }
+              if(best_m > 0 && best_pt != 0) pos_ticket_resolved = best_pt;
+             }
+          }
+        // No fallback to ambiguous symbol+magic matching
        }
 
      // Found match

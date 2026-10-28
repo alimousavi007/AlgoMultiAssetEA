@@ -1664,13 +1664,27 @@ public:
            if(m_structure_tf != PERIOD_CURRENT && plan.liquidity_used.timeframe != m_structure_tf)
               return EVIDENCE_SYMBOL_OR_TIMEFRAME_MISMATCH;
           }
-       MqlTick tick_check;
-       if(!SymbolInfoTick(m_symbol, tick_check))
-          return EVIDENCE_TICK_UNAVAILABLE;
-       if(tick_check.bid <= 0.0 && tick_check.ask <= 0.0)
-          return EVIDENCE_TICK_UNAVAILABLE;
-       // Tick freshness: time_msc preferred if available, fallback to time; if unprovenable -> stale/unverified
-       if(plan.direction == SIGNAL_LONG)
+         MqlTick tick_check;
+         if(!SymbolInfoTick(m_symbol, tick_check))
+            return EVIDENCE_TICK_UNAVAILABLE;
+         if(tick_check.bid <= 0.0 && tick_check.ask <= 0.0)
+            return EVIDENCE_TICK_UNAVAILABLE;
+         // Tick freshness: time_msc preferred if available, fallback to time; if unprovenable -> stale/unverified
+         datetime tick_time_src = 0;
+         if(tick_check.time_msc > 0)
+           {
+            tick_time_src = (datetime)(tick_check.time_msc / 1000);
+            // if time_msc indicates different second, that's fine; we just need provenance
+           }
+         else if(tick_check.time > 0)
+           {
+            tick_time_src = tick_check.time;
+           }
+         if(tick_time_src <= 0)
+           {
+            // unprovenable timestamp -> treat as stale/unverified per approved policy
+            return EVIDENCE_TICK_STALE_OR_UNVERIFIED;
+           }
          {
           if(tick_check.bid <= 0.0)
              return EVIDENCE_TICK_UNAVAILABLE;

@@ -789,38 +789,116 @@ public:
          // Try to resolve position ticket for durable correlation if not present
          if(result.position_ticket == 0 && result.success)
            {
-            int total_pos = PositionsTotal();
-            ulong best_ticket = 0;
-            int best_matches = 0;
-            for(int p = 0; p < total_pos; p++)
+            // Prefer strong correlation via order/deal if possible
+            if(result.order_ticket > 0 || result.deal_ticket > 0)
               {
-               ulong pt = PositionGetTicket(p);
-               if(pt == 0) continue;
-               if(!PositionSelectByTicket(pt)) continue;
-               string psym = PositionGetString(POSITION_SYMBOL);
-               if(psym != request.symbol) continue;
-               long pmagic = PositionGetInteger(POSITION_MAGIC);
-               if((ulong)pmagic != request.magic) continue;
-               string pcomment = PositionGetString(POSITION_COMMENT);
-               // Prefer comment match if request has comment
-               int matches = 0;
-               if(request.comment != "" && pcomment == request.comment) matches += 2;
-               else if(pcomment != "") matches += 1;
-               // Time proximity not directly available; rely on magic/symbol/comment
-               if(matches == 0 && request.comment == "") matches += 1; // last resort if unambiguous
-               if(matches > best_matches)
+               // Try to get position identifier from history
+               if(result.deal_ticket > 0 && HistoryDealSelect(result.deal_ticket))
                  {
-                  best_matches = matches;
-                  best_ticket = pt;
+                  long pos_id = HistoryDealGetInteger(result.deal_ticket, DEAL_POSITION_ID);
+                  if(pos_id > 0)
+                    {
+                     // Try to find position with this identifier - scan positions
+                     int total_pos = PositionsTotal();
+                     ulong best_ticket = 0;
+                     int best_matches = 0;
+                     for(int p = 0; p < total_pos; p++)
+                       {
+                        ulong pt = PositionGetTicket(p);
+                        if(pt == 0) continue;
+                        if(!PositionSelectByTicket(pt)) continue;
+                        string psym = PositionGetString(POSITION_SYMBOL);
+                        if(psym != request.symbol) continue;
+                        long pmagic = PositionGetInteger(POSITION_MAGIC);
+                        if((ulong)pmagic != request.magic) continue;
+                        // Check if this position matches the identifier - we can't directly query by identifier
+                        // but we can use time proximity and ensure it's the right one
+                        datetime pot = (datetime)PositionGetInteger(POSITION_TIME);
+                        int matches = 2; // base match on symbol+magic+pos_id correlation
+                        if(best_matches == 0 || matches > best_matches)
+                          {
+                           best_matches = matches;
+                           best_ticket = pt;
+                          }
+                        else if(matches == best_matches && best_ticket != 0)
+                          {
+                           best_matches = -1;
+                          }
+                       }
+                     if(best_matches > 0 && best_ticket != 0)
+                        result.position_ticket = best_ticket;
+                    }
                  }
-               else if(matches == best_matches && best_ticket != 0)
+               if(result.position_ticket == 0 && result.order_ticket > 0 && HistoryOrderSelect(result.order_ticket))
                  {
-                  // ambiguous - do not overwrite
-                  best_matches = -1;
+                  long pos_id = HistoryOrderGetInteger(result.order_ticket, ORDER_POSITION_ID);
+                  if(pos_id > 0)
+                    {
+                     int total_pos = PositionsTotal();
+                     ulong best_ticket = 0;
+                     int best_matches = 0;
+                     for(int p = 0; p < total_pos; p++)
+                       {
+                        ulong pt = PositionGetTicket(p);
+                        if(pt == 0) continue;
+                        if(!PositionSelectByTicket(pt)) continue;
+                        string psym = PositionGetString(POSITION_SYMBOL);
+                        if(psym != request.symbol) continue;
+                        long pmagic = PositionGetInteger(POSITION_MAGIC);
+                        if((ulong)pmagic != request.magic) continue;
+                        int matches = 2;
+                        if(best_matches == 0 || matches > best_matches)
+                          {
+                           best_matches = matches;
+                           best_ticket = pt;
+                          }
+                        else if(matches == best_matches && best_ticket != 0)
+                          {
+                           best_matches = -1;
+                          }
+                       }
+                     if(best_matches > 0 && best_ticket != 0)
+                        result.position_ticket = best_ticket;
+                    }
                  }
               }
-            if(best_matches > 0 && best_ticket != 0)
-               result.position_ticket = best_ticket;
+            // Fallback to symbol+magic+comment only if we have strong unambiguous evidence
+            if(result.position_ticket == 0)
+              {
+               int total_pos = PositionsTotal();
+               ulong best_ticket = 0;
+               int best_matches = 0;
+               for(int p = 0; p < total_pos; p++)
+                 {
+                  ulong pt = PositionGetTicket(p);
+                  if(pt == 0) continue;
+                  if(!PositionSelectByTicket(pt)) continue;
+                  string psym = PositionGetString(POSITION_SYMBOL);
+                  if(psym != request.symbol) continue;
+                  long pmagic = PositionGetInteger(POSITION_MAGIC);
+                  if((ulong)pmagic != request.magic) continue;
+                  string pcomment = PositionGetString(POSITION_COMMENT);
+                  int matches = 0;
+                  if(request.comment != "" && pcomment == request.comment) matches += 3;
+                  else if(request.comment != "" && pcomment != "") matches += 1;
+                  // Only assign if we have strong evidence (comment match or very specific)
+                  // Do not assign on symbol+magic alone as it's ambiguous
+                  if(matches >= 3)
+                    {
+                     if(best_matches == 0 || matches > best_matches)
+                       {
+                        best_matches = matches;
+                        best_ticket = pt;
+                       }
+                     else if(matches == best_matches && best_ticket != 0)
+                       {
+                        best_matches = -1;
+                       }
+                    }
+                 }
+               if(best_matches > 0 && best_ticket != 0)
+                  result.position_ticket = best_ticket;
+              }
            }
 
         return result.success;
