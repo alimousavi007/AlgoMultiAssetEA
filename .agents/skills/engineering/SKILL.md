@@ -1,171 +1,59 @@
 ---
 name: engineering
-description: Engineering workflows for AlgoMultiAssetEA. Use for bug fixes, compile errors, runtime errors, features, refactors, code reviews, dashboard work, and verification tasks. Keep changes minimal and evidence-based.
-argument-hint: Describe the bug, compile/runtime error, feature, refactor, dashboard issue, or review target.
+description: Evidence-led implementation and review for AlgoMultiAssetEA. Use for MQL5 bug fixes, compiler/runtime errors, features, refactors, code reviews and dashboard defects; trace the actual path and make the smallest justified change.
 ---
 
-# AlgoMultiAssetEA Engineering Skill
+# Engineering Workflow
 
-Use this skill with the core `algo-multiasset-ea` project skill.
+Use with `algo-multiasset-ea`; add a specialist Skill only when its domain applies.
 
-## Global rule
+## Invariants
 
-Preserve existing architecture and user changes.
+- Preserve architecture, public interfaces and user changes unless the requirement explicitly authorizes a change.
+- Trace callers, state transitions and side effects before editing; do not patch a symptom or speculate when root cause is unproven.
+- Before adding a parameter, module or abstraction, check whether existing behavior already satisfies the requirement.
+- Static inspection is not compile or runtime evidence.
+- Compile, test, launch a terminal or use Strategy Tester only when the task explicitly authorizes that operation and the required tooling is available.
 
-Use the smallest justified change.
+## Bug fix
 
-Do not patch a symptom until the execution path and failure point are understood.
+`SYMPTOM → REPRO/EVIDENCE → EXECUTION TRACE → ROOT CAUSE → MINIMAL FIX → AUTHORIZED VERIFICATION`
 
-Stop investigation when the root cause or design requirement is sufficiently proven. Do not search unrelated code.
+Record expected vs observed behavior, exact failure point, callers/dependencies and evidence. If the evidence does not establish a root cause, report the competing hypotheses and next evidence required instead of making a speculative fix.
 
-## BUG FIX
+## Compile error
 
-UNDERSTAND
-→ TRACE
-→ ROOT CAUSE
-→ MINIMAL FIX
-→ VERIFY
-→ REPORT
+1. Read the actual compiler output and identify the first/root diagnostic.
+2. Check declarations, includes, types, overloads and the earliest error before treating later messages as independent defects.
+3. Make the smallest change justified by the diagnostic.
+4. Run a compile only if authorized; quote the actual result and identify the exact source/build artifact.
 
-Determine:
+Do not equate source inspection with a successful compile, or a previous compile with the current source revision.
 
-- observed symptom
-- expected behavior
-- exact failure point
-- affected callers/dependencies
-- root cause and evidence
-- smallest safe fix
+## Runtime defect
 
-If the root cause is not sufficiently proven, do not make a speculative fix.
+Trace `EVENT → INPUTS → STATE → CALLERS → LOG/RETcode → FAILURE`. Use Experts/Journal/Tester output and timestamps where available. Separate missing telemetry from a condition that was actually evaluated and failed.
 
-## COMPILE ERROR
+## Feature
 
-COMPILER OUTPUT
-→ PRIMARY ERROR
-→ CASCADE ERRORS
-→ MINIMAL FIX
-→ COMPILE
-→ VERIFY
+`REQUIREMENT → EXISTING CAPABILITY → DEPENDENCIES/SAFETY → MINIMAL DESIGN → IMPLEMENT → AUTHORIZED VERIFICATION`
 
-Use actual compiler output.
+Specify observable acceptance criteria before coding. Do not couple unrelated behavior or change trading logic to fix a UI-only defect.
 
-Fix the earliest/root compile issue first before addressing likely cascade errors.
+## Refactor
 
-Success requires actual evidence of compilation. Do not infer success from code inspection.
+Treat a refactor as behavior-preserving. Establish existing behavior, public callers, state/lifecycle and side effects first; avoid bundling unrelated fixes. State which equivalence checks were actually possible.
 
-## RUNTIME ERROR
+## Code review
 
-EVENT
-→ EXECUTION PATH
-→ LOG SOURCE
-→ STATE
-→ FAILURE
-→ ROOT CAUSE
-→ MINIMAL FIX
-→ RUNTIME VERIFY
+Read-only unless fixes are explicitly requested. Prioritize correctness, risk bypass, stale/misindexed data, state transitions, multi-symbol scheduling, duplicate execution, MQL5 API misuse, and regression risk. Findings must include exact file/function/line and a reproducible explanation. Do not edit, commit or push during a review unless those actions are separately authorized.
 
-Use Experts/Journal/Strategy Tester evidence when available.
+## Dashboard/UI
 
-Distinguish:
+Trace actual producers, cache/state and lifecycle hooks such as `OnInit`, `OnTick` and `OnTimer`. Keep display as a consumer of domain state: do not fabricate signals, risk decisions or trades to refresh the UI. Preserve chart-symbol filtering and the last genuine evaluation state.
 
-VERIFIED / OBSERVED / INFERRED / ASSUMED / UNVERIFIED
+## Final verification and report
 
-Do not replace runtime evidence with static reasoning.
+After an authorized change: inspect final diff, inspect likely compile/runtime concerns, run only the narrowest authorized useful check, capture actual output, and inspect the diff again.
 
-## FEATURE
-
-REQUIREMENT
-→ EXISTING CAPABILITY
-→ IMPACT/DEPENDENCIES
-→ MINIMAL DESIGN
-→ IMPLEMENT
-→ VERIFY
-
-Before adding code, check whether the requested behavior already exists or can be achieved by composing existing modules.
-
-Do not create new abstractions or parameters without a demonstrated need.
-
-## REFACTOR
-
-Goal: behavior-preserving improvement.
-
-Before change, identify:
-
-- existing behavior
-- public interfaces/callers
-- state/lifecycle dependencies
-- expected side effects
-
-After change, verify behavior equivalence as far as the available tests permit.
-
-Do not combine unrelated feature changes with a refactor.
-
-## CODE REVIEW
-
-Read-only unless the user explicitly asks for fixes.
-
-Review priorities:
-
-CRITICAL
-HIGH
-MEDIUM
-LOW
-
-Challenge:
-
-- correctness
-- risk-control bypass
-- runtime state errors
-- multi-symbol scheduling
-- stale/invalid data
-- duplicate execution
-- API/signature misuse
-- regression risk
-
-Report findings with exact file/function references and evidence.
-
-Do not modify code, commit, or push during review unless explicitly requested.
-
-## DASHBOARD
-
-Treat the dashboard as a UI consumer.
-
-Inspect:
-
-- OnInit
-- OnTick
-- OnTimer
-- data sources
-- rendering
-- cache/state
-- chart-symbol filtering
-
-Never create fake signal/risk/domain objects merely to refresh UI.
-
-Do not mutate trading logic to solve a dashboard-only problem.
-
-Preserve exact chart-symbol filtering and last real evaluation state.
-
-## VERIFY
-
-After engineering changes:
-
-1. inspect diff
-2. inspect likely compile issues
-3. compile when tooling permits
-4. inspect actual compiler output
-5. run the narrowest useful test
-6. inspect diff again
-7. report only actual evidence
-
-Do not rerun unrelated tests.
-
-## REPORT
-
-### FINDING
-### ROOT CAUSE
-### CHANGE
-### VERIFICATION
-### REMAINING RISK
-
-Name exact files/functions changed.
+Report: `FINDING`, `EVIDENCE`, `ROOT CAUSE`, `CHANGE`, `VERIFICATION`, `REMAINING RISK`. Name exact changed files/functions. Explicitly label checks `PASSED`, `FAILED`, `NOT RUN` or `BLOCKED`.

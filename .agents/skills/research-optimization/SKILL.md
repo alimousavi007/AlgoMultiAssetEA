@@ -1,165 +1,65 @@
 ---
 name: research-optimization
-description: Research, backtest, optimization, OOS/forward and robustness workflow for AlgoMultiAssetEA. Use for SCALP/DAY/SWING strategy research, parameter experiments, Tester Fitness, walk-forward validation, and promotion/rejection decisions.
-argument-hint: Describe the profile, strategy, hypothesis, data period, test, optimization, OOS, or robustness objective.
+description: Design and evaluate AlgoMultiAssetEA strategy experiments, parameter optimization, Tester Fitness, out-of-sample/forward validation, walk-forward analysis and robustness; use when measuring an edge or deciding whether to promote/reject a candidate.
 ---
 
-# AlgoMultiAssetEA Research & Optimization Skill
+# Strategy Research & Optimization
 
-Use this skill with the core `algo-multiasset-ea` project skill.
+Use with `algo-multiasset-ea`; use `mt5-strategy-tester` for actual tester operations. Do not run a compile/test/optimization unless the current task explicitly authorizes execution.
 
-## Research discipline
+## Experiment contract
 
-Do not confuse a plausible trading story with measured edge.
+Before a material experiment, specify:
 
-Before a meaningful experiment state:
+- falsifiable hypothesis and mechanism;
+- baseline and control variables;
+- target metric(s), constraints and rejection criteria;
+- profile, strategy, symbol set and market regimes;
+- data period, source quality and costs;
+- parameters being varied and why;
+- train/validation/OOS/forward split and leakage controls.
 
-- hypothesis
-- measurable objective
-- falsification evidence
-- likely redundancy with existing features
-- overfitting risks
-- required validation
+Prefer the smallest experiment that can disconfirm the hypothesis. Check overlap with existing features before adding an indicator or score. Do not expand the optimization surface without evidence of incremental value.
 
-Prefer existing features and small controlled experiments.
+## Controlled workflow
 
-## Research workflow
+`BASELINE → HYPOTHESIS → ONE CONTROLLED EXPERIMENT → OOS/FORWARD → ROBUSTNESS → DECISION`
 
-BASELINE
-→ HYPOTHESIS
-→ CONTROLLED EXPERIMENT
-→ OOS/FORWARD
-→ ROBUSTNESS
-→ DECISION
+When supported by the hypothesis, tune in a controlled order such as `REGIME → ENTRY → EXIT → FILTERS → RISK`; this is a sequencing heuristic, not a mandatory recipe. Do not optimize every group at once.
 
-Do not repeatedly tune on the same OOS segment.
+Treat SCALP, DAY and SWING as separate research models unless the experiment explicitly tests transferability. Evaluate Trend/Pullback, Breakout, Momentum and Mean Reversion independently before allowing a combined portfolio result to hide a weak component. Verify actual strategy and Tester Fitness implementation before relying on names or assumptions.
 
-Treat SCALP, DAY and SWING as separate research models unless an experiment explicitly tests transferability.
+## Backtest and optimization
 
-Research strategies independently before combining:
+- Establish a baseline with optimization off and preserve all unchanged inputs.
+- Use `InpMode = MODE_BACKTEST` for trade/P&L experiments only after verifying that this is the intended current mode.
+- Prefer real-tick modelling for final historical tests when appropriate, with realistic spread, commission, swap, balance, leverage and symbol history.
+- Optimize small, logically related groups. Around 4–7 active parameters is a heuristic, not a universal rule; reduce the count when sample size or evidence is weak.
+- Record parameter names/ranges/steps, tester model, data dates, symbols, costs, fitness criterion, trade count and acceptance gates.
+- Avoid repeated tuning against one OOS segment. Reuse of validation data turns it into development data.
 
-- Trend/Pullback
-- Breakout
-- Momentum
-- Mean Reversion
+## Validation and robustness
 
-A combined portfolio result must not hide a strategy with no independent edge.
+Keep chronological partitions separated:
 
-## Backtest
+`IN-SAMPLE → selection → OOS/forward → untouched confirmation`
 
-Before optimization:
+For material changes, prefer rolling walk-forward analysis when the process supports it. For candidates passing initial validation, examine as relevant:
 
-1. compile
-2. run baseline with Optimization OFF
-3. use `InpMode = MODE_BACKTEST` for trade/P&L testing
-4. keep other inputs unchanged for the baseline
-5. record tester settings and EA inputs
-6. inspect Journal/Experts output
+- adjacent parameter values and stable plateaus;
+- different periods, assets and regimes;
+- spread/commission/swap and execution-delay sensitivity;
+- sufficient trade sample and dependence on a small number of trades;
+- Monte Carlo/randomization only when method and assumptions are documented.
 
-Prefer `Every tick based on real ticks` for final historical testing.
+Do not promote an isolated peak. Small parameter changes that destroy results indicate fragility. Do not rescue failed OOS performance by tuning against that same data.
 
-Use visualization only for short diagnostics.
+## Decision
 
-Use realistic balance, leverage, commission, swap and spread assumptions.
+Choose `PROMOTE`, `REJECT` or `RESEARCH MORE` based on predeclared criteria, not on the best-looking run. Evidence should address expectancy/profitability, drawdown, sample size, parameter stability, OOS/forward performance, asset/regime sensitivity, cost sensitivity and risk-control regressions. Do not invent universal thresholds after seeing results; if acceptance thresholds were not set, state that limitation.
 
-A profitable backtest is historical evidence, not proof of future profitability.
+## Report
 
-## Optimization
+`BASELINE | HYPOTHESIS | CONFIGURATION | RESULT | OOS/FORWARD | ROBUSTNESS | DECISION | REMAINING RISK`
 
-Do not optimize everything at once.
-
-Default order:
-
-REGIME
-→ ENTRY
-→ EXIT
-→ FILTERS
-→ RISK
-
-Normally keep active optimization parameters around 4–7 unless evidence justifies more.
-
-Record:
-
-- profile
-- strategy
-- parameter names
-- start/step/stop
-- data period
-- tester model
-- spread/commission assumptions
-- fitness criterion
-- acceptance gates
-
-Inspect the actual optimization surface and Tester Fitness implementation before adding parameters.
-
-## Stable region
-
-Do not promote an isolated peak.
-
-Prefer a plateau where nearby parameter values remain acceptable for:
-
-- performance
-- drawdown
-- trade count
-- consistency
-
-A candidate is fragile when small parameter changes collapse performance.
-
-## OOS / Forward
-
-Use:
-
-IN-SAMPLE
-→ parameter selection
-→ OOS / Forward
-→ untouched confirmation
-
-Prefer rolling walk-forward validation for material strategy changes when supported by the available test process.
-
-Never rescue a failed OOS result by tuning on that same OOS data.
-
-## Robustness
-
-For a candidate that passes initial OOS, test as appropriate:
-
-- nearby parameters
-- different chronological periods
-- different assets
-- different regimes
-- realistic spread/commission changes
-- execution-delay sensitivity
-- Monte Carlo/randomization when available
-
-Investigate dependence on one symbol, one regime, one period, or one narrow parameter combination.
-
-## Promotion
-
-Promote only when available evidence supports:
-
-- acceptable expectancy/profitability
-- acceptable drawdown
-- sufficient trade sample
-- stable nearby parameters
-- acceptable OOS/forward behavior
-- acceptable asset/regime sensitivity
-- acceptable cost sensitivity
-- no critical risk-control regression
-
-Otherwise:
-
-REJECT
-or
-RESEARCH MORE
-
-## REPORT
-
-### BASELINE
-### HYPOTHESIS
-### EXPERIMENT
-### RESULT
-### OOS / FORWARD
-### ROBUSTNESS
-### DECISION
-### REMAINING RISK
-
-Report exact settings and actual measured results.
+Include exact settings and measured outputs. Distinguish historical backtest, OOS, forward-demo and live evidence. No result means no promotion claim.

@@ -1,412 +1,69 @@
 ---
 name: algo-multiasset-ea
-description: Core project skill for AlgoMultiAssetEA. Use for project architecture, MQL5 trading-system context, strategy design, risk/capital management, backtesting, optimization, OOS/forward validation, robustness, verification, and promotion decisions.
-argument-hint: Describe the AlgoMultiAssetEA task, profile, strategy, test, optimization, risk, or verification objective.
+description: Project-wide engineering context and safety contracts for AlgoMultiAssetEA. Use when a task spans modules, changes architecture or strategy behavior, or requires deciding which project-specific engineering, lifecycle, risk, forensics, tester, research, or Git workflow applies.
 ---
 
-# AlgoMultiAssetEA Project Skill
+# AlgoMultiAssetEA — Project Contract
 
-## 1. Mission
+## Purpose and scope
 
-Build and maintain a simple, robust, reproducible multi-asset algorithmic trading system.
+Use this Skill for shared project facts and cross-cutting constraints. Load a specialist Skill only when its domain materially applies:
 
-The objective is NOT maximum historical profit.
+- `engineering`: implementation, bug fixes, refactors, compile/runtime diagnosis, code review.
+- `hybrid-strategy-lifecycle`: four-role signal context, setup lifecycle, freshness, invalidation, execution attempts and reconciliation.
+- `trading-risk`: risk decisions, exposure, limits, locks, sizing and execution safety.
+- `signal-pipeline-forensics`: missing/rejected signals, missing orders, telemetry and event traces.
+- `mt5-strategy-tester`: MT5 terminal/tester launch, test configuration and evidence collection.
+- `research-optimization`: hypotheses, optimization, OOS/forward validation and robustness.
+- `delivery-git`: status/diff review and explicitly authorized Git delivery.
 
-The objective is a trading model whose logic, risk controls, and parameter choices remain defensible on unseen data and under realistic execution assumptions.
+Do not load every Skill by default. Avoid repeating a completed audit unless new evidence or a changed target warrants it.
 
-Priority:
+## Source-of-truth discipline
 
-CORRECTNESS
-> RISK CONTROL
-> EVIDENCE
-> OOS VALIDATION
-> ROBUSTNESS
-> REPRODUCIBILITY
-> AUDITABILITY
-> PERFORMANCE
-> COMPLEXITY
+1. Inspect the current source, callers, settings and logs before asserting behavior. Names, comments, reports and intended architecture are not proof of runtime behavior.
+2. Distinguish `VERIFIED`, `OBSERVED`, `INFERRED`, `ASSUMED` and `UNVERIFIED`.
+3. Cite file/function/line and the specific evidence for consequential findings. Prefer the earliest demonstrated failure over speculative downstream causes.
+4. Never invent API behavior, broker behavior, data, tests, compile results or optimization outcomes.
+5. When repository state and an older report disagree, verify current state and preserve the user's changes.
 
-## 2. Working Principle
+## Architecture facts and decision boundaries
 
-Treat the existing repository as the source of truth.
+- The active Hybrid design has four independent timeframe roles: **Context, Structure, Setup and Entry**. Setup is conceptually independent from Structure even when their configured timeframes happen to match.
+- The exact role-to-timeframe mapping is not to be inferred from legacy SCALP/DAY/SWING mappings. Verify current approved decision records and implementation before changing it.
+- The accepted data policy is closed-bar inputs for Context/Structure/Setup; Scalping Entry may use tick/live quote data; Day/Swing Entry uses closed-bar data. Do not silently generalize a role policy to another profile.
+- Before submit, revalidate the setup, relevant data freshness, News gate and Risk gate. A detected candidate or valid `TradePlan` is not trade authorization.
+- News operational failure blocks new entries (fail-closed); position management remains separate. Distinguish `NEWS_DISABLED`, operational unavailability and a valid no-event result.
+- Retry only after a proven terminal failure. Timeout, missing response, absent broker evidence or an intent record alone does not prove that submission did not happen. Ambiguous outcomes require reconciliation.
+- Persistent execution identity and reconciliation are prerequisites for dependable restart-safe operation. Keep `setup_id`, `attempt_id` and broker ticket/identifier distinct.
+- The storage direction is internal SQLite, with a single-writer ownership model. Do not claim MQL5/SQLite durability guarantees without specific implementation evidence.
+- Recovery must fail safe when the ledger is missing/inaccessible, schema is unsupported, migration is interrupted, corruption is detected, or writes/commits fail. An unresolved attempt or broker/ledger disagreement requires reconciliation. Do not automatically complete a partial fill.
+- Attempt identity must exist before submission and be recoverable after restart; a volatile-only identifier is insufficient.
+- Use the latest approved decision record for detailed expiry/invalidation predicates, News parameters and timestamp handling. If exact values or semantics are absent, preserve `UNDECIDED`/`UNKNOWN`; do not invent them.
 
-Engineering:
+## Strategy and feature inventory
 
-UNDERSTAND
-→ TRACE
-→ PLAN
-→ CHANGE
-→ VERIFY
+The repository has components for Trend/Pullback, Breakout, Momentum, Mean Reversion and a separate Relative Value component. Do not assume a component is in the active signal path without tracing its callers. Relative Value is multi-leg and must not be treated as a standard single-leg `StrategySignal` unless the implementation proves that contract. The feature layer has included EMA, ADX, ATR, RSI, MACD, ROC, volume-ratio and candle/volatility features; verify the current source/configuration before asserting this inventory or adding a substitute. Configured symbols and profiles are mutable and must be checked in the active settings.
 
-Research:
+## Trading safety
 
-BASELINE
-→ HYPOTHESIS
-→ EXPERIMENT
-→ OOS/FORWARD
-→ ROBUSTNESS
-→ DECISION
+- A signal is not permission to trade. Trace the actual authorization path before changing its order or semantics.
+- Never bypass or weaken `CRiskEngine`, `CAlgoPortfolioRisk` and `CTradeExecutor`, nor any verified loss, position, exposure, margin, stop/target, spread or execution gate.
+- Critical missing, stale, invalid or contradictory evidence must not become an executable entry. Prefer the established fail-closed behavior for the affected scope and reconcile uncertainty before retrying.
+- Do not introduce martingale, uncontrolled averaging-down, loss-recovery sizing, implicit leverage escalation or unbounded retries.
+- Claim correlation-aware limits only if the current implementation computes and uses correlation in the relevant decision path.
 
-Never invent source behavior, API capabilities, broker behavior, test results, or optimization results.
+## Engineering and operation boundaries
 
-## 3. Current Architecture
+- Understand → trace → plan → minimal change → verify → report.
+- Preserve interfaces and established architecture. Do not add abstractions, indicators, parameters or scoring layers without a concrete need and a testable benefit.
+- Source edits, compile, terminal launch, Strategy Tester, runtime/broker operations, Git stage/commit and push are separate actions. Perform only actions requested and authorized for the current task; explicit permission for one does not imply permission for the others.
+- Never perform destructive Git cleanup or rewrite history. Review status and diff before delivery.
+- A compile, historical test, OOS/forward run and live result are different evidence classes. Never present one as another.
 
-The EA is multi-symbol and currently works with configured XAU, XAG and BTC symbols.
+## Reporting
 
-**Active Hybrid architecture (current):** four independent roles: Context, Structure, Setup, and Entry. Setup is independent from Structure even if configured timeframes coincide. Exact role-to-timeframe mappings remain undecided. Do not assume the former three-role (SCALP/DAY/SWING) mapping as an approved Hybrid contract.
+For engineering/forensics: `FINDING`, `EVIDENCE`, `ROOT CAUSE`, `CHANGE`, `VERIFICATION`, `REMAINING RISK`.
+For research: `BASELINE`, `HYPOTHESIS`, `EXPERIMENT`, `RESULT`, `OOS/FORWARD`, `ROBUSTNESS`, `DECISION`, `REMAINING RISK`.
 
-Existing components (Trend/Pullback, Breakout, Momentum, Mean Reversion, Relative Value) are repository components; do not assume they fully represent the active Hybrid signal path without tracing implementation.
-
-Current feature layer includes:
-
-EMA, ADX, ATR, RSI, MACD, ROC, volume ratio, candle/volatility features.
-
-Current strategy layer includes:
-
-Trend/Pullback
-Breakout
-Momentum
-Mean Reversion
-
-Relative Value exists as a separate multi-leg component and must not be treated as a normal single-leg StrategySignal without verifying the actual implementation.
-
-The project also contains dedicated risk, portfolio-risk, tester-fitness, statistics and optimization components.
-
-Inspect their actual behavior before extending them.
-
-## 4. MQL5 Rules
-
-Follow repository-specific MQL5 implementation rules in:
-
-`.kilo/rules/mql5.md`
-
-Project-level requirements:
-
-- Use closed-bar data for signal generation by default.
-- Treat synchronization, sufficient history and data freshness as runtime readiness conditions.
-- Do not assume chart OnTick services every managed symbol.
-- Respect event-driven execution, tester/live differences and actual trade retcodes.
-- Do not infer implementation behavior from names alone.
-
-## 5. Trading Safety
-
-A signal is NOT permission to trade.
-
-Preserve the actual risk and execution gates implemented by the project:
-
-TradingAllowed
-→ Loss Limits
-→ Spread / Execution Quality
-→ Session
-→ Position Limits
-→ Portfolio Risk
-→ Concentration / other verified portfolio checks
-→ Stop Loss
-→ Monetary Risk
-→ Volume
-→ Margin
-→ TradeExecutor
-
-Never bypass:
-
-- RiskEngine
-- PortfolioRisk
-- TradeExecutor
-- loss limits
-- position limits
-- execution checks
-- stop/target validation
-
-Never ignore execution retcodes.
-Never trade stale or invalid data.
-Never create duplicate execution.
-
-If required risk information is unsafe or unavailable:
-
-NO-TRADE
-
-If critical runtime information is uncertain:
-
-SIGNAL-ONLY or DIAGNOSTIC
-
-Never introduce martingale, uncontrolled averaging-down, loss-recovery sizing, or unbounded risk escalation.
-
-Do not claim correlation-aware risk unless the code actually computes and uses it.
-
-## 6. Strategy Design
-
-Treat SCALP, DAY and SWING as separate research models.
-
-Do not assume one parameter set is appropriate for all profiles.
-
-Research strategies independently before combining them:
-
-- Trend/Pullback
-- Breakout
-- Momentum
-- Mean Reversion
-
-A combined portfolio result must not hide a strategy with no independent edge.
-
-The system should support a valid NO-TRADE outcome.
-
-Prefer decision structure such as:
-
-Setup Quality
-+
-Regime Fit
-+
-Execution Quality
-→
-Signal Quality
-
-but do not add new scoring layers unless their incremental value is testable.
-
-## 7. Indicator / Feature Research
-
-Existing features are the baseline.
-
-New candidates such as:
-
-VWAP
-Bollinger Band Width
-Donchian-style structure
-Relative Volume
-Spread/ATR
-Chandelier-style exits
-
-are hypotheses only.
-
-Before adding a feature ask:
-
-1. Is the information already represented by an existing feature?
-2. Can its contribution be measured independently?
-3. Does it improve OOS, not only IS?
-4. Is the benefit stable across nearby parameter values?
-5. Does it improve risk-adjusted behavior?
-6. Does it generalize across assets or regimes?
-
-Do not add indicators merely to increase signal complexity.
-
-## 8. Optimization Method
-
-Do not optimize everything at once.
-
-Default order:
-
-REGIME
-→ ENTRY
-→ EXIT
-→ FILTERS
-→ RISK
-
-Keep optimization groups small, normally around 4–7 active parameters unless evidence justifies more.
-
-For every optimization record:
-
-- profile
-- strategy
-- parameter names
-- start/step/stop
-- data period
-- tester model
-- spread/commission assumptions
-- fitness criterion
-- acceptance gates
-
-The existing EA has a controlled optimization surface and custom Tester Fitness.
-
-Inspect the actual implementation before expanding it.
-
-### Stable Region Rule
-
-Do not promote a single isolated optimization peak.
-
-Prefer a plateau where nearby parameter values remain acceptable for:
-
-- performance
-- drawdown
-- trade count
-- consistency
-
-If the result collapses when a parameter moves slightly, treat it as fragile.
-
-## 9. Backtest Standard
-
-Before optimization:
-
-1. Compile the EA.
-2. Run a baseline with Optimization OFF.
-3. Use `InpMode = MODE_BACKTEST` for trade/P&L testing.
-4. Keep the remaining inputs unchanged for the baseline.
-5. Record tester settings and EA inputs.
-6. Inspect Journal/Experts output for data or runtime problems.
-
-For final historical testing prefer:
-
-Every tick based on real ticks
-
-Use visualization only for short diagnostic tests.
-Do not use visualization for normal optimization runs.
-
-Ensure all managed symbols are available and historical data is usable.
-
-Keep the main tester symbol consistent between comparative runs unless the experiment explicitly tests symbol selection.
-
-Use realistic account balance, leverage, commission, swap and historical spread assumptions.
-
-Do not treat a profitable report as proof of future profitability.
-
-## 10. OOS / Forward / Walk-Forward
-
-Separate development data from validation data.
-
-Use:
-
-IN-SAMPLE
-→ parameter selection
-→ OOS / Forward
-→ untouched confirmation
-
-Do not repeatedly tune on the same OOS period.
-
-For material strategy changes, prefer rolling walk-forward validation where the available test process supports it.
-
-A backtest is historical evidence.
-A forward/OOS test is validation evidence.
-Neither is live validation.
-
-## 11. Robustness
-
-For a candidate that passes initial OOS, test as appropriate:
-
-1. nearby parameter values
-2. different chronological periods
-3. different assets
-4. different market regimes
-5. realistic spread/commission changes
-6. execution-delay sensitivity
-7. Monte Carlo/randomization tests when available
-
-Investigate whether performance depends on one symbol, one regime, one period, or one narrow parameter combination.
-
-## 12. Smart Risk / Capital Management
-
-Research risk separately from entry logic.
-
-Preferred sequence:
-
-Account Equity
-→ Base Monetary Risk
-→ Stop Distance
-→ Volatility Adjustment
-→ Drawdown Adjustment
-→ Portfolio Exposure
-→ Concentration / Correlation when actually implemented
-→ Position Constraints
-→ Margin
-→ Execution
-
-Risk multipliers must be bounded, interpretable and monotonic.
-
-Do not let risk optimization hide a weak signal model.
-
-For dynamic risk proposals, test each component independently before combining them.
-
-For correlation-aware risk, define before implementation:
-
-- return lookback
-- update frequency
-- missing-data handling
-- directional/concentration treatment
-- portfolio impact
-
-Do not claim correlation-aware risk unless the code actually computes and uses it.
-
-## 13. Promotion / Rejection
-
-A candidate is promotable only when the available evidence supports:
-
-- acceptable expectancy/profitability
-- acceptable drawdown
-- sufficient trade sample
-- stable nearby parameters
-- acceptable OOS/forward behavior
-- acceptable asset/regime sensitivity
-- acceptable cost sensitivity
-- no critical risk-control regression
-
-Otherwise:
-
-REJECT
-or
-RESEARCH MORE
-
-Do not rescue a failed OOS result by tuning on the same OOS data.
-
-## 14. Verification
-
-For code changes:
-
-- inspect diff
-- compile when tooling permits
-- inspect actual compiler output
-- run the narrowest useful test
-- inspect resulting diff again
-
-For research:
-
-- record exact configuration
-- record actual results
-- distinguish IS/OOS/forward
-- inspect stability
-- state unverified assumptions
-
-Always distinguish:
-
-VERIFIED
-OBSERVED
-INFERRED
-ASSUMED
-UNVERIFIED
-
-Never claim compiled, tested, backtested, optimized, OOS-validated, or runtime-verified without evidence.
-
-## 15. Git Safety
-
-Preserve user changes.
-
-Never automatically:
-
-- reset
-- clean
-- delete unrelated files
-- rewrite history
-- force-push
-
-Review status and diff before delivery.
-
-## 16. Reporting
-
-For engineering work report:
-
-### FINDING
-### ROOT CAUSE
-### CHANGE
-### VERIFICATION
-### REMAINING RISK
-
-For research/optimization report:
-
-### BASELINE
-### HYPOTHESIS
-### EXPERIMENT
-### RESULT
-### OOS / FORWARD
-### ROBUSTNESS
-### DECISION
-### REMAINING RISK
-
-Name exact files/functions when code changed.
-
-Do not expose hidden reasoning; report conclusions and evidence.
+Keep reports concise and decision-oriented. State blockers and unknowns directly; do not claim completion of a tool action that did not run.

@@ -1,124 +1,52 @@
 ---
 name: trading-risk
-description: Risk and execution safety workflow for AlgoMultiAssetEA. Use when changing or reviewing RiskEngine, PortfolioRisk, TradeExecutor, risk sizing, loss limits, position limits, exposure, locks, stops, margin, or execution gates.
-argument-hint: Describe the risk/execution change, failure, or scenario to investigate.
+description: Review or change AlgoMultiAssetEA account sizing, stops/targets, loss/position limits, locks, portfolio exposure/concentration, margin and execution gates; prioritize fail-safe behavior and evidence of the real enforcement path.
 ---
 
-# AlgoMultiAssetEA Trading Risk Skill
+# Trading Risk & Execution Safety
 
-Use this skill with the core `algo-multiasset-ea` project skill.
+Use with `algo-multiasset-ea`; use `hybrid-strategy-lifecycle` for setup/attempt reconciliation and `signal-pipeline-forensics` for observed rejection paths.
 
-## Non-negotiable principle
+## Authority principle
 
-SIGNAL ≠ TRADE AUTHORIZATION
+`SIGNAL ≠ TRADE AUTHORIZATION`. Inspect actual callers and control flow before relying on a risk class, flag, comment or rejection enum. Never bypass or weaken the verified responsibilities of `CRiskEngine`, `CAlgoPortfolioRisk` or `CTradeExecutor`.
 
-Risk and execution gates must remain authoritative.
+If critical risk evidence is missing, invalid, stale or contradictory, do not allow the affected entry to proceed. Follow the current approved lock/blocking scope; if it cannot be bounded, escalate conservatively and document why.
 
-Never bypass or weaken:
+## Risk review sequence
 
-RiskEngine
-→ PortfolioRisk
-→ TradeExecutor
+`BASELINE → ACTUAL GATE TRACE → FAILURE MODES → MINIMAL CHANGE → SAFETY REVIEW → AUTHORIZED VERIFICATION`
 
-Do not allow unsafe or unavailable risk information to become an executable trade.
+Check only components relevant to the target, including:
 
-Default under critical uncertainty:
+- account equity/balance and monetary-risk basis;
+- stop distance and account-currency loss estimate;
+- broker volume minimum/maximum/step/limit and risk-preserving rounding;
+- stop/target legality and reward/risk criteria;
+- margin pre-check and current trading/symbol permissions;
+- loss, position and portfolio limits;
+- concentration/exposure and correlation only if actually computed and consumed;
+- execution response, partial fill and unresolved-attempt handling;
+- position management and recovery-state integrity.
 
-NO-TRADE
+Do not assume the code's order of gates from this list: trace the actual path and report its order.
 
-## Safety workflow
+## Forbidden risk patterns
 
-TRACE:
+Do not introduce martingale, uncontrolled averaging-down, loss-recovery sizing, implicit leverage escalation, unbounded retries, or an upward volume adjustment that exceeds the computed risk budget.
 
-Signal
-→ RiskEngine
-→ PortfolioRisk
-→ State / Locks
-→ Execution
-→ Position Management
+Risk multipliers must be bounded, interpretable and tested separately. Do not let risk optimization conceal a weak signal model or treat a correlation-based claim as true without implementation evidence.
 
-Inspect the actual implementation and callers before changing any gate.
+## Relevant failure scenarios
 
-Do not infer capability from names, comments, enums, or intended architecture.
+Select scenarios relevant to the change: normal approval; each expected rejection; external/state lock; invalid or stale data; unknown symbol constraints; invalid volume/SL/TP; margin failure; spread/execution rejection; portfolio limit; duplicate submission; timeout/ambiguous result; partial fill; restart with missing ledger; ledger/broker disagreement.
 
-## Risk change workflow
+Reasoning about a scenario is not a test. Execute tests only when explicitly authorized and available.
 
-BASELINE
-→ IDENTIFY RISK AUTHORITY
-→ DEFINE FAILURE MODE
-→ MINIMAL CHANGE
-→ SAFETY REVIEW
-→ COMPILE
-→ NARROW TEST
-→ REPORT
+## Retry and reconciliation
 
-For dynamic risk, verify separately:
+A retry is permitted only after a proven terminal failure. A request Boolean, retcode in isolation, timeout, missing ticket or temporarily absent position is not enough. Inspect the documented API result and any broker history/transaction evidence. If submission may have occurred, require reconciliation before another submit. Do not auto-complete a partial fill.
 
-- base monetary risk
-- stop distance
-- volatility adjustment
-- drawdown adjustment
-- portfolio exposure
-- concentration/correlation when actually implemented
-- position constraints
-- margin
-- execution
+## Evidence and report
 
-Risk multipliers must be bounded, interpretable and monotonic.
-
-Never introduce:
-
-- martingale
-- uncontrolled averaging-down
-- loss-recovery sizing
-- implicit leverage escalation
-- unbounded retry-based recovery
-
-## Required scenarios
-
-When relevant, reason/test at least:
-
-1. normal trade
-2. risk rejection
-3. external lock
-4. state lock
-5. invalid/missing market data
-6. invalid symbol/volume
-7. invalid SL/TP
-8. execution failure/retcode rejection
-9. position/exposure limit
-10. portfolio concentration
-
-Use only scenarios relevant to the actual change.
-
-## Correlation
-
-Do not claim correlation-aware risk unless the code actually computes and uses it.
-
-Before implementing correlation-aware risk, define:
-
-- return lookback
-- update frequency
-- missing-data handling
-- directional/concentration treatment
-- portfolio impact
-
-Test incremental value separately from entry logic.
-
-## Evidence
-
-Distinguish:
-
-VERIFIED / OBSERVED / INFERRED / ASSUMED / UNVERIFIED
-
-A plausible risk-control story is not proof that the runtime path enforces it.
-
-## REPORT
-
-### FINDING
-### ROOT CAUSE
-### CHANGE
-### VERIFICATION
-### REMAINING RISK
-
-For risk research, also report exact configuration, acceptance gates and evidence.
+Distinguish `VERIFIED`, `OBSERVED`, `INFERRED`, `ASSUMED`, `UNVERIFIED`. Report the current enforcement path, exact values/configuration, root cause, smallest safe change, authorized verification, risk scenarios not checked and remaining risk. Never equate a plausible risk-control explanation with proof the runtime path enforces it.

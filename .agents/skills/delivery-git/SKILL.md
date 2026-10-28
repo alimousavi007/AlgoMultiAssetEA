@@ -1,71 +1,44 @@
 ---
 name: delivery-git
-description: Git delivery workflow for AlgoMultiAssetEA. Use when reviewing repository state, preparing commits, committing verified changes, or pushing when explicitly requested.
-argument-hint: Describe the delivery, commit, branch, diff, or push objective.
+description: Safe Git delivery for AlgoMultiAssetEA. Use to inspect repository status and diffs, validate scope, prepare a commit, or push only after the corresponding action is explicitly authorized.
 ---
 
-# AlgoMultiAssetEA Delivery & Git Skill
+# Git Delivery Gate
 
-Use this skill after engineering or research work when Git delivery is requested.
+## Safety contract
 
-## Safety
+- Preserve all pre-existing user changes, staged content and untracked files.
+- Never run `reset`, `clean`, `restore`, `stash`, destructive checkout/switch, rebase, amend, history rewrite or force-push.
+- Do not stage all files blindly and do not use Git to conceal uncertain scope.
+- A request to fix or edit files does **not** authorize commit or push. Commit and push require separate explicit authorization.
+- Do not commit known broken/unverified changes unless the user explicitly requests that delivery.
 
-Preserve user changes.
+## Read-only gate
 
-Never automatically:
+1. Confirm repository root and current branch.
+2. Read `git status --short --branch`.
+3. Review the full diff, including staged and unstaged changes; inspect relevant untracked files without adding them.
+4. Check whitespace with `git diff --check` (and the staged equivalent if relevant).
+5. Map every changed path to the task scope. Separate pre-existing changes from changes made for this task where evidence allows.
+6. Record actual verification status and remaining risk.
 
-- reset
-- clean
-- delete unrelated files
-- rewrite history
-- force-push
-- discard uncommitted user work
+If Git tools are unavailable, state that the gate could not be run. Do not simulate its result.
 
-Do not use Git to hide an unclear scope.
+## Commit gate — only after explicit authorization
 
-## Delivery workflow
+- Reconfirm status and diff immediately before staging.
+- Stage only the exact approved paths.
+- Recheck the staged diff and staged whitespace.
+- Use a concise message that describes the change; do not claim tests not run.
+- Report the new commit SHA and included paths only after Git confirms success.
 
-STATUS
-→ DIFF
-→ DIFF CHECK
-→ SCOPE CHECK
-→ COMMIT
-→ PUSH only when explicitly requested
+## Push gate — separate explicit authorization
 
-Before commit:
+- Verify branch and upstream.
+- Confirm the target remote/branch and inspect the commits to be pushed.
+- Never force-push.
+- Report the actual push result; do not infer success from local commit existence.
 
-- inspect `git status`
-- inspect the diff
-- check whitespace with `git diff --check`
-- verify only intended files are included
-- confirm verification status
-- review commit scope
+## Delivery report
 
-Do not commit known broken/unverified work unless the user explicitly asks for that delivery.
-
-## Push
-
-Push only when explicitly requested or when the calling task clearly authorizes push.
-
-Never force-push.
-
-Do not rebase or rewrite history as part of routine delivery.
-
-## REPORT
-
-State:
-
-- branch
-- files included
-- verification status
-- commit hash/message when committed
-- push status when pushed
-- any remaining risk or blocked step
-
-
-## Commit/Push Authorization (strict)
-- Commit only after the user\'s explicit authorization to commit.
-- Push only after the user\'s explicit authorization to push.
-- A general request to fix, implement, or apply changes is not by itself permission to commit or push.
-- Never stage all files blindly. Inspect status, diff, scope, and verification.
-- Preserve pre-existing user changes and distinguish them from changes made by the current task.
+State branch, included paths, pre-existing changes preserved, `diff --check` result, verification evidence, commit status/SHA, push status and unresolved blockers. Use `NOT RUN` rather than implying a check occurred.
