@@ -765,28 +765,65 @@ public:
 
          ResetLastError();
 
-       bool request_result=
-          m_trade.PositionOpen(
-             request.symbol,
-             order_type,
-             request.volume,
-             price,
-             request.stop_loss,
-             request.take_profit,
-             request.comment);
+         bool request_result=
+            m_trade.PositionOpen(
+               request.symbol,
+               order_type,
+               request.volume,
+               price,
+               request.stop_loss,
+               request.take_profit,
+               request.comment);
 
-       FillExecutionResult(result, request.volume);
+         FillExecutionResult(result, request.volume);
 
-       if(!request_result &&
-          result.retcode==0)
-         {
-          result.message=
-             "PositionOpen failed before server execution";
+         if(!request_result &&
+            result.retcode==0)
+           {
+            result.message=
+               "PositionOpen failed before server execution";
 
-          return false;
-         }
+            return false;
+           }
 
-       return result.success;
+         // Try to resolve position ticket for durable correlation if not present
+         if(result.position_ticket == 0 && result.success)
+           {
+            int total_pos = PositionsTotal();
+            ulong best_ticket = 0;
+            int best_matches = 0;
+            for(int p = 0; p < total_pos; p++)
+              {
+               ulong pt = PositionGetTicket(p);
+               if(pt == 0) continue;
+               if(!PositionSelectByTicket(pt)) continue;
+               string psym = PositionGetString(POSITION_SYMBOL);
+               if(psym != request.symbol) continue;
+               long pmagic = PositionGetInteger(POSITION_MAGIC);
+               if((ulong)pmagic != request.magic) continue;
+               string pcomment = PositionGetString(POSITION_COMMENT);
+               // Prefer comment match if request has comment
+               int matches = 0;
+               if(request.comment != "" && pcomment == request.comment) matches += 2;
+               else if(pcomment != "") matches += 1;
+               // Time proximity not directly available; rely on magic/symbol/comment
+               if(matches == 0 && request.comment == "") matches += 1; // last resort if unambiguous
+               if(matches > best_matches)
+                 {
+                  best_matches = matches;
+                  best_ticket = pt;
+                 }
+               else if(matches == best_matches && best_ticket != 0)
+                 {
+                  // ambiguous - do not overwrite
+                  best_matches = -1;
+                 }
+              }
+            if(best_matches > 0 && best_ticket != 0)
+               result.position_ticket = best_ticket;
+           }
+
+        return result.success;
         }
 
       //--- close

@@ -272,13 +272,13 @@ bool ResolveFreshnessForSymbol(const string symbol,
       int v=(int)StringToInteger(val);
       if(v<=0)
          return false;
-      if(key=="CONTEXT" || key=="C")
+      if(key=="CONTEXT" ||key=="C")
         { if(has_ctx) return false; ctx_sec=v; has_ctx=true; }
-      else if(key=="STRUCTURE" || key=="S")
+      else if(key=="STRUCTURE" ||key=="S")
         { if(has_struct) return false; struct_sec=v; has_struct=true; }
-      else if(key=="SETUP" || key=="U")
+      else if(key=="SETUP" ||key=="U")
         { if(has_setup) return false; setup_sec=v; has_setup=true; }
-      else if(key=="ENTRY" || key=="E")
+      else if(key=="ENTRY" ||key=="E")
         { if(has_entry) return false; entry_sec=v; has_entry=true; }
       else
         return false; // unknown role
@@ -300,20 +300,20 @@ bool ResolveFreshnessForSymbol(const string symbol,
       InpMinRR<=0.0)
       return false;
 
-   if(InpMinScore<0.0 || InpMinScore>100.0)
+   if(InpMinScore<0.0 ||InpMinScore>100.0)
       return false;
 
    if(InpConflictThreshold<0.0)
       return false;
 
-   if(InpSessionStartHour<0 || InpSessionStartHour>23 ||
-      InpSessionEndHour<0 || InpSessionEndHour>24)
+   if(InpSessionStartHour<0 ||InpSessionStartHour>23 ||
+      InpSessionEndHour<0 ||InpSessionEndHour>24)
       return false;
 
-   if(InpValueAreaPercent<=0.0 || InpValueAreaPercent>=1.0)
+   if(InpValueAreaPercent<=0.0 ||InpValueAreaPercent>=1.0)
       return false;
 
-    if(InpProfileSessionBars<=0 || InpProfileRollingBars<=0)
+    if(InpProfileSessionBars<=0 ||InpProfileRollingBars<=0)
        return false;
 
     if(InpFreshnessContextSeconds<=0 ||
@@ -370,7 +370,7 @@ bool NormalizeTradePlanStops(TradePlan& plan,
   {
    reason="";
 
-   if(!plan.valid || plan.entry<=0.0)
+   if(!plan.valid ||plan.entry<=0.0)
      {
       reason="Invalid trade plan or entry";
       return false;
@@ -395,21 +395,21 @@ bool NormalizeTradePlanStops(TradePlan& plan,
    double target=CAlgoUtils::NormalizePriceToTick(
                     plan.target, tick_size, target_round_up, (int)digits);
 
-   if(stop<=0.0 || target<=0.0)
+   if(stop<=0.0 ||target<=0.0)
      {
       reason="Normalized stop/target is invalid";
       return false;
      }
 
    if(plan.direction==SIGNAL_LONG &&
-      (stop>=plan.entry || target<=plan.entry))
+      (stop>=plan.entry ||target<=plan.entry))
      {
       reason="Long stop/target invalid after normalization";
       return false;
      }
 
    if(plan.direction==SIGNAL_SHORT &&
-      (stop<=plan.entry || target>=plan.entry))
+      (stop<=plan.entry ||target>=plan.entry))
      {
       reason="Short stop/target invalid after normalization";
       return false;
@@ -839,7 +839,7 @@ if(struct_res != EVIDENCE_SUFFICIENT_NO_INVALIDATION)
        return;
       }
 
-    if(runtime.hybrid_engine.IsPlanConsumed(decision.plan) || decision.plan.state==SETUP_STATE_CONSUMED)
+    if(runtime.hybrid_engine.IsPlanConsumed(decision.plan) ||decision.plan.state==SETUP_STATE_CONSUMED)
       {
        g_logger.Event(
           LOG_DEBUG, "HYBRID", "PLAN_CONSUMED", runtime.symbol, "", "",
@@ -984,10 +984,10 @@ if(struct_res != EVIDENCE_SUFFICIENT_NO_INVALIDATION)
     request.comment="AlgoMultiAssetEA_Hybrid";
     request.signal_id=normalized_plan.setup_id;
     request.attempt_id = normalized_plan.setup_id + "_" + IntegerToString(TimeCurrent()) + "_" + IntegerToString((int)MathRand());
-    
+
     // Check ledger for blocking unresolved attempts
     string ledger_block = "";
-    if(!g_execution_ledger.IsAvailable() || g_execution_ledger.HasBlockingUnresolved(ledger_block))
+    if(!g_execution_ledger.IsAvailable() ||g_execution_ledger.HasBlockingUnresolved(ledger_block))
       {
        g_logger.Event(
           LOG_WARNING, "EXECUTION", "EXECUTION_BLOCKED_LEDGER",
@@ -997,7 +997,7 @@ if(struct_res != EVIDENCE_SUFFICIENT_NO_INVALIDATION)
        runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
        return;
       }
-    
+
     if(g_execution_ledger.HasUnresolvedForSymbol(request.symbol, true))
       {
        g_logger.Event(
@@ -1008,7 +1008,7 @@ if(struct_res != EVIDENCE_SUFFICIENT_NO_INVALIDATION)
        runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
        return;
       }
-    
+
     // Create intent in ledger
     ExecutionAttemptRecord attempt_rec;
     attempt_rec.attempt_id = request.attempt_id;
@@ -1021,7 +1021,7 @@ if(struct_res != EVIDENCE_SUFFICIENT_NO_INVALIDATION)
     attempt_rec.entry_price = request.price;
     attempt_rec.stop_loss = request.stop_loss;
     attempt_rec.take_profit = request.take_profit;
-    
+
     if(!g_execution_ledger.CreateIntent(attempt_rec))
       {
        g_logger.Event(
@@ -1032,7 +1032,7 @@ if(struct_res != EVIDENCE_SUFFICIENT_NO_INVALIDATION)
        runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
        return;
       }
-    
+
     // Mark submission bound (after all validations passed)
     if(!g_execution_ledger.MarkSubmissionBound(request.attempt_id, "Pre-submit validation passed"))
       {
@@ -1044,7 +1044,7 @@ if(struct_res != EVIDENCE_SUFFICIENT_NO_INVALIDATION)
        runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
        return;
       }
-    
+
     string submit_reason = "";
     if(!g_execution_ledger.CanSubmit(request.attempt_id, submit_reason))
       {
@@ -1067,23 +1067,25 @@ if(struct_res != EVIDENCE_SUFFICIENT_NO_INVALIDATION)
        request.stop_loss,
        request.take_profit);
 
-    // Record submission attempt in ledger before API call
-    if(!g_execution_ledger.RecordSubmission(request.attempt_id))
-      {
-       g_logger.Event(
-          LOG_ERROR, "EXECUTION", "SUBMIT_RECORD_FAILED",
-          request.symbol, "", "",
-          request.signal_id,
-          "FAIL", "LEDGER_ERROR", "Failed to record submission attempt");
-       runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
-       return;
-      }
-
     ExecutionResult result;
     bool execution_ok = g_executor.Execute(request, result);
      g_logger.Trade(result);
 
-    // Record result in ledger
+    {
+       ENUM_EXEC_ATTEMPT_STATE st = EXEC_STATE_NONE;
+       if(g_execution_ledger.GetAttemptState(request.attempt_id, st))
+         {
+          if(st == EXEC_STATE_SUBMISSION_MAY_HAVE_OCCURRED)
+             g_execution_ledger.MarkReconciliationRequired(request.attempt_id, "Submission state observed after API attempt - reconciliation required");
+          else if(st == EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED)
+             {
+              // Attempt was never bound for submission in this flow; do not auto-submit
+              g_execution_ledger.MarkReconciliationRequired(request.attempt_id, "Attempt not bound before execution - reconciliation required");
+             }
+         }
+    }
+
+    // Record result in ledger after API call/observation
     g_execution_ledger.RecordResult(request.attempt_id, result, "Executor result");
 
 // An executor call consumes this setup even when it fails. Automatic
@@ -1094,8 +1096,7 @@ if(struct_res != EVIDENCE_SUFFICIENT_NO_INVALIDATION)
     if(!execution_ok || !result.success)
         {
          // If result is ambiguous, ensure reconciliation required
-         if(result.reconciliation_required || result.retcode == TRADE_RETCODE_TIMEOUT || 
-            result.retcode == TRADE_RETCODE_CONNECTION)
+         if(result.reconciliation_required || result.retcode == TRADE_RETCODE_TIMEOUT || result.retcode == TRADE_RETCODE_CONNECTION)
             {
              g_execution_ledger.MarkReconciliationRequired(request.attempt_id, "Ambiguous result after submit");
             }
@@ -1624,7 +1625,7 @@ ENUM_SYSTEM_INIT_STATUS InitializeSystemWhenReady()
        LogInitFailure("ExecutionLedger.Initialize");
        return SYSTEM_INIT_FAILED;
       }
-    
+
     int unresolved_count = 0;
     int unresolved = g_execution_ledger.RecoverUnresolved(unresolved_count);
     if(unresolved > 0)
