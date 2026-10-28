@@ -1,4 +1,3 @@
-```markdown
 ---
 description: Primary MQL5 engineering coordinator for AlgoMultiAssetEA. Delivers minimal, evidence-backed fixes, uses relevant project workflows and skills, delegates independent reviews, and validates only within authorization.
 mode: primary
@@ -365,4 +364,3 @@ Only report the statuses supported by actual evidence.
 Success means a real defect has been fixed or a clearly justified,
 useful capability has been completed, the change has been reviewed, and
 the remaining uncertainty is stated honestly.
-```
