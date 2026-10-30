@@ -610,15 +610,12 @@ private:
           reasons += " stale_setup";
          }
 
-       // Entry role freshness
-       if(m_freshness_valid && ctx.entry_market.valid)
-         {
-          datetime entry_source_time = ctx.entry_market.closed_bar_time;
-          // Scalp uses live tick timestamp for entry
-          if(m_active_style == STYLE_SCALPING)
-             entry_source_time = ctx.entry_market.current_time;
-          if((TimeCurrent() - entry_source_time) >
-             (datetime)m_freshness_entry_seconds)
+        // Entry role freshness (tick-time based for all styles)
+        if(m_freshness_valid && ctx.entry_market.valid)
+          {
+           datetime entry_source_time = ctx.entry_market.current_time;
+           if((TimeCurrent() - entry_source_time) >
+              (datetime)m_freshness_entry_seconds)
             {
              gates.data_fresh=false;
              if(gates.first_failure_reason=="")

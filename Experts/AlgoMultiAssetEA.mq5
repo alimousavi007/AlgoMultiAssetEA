@@ -675,12 +675,12 @@ void UpdateDashboardForChart()
       MarketSnapshot market;
       ResetLastError();
 
-       if(!g_runtime[i].market_context.GetSnapshot(
-            g_runtime[i].symbol,
-            g_runtime[i].signal_tf,
-            market))
-        {
-         g_dashboard.ShowStatus(
+      if(!g_runtime[i].market_context.GetSnapshot(
+           g_runtime[i].symbol,
+           g_runtime[i].context_tf,
+           market))
+      {
+       g_dashboard.ShowStatus(
             "WAITING FOR MARKET DATA | "+chart_symbol);
          ResetLastError();
          return;
@@ -722,7 +722,7 @@ void ShowRuntimeGateStatus(CSymbolRuntime &runtime,
 // Hybrid decision pipeline
 //==================================================================
 void ProcessHybridDecision(CSymbolRuntime& runtime,
-                           const HybridDecision& decision,
+                           HybridDecision& decision,
                            const PortfolioState& portfolio_state)
   {
    g_logger.Signal(decision);
@@ -945,6 +945,9 @@ if(struct_res != EVIDENCE_SUFFICIENT_NO_INVALIDATION)
      }
 
    g_dashboard.Update(decision, portfolio_state);
+
+   // All pre-submit revalidation checks passed — setup is valid and ready for execution
+   decision.plan.state = SETUP_STATE_VALID;
 
    bool execute=false;
 
@@ -1871,7 +1874,55 @@ void OnTimer()
 
    for(int i=0;i<3;i++)
       ProcessRuntime(g_runtime[i]);
-  }
+   }
+
+//+------------------------------------------------------------------+
+//| OnTradeTransaction                                               |
+//|                                                                  |
+//| Event-driven reconciliation of broker trade transactions.        |
+//| Matches transactions to execution attempts using broker          |
+//| identifiers and updates the ExecutionLedger. Does NOT auto-      |
+//| retry on ambiguous outcomes; complement to timer-based           |
+//| reconciliation in OnTimer.                                       |
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest &request,
+                        const MqlTradeResult &result)
+   {
+   if(!g_system_ready)
+      return;
+
+   // Only handle transactions for our managed magics
+   bool is_managed_magic =
+       trans.magic==MAGIC_HYBRID_SCALP ||
+       trans.magic==MAGIC_HYBRID_DAY   ||
+       trans.magic==MAGIC_HYBRID_SWING ||
+       trans.magic==MAGIC_TREND ||
+       trans.magic==MAGIC_BREAKOUT ||
+       trans.magic==MAGIC_MOMENTUM ||
+       trans.magic==MAGIC_MEAN_REVERSION ||
+       trans.magic==MAGIC_RELATIVE_VALUE;
+
+   if(!is_managed_magic)
+      return;
+
+   // Log transaction for auditability
+   g_logger.Event(
+      LOG_DEBUG, "TRADE", "TRADE_TRANSACTION",
+      trans.symbol, "", "",
+      "", "TXN", IntegerToString((int)trans.type),
+      "order="+IntegerToString((long)trans.order)+
+      " deal="+IntegerToString((long)trans.deal)+
+      " position="+IntegerToString((long)trans.position)+
+      " magic="+IntegerToString((long)trans.magic));
+
+   // Event-driven reconciliation: when a broker transaction related
+   // to our EA occurs, reconcile unresolved attempts. Reduces the
+   // fail-closed window for ambiguous submissions. Does NOT auto-
+   // retry; ReconcileAttempt preserves identity_proof_required and
+   // fail-closed-on-ambiguity constraints.
+   g_execution_ledger.ReconcileUnresolved(10);
+   }
 
 //==================================================================
 // OnDeinit
@@ -1955,3 +2006,4 @@ void OnTesterDeinit()
   {
   }
 //+------------------------------------------------------------------+
+

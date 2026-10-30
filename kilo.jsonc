@@ -2,5 +2,8 @@
   "$schema": "https://app.kilo.ai/config.json",
   "instructions": [
     ".kilo/rules/mql5.md"
+  ],
+  "plugin": [
+    "@dietrichgebert/ponytail@5.3.3"
   ]
 }

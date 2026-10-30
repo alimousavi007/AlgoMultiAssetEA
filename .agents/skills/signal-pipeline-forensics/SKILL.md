@@ -37,6 +37,7 @@ For multi-symbol behavior, inspect event scheduling and data readiness; do not a
 - Treat timeouts, absent callbacks or missing position evidence as unresolved unless terminal failure is independently proven.
 - Correlate execution with broker order/deal/history/position evidence; never infer a trade from a candidate or `TradePlan` alone.
 - If ledger and broker disagree, report the reconciliation gap; do not recommend blind retry.
+- `OnTradeTransaction` fires on broker trade transactions for managed magics. Treat it as an event-driven complement to timer-based reconciliation (e.g. 60s `OnTimer`), not as proof of terminal execution. A transaction callback does not by itself prove the intended fill occurred; ambiguous outcomes require `ReconcileAttempt` with `identity_proof_required` and `fail_closed_on_ambiguity`.
 
 ## Output
 

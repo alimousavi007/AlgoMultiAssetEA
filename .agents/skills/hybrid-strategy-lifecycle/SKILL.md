@@ -59,6 +59,14 @@ A candidate, score or `TradePlan` is not broker execution evidence. Trace each g
 - A retry is allowed only after a proven terminal failure. Timeout, missing callback, empty ticket or transiently absent position is not proof of terminal failure.
 - If impact cannot be bounded, block the affected symbol/execution scope; escalate wider only when portfolio impact cannot be ruled out.
 
+### Event-driven reconciliation (OnTradeTransaction)
+
+Timer-based reconciliation (e.g. every 60s in `OnTimer`) is the baseline fail-closed safety net. `OnTradeTransaction` is a **complement**, not a replacement:
+- It fires on broker trade transactions for managed symbols and magics.
+- It may trigger `ReconcileUnresolved` to reduce the fail-closed window for ambiguous submissions.
+- It does **not** authorize automatic retry; `ReconcileAttempt` preserves `identity_proof_required` and `fail_closed_on_ambiguity`.
+- Timeout, missing callback, or empty ticket is not proof that submission did not occur.
+
 ## Time handling
 
 The architecture requires server-time and UTC awareness. Preserve source timestamps and explicit conversion rules. Do not mix local PC time, server time, bar time and UTC without a documented conversion and comparison contract. Unspecified DST, offset or authoritative-clock details remain `UNKNOWN`.

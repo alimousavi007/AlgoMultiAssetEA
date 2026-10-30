@@ -27,6 +27,26 @@ Do not load every Skill by default. Avoid repeating a completed audit unless new
 4. Never invent API behavior, broker behavior, data, tests, compile results or optimization outcomes.
 5. When repository state and an older report disagree, verify current state and preserve the user's changes.
 
+### Evidence state definitions
+
+| State | Meaning | Required before acting |
+|-------|---------|------------------------|
+| `VERIFIED` | Directly observed from compiler output, tester logs, or code inspection of current revision | Safe to build on |
+| `OBSERVED` | Seen in logs, runtime output, or transaction records | Can inform decisions, not proof of correctness |
+| `INFERRED` | Logical consequence of verified facts | Needs confirmation before trade-relevant use |
+| `ASSUMED` | Not directly evidenced; working hypothesis | Must not gate trading behavior |
+| `UNVERIFIED` | Not checked yet | Blocks execution-affecting changes until resolved |
+
+### Verification before completion
+
+Do not claim a phase complete until its evidence class matches the claim:
+- Source inspection alone ≠ compile evidence
+- Compile success ≠ tester/runner evidence
+- Tester history ≠ forward/live validation
+- Log message ≠ broker-confirmed execution
+
+Label checks `PASSED`, `FAILED`, `NOT RUN` or `BLOCKED`; never imply a check ran when it did not.
+
 ## Architecture facts and decision boundaries
 
 - The active Hybrid design has four independent timeframe roles: **Context, Structure, Setup and Entry**. Setup is conceptually independent from Structure even when their configured timeframes happen to match.

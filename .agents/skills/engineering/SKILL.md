@@ -36,9 +36,20 @@ Trace `EVENT → INPUTS → STATE → CALLERS → LOG/RETcode → FAILURE`. Use 
 
 ## Feature
 
-`REQUIREMENT → EXISTING CAPABILITY → DEPENDENCIES/SAFETY → MINIMAL DESIGN → IMPLEMENT → AUTHORIZED VERIFICATION`
+`REQUIREMENT → EXISTING CAPABILITY → DEPENDENCIES/SAFETY → ACCEPTANCE CRITERIA → MINIMAL DESIGN → IMPLEMENT → AUTHORIZED VERIFICATION`
 
-Specify observable acceptance criteria before coding. Do not couple unrelated behavior or change trading logic to fix a UI-only defect.
+Before coding, define observable acceptance criteria and how each will be verified (static inspection, compile, tester, or runtime). Acceptance criteria are the contract: a change is not complete until every criterion is evidenced. Do not couple unrelated behavior or change trading logic to fix a UI-only defect.
+
+### Test-driven acceptance criteria (TDD)
+
+For order-path and risk-sensitive logic:
+1. Define the pass/fail condition and expected values before implementing.
+2. Identify the exact check (static rule, unit check, or authorized tester run) that will confirm each criterion.
+3. Implement the minimal change satisfying all criteria.
+4. Verify each criterion against actual output, not intention.
+5. Report each criterion as `PASSED`, `FAILED`, `NOT RUN`, or `BLOCKED`.
+
+A passing compile is not an accepted criterion for trading behavior.
 
 ## Refactor
 
