@@ -87,6 +87,8 @@ public:
     bool               IsAvailable() const { return m_db_available; }
 
     bool               GetAttemptState(const string attempt_id, ENUM_EXEC_ATTEMPT_STATE &state);
+    bool               GetAttempt(const string attempt_id, ExecutionAttemptRecord &record);
+    bool               HasUnresolvedForSymbol(const string symbol, bool include_ambiguous);
 
    // Intent and submission tracking
    bool               CreateIntent(ExecutionAttemptRecord &record);
@@ -102,6 +104,7 @@ public:
     // Broker reconciliation
     bool               ReconcileAttempt(const string attempt_id);
     bool               ReconcileUnresolved(int max_attempts=10);
+    int                RecoverUnresolved(int &out_count);
     bool               HasBlockingUnresolved(string &blocking_reason);
 
     // State history
@@ -193,11 +196,35 @@ void CExecutionLedger::Deinitialize()
 //| Escape SQL                                                        |
 //+------------------------------------------------------------------+
 string CExecutionLedger::EscapeSQL(const string s) const
-  {
-   string result = s;
-   StringReplace(result, "'", "''");
-   return result;
-  }
+   {
+    string result = s;
+    StringReplace(result, "'", "''");
+    return result;
+   }
+
+//+------------------------------------------------------------------+
+//| Database Column String Helper                                    |
+//+------------------------------------------------------------------+
+string DatabaseColumnString(int handle, int column)
+   {
+    string result = "";
+    DatabaseColumnText(handle, column, result);
+    return result;
+   }
+
+long DatabaseColumnLong2(int handle, int column)
+   {
+    long result = 0;
+    DatabaseColumnLong(handle, column, result);
+    return result;
+   }
+
+double DatabaseColumnDouble2(int handle, int column)
+   {
+    double result = 0.0;
+    DatabaseColumnDouble(handle, column, result);
+    return result;
+   }
 
 //+------------------------------------------------------------------+
 //| Execute SQL                                                       |
@@ -677,31 +704,31 @@ bool CExecutionLedger::GetAttempt(const string attempt_id, ExecutionAttemptRecor
       record.attempt_id = DatabaseColumnString(handle, 0);
       record.setup_id = DatabaseColumnString(handle, 1);
       record.symbol = DatabaseColumnString(handle, 2);
-      record.magic = (ulong)DatabaseColumnLong(handle, 3);
-      record.intent = (ENUM_ORDER_INTENT)DatabaseColumnLong(handle, 4);
-      record.direction = (ENUM_SIGNAL_DIRECTION)DatabaseColumnLong(handle, 5);
-      record.requested_volume = DatabaseColumnDouble(handle, 6);
-      record.executed_volume = DatabaseColumnDouble(handle, 7);
-      record.remaining_volume = DatabaseColumnDouble(handle, 8);
-      record.entry_price = DatabaseColumnDouble(handle, 9);
-      record.stop_loss = DatabaseColumnDouble(handle, 10);
-      record.take_profit = DatabaseColumnDouble(handle, 11);
-      record.created_at = (datetime)DatabaseColumnLong(handle, 12);
-      record.submission_bound_at = (datetime)DatabaseColumnLong(handle, 13);
-      record.submitted_at = (datetime)DatabaseColumnLong(handle, 14);
-      record.broker_response_at = (datetime)DatabaseColumnLong(handle, 15);
-      record.observed_at = (datetime)DatabaseColumnLong(handle, 16);
-      record.resolved_at = (datetime)DatabaseColumnLong(handle, 17);
-      record.last_retcode = (uint)DatabaseColumnLong(handle, 18);
+      record.magic = (ulong)DatabaseColumnLong2(handle, 3);
+      record.intent = (ENUM_ORDER_INTENT)DatabaseColumnLong2(handle, 4);
+      record.direction = (ENUM_SIGNAL_DIRECTION)DatabaseColumnLong2(handle, 5);
+      record.requested_volume = DatabaseColumnDouble2(handle, 6);
+      record.executed_volume = DatabaseColumnDouble2(handle, 7);
+      record.remaining_volume = DatabaseColumnDouble2(handle, 8);
+      record.entry_price = DatabaseColumnDouble2(handle, 9);
+      record.stop_loss = DatabaseColumnDouble2(handle, 10);
+      record.take_profit = DatabaseColumnDouble2(handle, 11);
+      record.created_at = (datetime)DatabaseColumnLong2(handle, 12);
+      record.submission_bound_at = (datetime)DatabaseColumnLong2(handle, 13);
+      record.submitted_at = (datetime)DatabaseColumnLong2(handle, 14);
+      record.broker_response_at = (datetime)DatabaseColumnLong2(handle, 15);
+      record.observed_at = (datetime)DatabaseColumnLong2(handle, 16);
+      record.resolved_at = (datetime)DatabaseColumnLong2(handle, 17);
+      record.last_retcode = (uint)DatabaseColumnLong2(handle, 18);
       record.last_retcode_desc = DatabaseColumnString(handle, 19);
-      record.broker_order_ticket = (ulong)DatabaseColumnLong(handle, 20);
-      record.broker_deal_ticket = (ulong)DatabaseColumnLong(handle, 21);
-      record.broker_position_ticket = (ulong)DatabaseColumnLong(handle, 22);
+      record.broker_order_ticket = (ulong)DatabaseColumnLong2(handle, 20);
+      record.broker_deal_ticket = (ulong)DatabaseColumnLong2(handle, 21);
+      record.broker_position_ticket = (ulong)DatabaseColumnLong2(handle, 22);
       record.failure_class = DatabaseColumnString(handle, 23);
-      record.state = (ENUM_EXEC_ATTEMPT_STATE)DatabaseColumnLong(handle, 24);
-      record.submission_allowed = (DatabaseColumnLong(handle, 25) == 1);
+      record.state = (ENUM_EXEC_ATTEMPT_STATE)DatabaseColumnLong2(handle, 24);
+      record.submission_allowed = (DatabaseColumnLong2(handle, 25) == 1);
       record.last_reason = DatabaseColumnString(handle, 26);
-      record.schema_version = (int)DatabaseColumnLong(handle, 27);
+      record.schema_version = (int)DatabaseColumnLong2(handle, 27);
       found = true;
      }
    DatabaseFinalize(handle);
@@ -735,7 +762,7 @@ int CExecutionLedger::RecoverUnresolved(int &out_count)
 
    int count = 0;
    if(DatabaseRead(handle))
-      count = (int)DatabaseColumnLong(handle, 0);
+      count = (int)DatabaseColumnLong2(handle, 0);
    DatabaseFinalize(handle);
 
    out_count = count;
@@ -1108,7 +1135,7 @@ bool CExecutionLedger::HasBlockingUnresolved(string &blocking_reason)
 
     int count = 0;
     if(DatabaseRead(handle))
-       count = (int)DatabaseColumnLong(handle, 0);
+       count = (int)DatabaseColumnLong2(handle, 0);
     DatabaseFinalize(handle);
 
     if(count > 0)
@@ -1145,7 +1172,7 @@ bool CExecutionLedger::HasUnresolvedForSymbol(const string symbol, bool include_
 
    int count = 0;
    if(DatabaseRead(handle))
-      count = (int)DatabaseColumnLong(handle, 0);
+      count = (int)DatabaseColumnLong2(handle, 0);
    DatabaseFinalize(handle);
 
    return count > 0;
@@ -1163,20 +1190,28 @@ bool CExecutionLedger::GetAttemptState(const string attempt_id, ENUM_EXEC_ATTEMP
       return false;
    state = rec.state;
    return true;
-  }
-   if(!m_db_available || m_db_handle == INVALID_HANDLE)
-      return false;
+   }
 
-   datetime now = TimeCurrent();
-   string sql = "INSERT INTO execution_state_history (attempt_id, old_state, new_state, transition_at, reason, retcode) VALUES ('" +
-                EscapeSQL(attempt_id) + "'," +
-                IntegerToString((int)old_state) + "," +
-                IntegerToString((int)new_state) + "," +
-                IntegerToString((long)now) + ",'" +
-                EscapeSQL(reason) + "'," +
-                IntegerToString((long)retcode) + ");";
+//+------------------------------------------------------------------+
+//| Log State Transition                                             |
+//+------------------------------------------------------------------+
+bool CExecutionLedger::LogStateTransition(const string attempt_id, ENUM_EXEC_ATTEMPT_STATE old_state,
+                                          ENUM_EXEC_ATTEMPT_STATE new_state, const string reason,
+                                          uint retcode)
+   {
+    if(!m_db_available || m_db_handle == INVALID_HANDLE)
+       return false;
 
-   return ExecuteSQL(sql);
-  }
+    datetime now = TimeCurrent();
+    string sql = "INSERT INTO execution_state_history (attempt_id, old_state, new_state, transition_at, reason, retcode) VALUES ('" +
+                 EscapeSQL(attempt_id) + "'," +
+                 IntegerToString((int)old_state) + "," +
+                 IntegerToString((int)new_state) + "," +
+                 IntegerToString((long)now) + ",'" +
+                 EscapeSQL(reason) + "'," +
+                 IntegerToString((long)retcode) + ");";
+
+    return ExecuteSQL(sql);
+   }
 
 #endif

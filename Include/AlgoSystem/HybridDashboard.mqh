@@ -368,13 +368,13 @@ public:
         {
          if(decision.plan.valid)
            {
-            SetLabelText(8, "ENTRY: " + DoubleToString(decision.plan.entry, (int)decision.context.signal_market.properties.digits), "LIME");
+            SetLabelText(8, "ENTRY: " + DoubleToString(decision.plan.entry, (int)decision.context.setup_market.properties.digits), "LIME");
             PositionLabel(8, x_col2, y_start + y_step * (++row));
 
-            SetLabelText(9, "SL: " + DoubleToString(decision.plan.stop, (int)decision.context.signal_market.properties.digits), "AMBER");
+            SetLabelText(9, "SL: " + DoubleToString(decision.plan.stop, (int)decision.context.setup_market.properties.digits), "AMBER");
             PositionLabel(9, x_col2, y_start + y_step * (++row));
 
-            SetLabelText(10, "TP: " + DoubleToString(decision.plan.target, (int)decision.context.signal_market.properties.digits), "AMBER");
+            SetLabelText(10, "TP: " + DoubleToString(decision.plan.target, (int)decision.context.setup_market.properties.digits), "AMBER");
             PositionLabel(10, x_col2, y_start + y_step * (++row));
 
             SetLabelText(11, "RR: " + DoubleToString(decision.plan.reward_to_risk, 2), "SILVER");
@@ -403,7 +403,7 @@ public:
       row = 7;
       string profile_str = "POC: " +
          (decision.context.profile.valid ?
-            DoubleToString(decision.context.profile.poc, (int)decision.context.signal_market.properties.digits) : "N/A");
+            DoubleToString(decision.context.profile.poc, (int)decision.context.setup_market.properties.digits) : "N/A");
       SetLabelText(13, profile_str, "SILVER");
       PositionLabel(13, x_col1, y_start + y_step * row);
 
@@ -424,8 +424,8 @@ public:
 
       row = 10;
       string spread_str = "SPREAD: " +
-         DoubleToString(decision.context.signal_market.spread_points /
-                        decision.context.signal_market.properties.point, 1) + "pts";
+         DoubleToString(decision.context.setup_market.spread_points /
+                        decision.context.setup_market.properties.point, 1) + "pts";
       SetLabelText(16, spread_str, "SILVER");
       PositionLabel(16, x_col1, y_start + y_step * row);
 

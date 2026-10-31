@@ -539,7 +539,7 @@ private:
        // Common ambiguous: timeout/connection issues - classify conservatively
        if(retcode==TRADE_RETCODE_TIMEOUT ||
           retcode==TRADE_RETCODE_CONNECTION ||
-          retcode==TRADE_RETCODE_INVALID_PRICES ||
+          retcode==TRADE_RETCODE_INVALID_PRICE ||
           retcode==TRADE_RETCODE_PRICE_CHANGED ||
           retcode==TRADE_RETCODE_PRICE_OFF ||
           retcode==TRADE_RETCODE_REQUOTE)
@@ -554,7 +554,7 @@ private:
       {
        if(retcode==TRADE_RETCODE_TIMEOUT ||
           retcode==TRADE_RETCODE_CONNECTION ||
-          retcode==TRADE_RETCODE_INVALID_PRICES ||
+          retcode==TRADE_RETCODE_INVALID_PRICE ||
           retcode==TRADE_RETCODE_PRICE_CHANGED ||
           retcode==TRADE_RETCODE_PRICE_OFF ||
           retcode==TRADE_RETCODE_REQUOTE)

@@ -210,6 +210,7 @@ public:
 
    void              SetMinScore(double min_score) { m_min_score = min_score; }
    void              SetConflictThreshold(double threshold) { m_conflict_threshold = threshold; }
+   void              SetMinRR(double min_rr) { m_min_rr = min_rr; }
     void              SetFreshnessParams(int context_seconds,
                                          int structure_seconds,
                                          int setup_seconds,
@@ -275,7 +276,7 @@ public:
       if(!m_momentum_engine.Initialize(symbol, entry_tf))
          return false;
 
-      if(!m_bias_engine.Initialize(symbol, structure_tf))
+      if(!m_bias_engine.Initialize(symbol, structure_tf, entry_tf))
          return false;
 
       if(!m_news_service.Initialize())
@@ -302,6 +303,8 @@ public:
    int               GetDigits() const { return m_digits; }
 
 private:
+   bool               m_initialized;
+
    datetime          GetCurrentTicket()
      {
       MqlDateTime dt;
@@ -485,7 +488,7 @@ public:
 
       if(setup_market.valid) ctx.profile=m_profile_engine.Calculate(setup_market, true); else { ctx.profile.valid=false; ctx.profile.reason="SETUP_MARKET_INVALID"; }
 
-      if(structure_market.valid) ctx.liquidity=m_liquidity_engine.Calculate(structure_market, ctx); else { ctx.liquidity.valid=false; ctx.liquidity.reason="STRUCTURE_MARKET_INVALID"; }
+      if(structure_market.valid) ctx.liquidity=m_liquidity_engine.Calculate(ctx); else { ctx.liquidity.valid=false; ctx.liquidity.reason="STRUCTURE_MARKET_INVALID"; }
 
       if(context_market.valid && ctx.context_features.valid) ctx.regime=m_regime_engine.Calculate(context_market, ctx.context_features); else { ctx.regime.valid=false; ctx.regime.reason="CONTEXT_INVALID"; }
 
@@ -1057,6 +1060,7 @@ public:
            }
         }
       double entry_short_score=CalculateEntryScore(entry_price, 0, 0, SIGNAL_SHORT, ctx);
+      double entry_long_score=CalculateEntryScore(entry_price, 0, 0, SIGNAL_LONG, ctx);
 
       double bias_weight=0.20;
       double liquidity_weight=0.20;
@@ -1121,7 +1125,7 @@ public:
          (m_last_signal_time == ctx.context_market.closed_bar_time) &&
          (m_last_signal_consumed);
 
-       if(plan.consumed)
+       if(is_duplicate)
          {
           decision.status=DECISION_NO_TRADE;
           decision.gates=gates;
@@ -1651,9 +1655,9 @@ public:
           return EVIDENCE_STRUCTURAL_INVALIDATION_CONFIRMED;
        if(!plan.liquidity_used.valid)
           return EVIDENCE_INSUFFICIENT_EVIDENCE;
-       if(!plan.liquidity_used.symbol.IsEmpty() && plan.liquidity_used.symbol != m_symbol)
-          return EVIDENCE_SYMBOL_OR_TIMEFRAME_MISMATCH;
-       if(!plan.symbol.IsEmpty() && plan.symbol != m_symbol)
+        if(StringLen(plan.liquidity_used.symbol) > 0 && plan.liquidity_used.symbol != m_symbol)
+           return EVIDENCE_SYMBOL_OR_TIMEFRAME_MISMATCH;
+        if(StringLen(plan.symbol) > 0 && plan.symbol != m_symbol)
           return EVIDENCE_SYMBOL_OR_TIMEFRAME_MISMATCH;
        if(plan.liquidity_used.timeframe != PERIOD_CURRENT)
           {
@@ -1677,11 +1681,12 @@ public:
            {
             tick_time_src = tick_check.time;
            }
-         if(tick_time_src <= 0)
-           {
-            // unprovenable timestamp -> treat as stale/unverified per approved policy
-            return EVIDENCE_TICK_STALE_OR_UNVERIFIED;
-           }
+        if(tick_time_src <= 0)
+         {
+          // unprovenable timestamp -> treat as stale/unverified per approved policy
+          return EVIDENCE_TICK_STALE_OR_UNVERIFIED;
+         }
+        if(plan.direction == SIGNAL_LONG)
          {
           if(tick_check.bid <= 0.0)
              return EVIDENCE_TICK_UNAVAILABLE;

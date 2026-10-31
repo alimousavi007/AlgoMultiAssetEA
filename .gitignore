@@ -58,3 +58,7 @@
 # Kilo project agents (when present)
 !.kilo/agents/
 !.kilo/agents/*.md
+
+# Build tools
+!tools/
+!tools/Compile-MT5.ps1

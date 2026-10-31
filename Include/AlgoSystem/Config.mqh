@@ -90,15 +90,15 @@ public:
       MaxConsecutiveLosses = 3;
 
       ScalpStructureTF = PERIOD_M15;
-      ScalpSignalTF    = PERIOD_M5;
+      ScalpSetupTF    = PERIOD_M5;
       ScalpEntryTF     = PERIOD_M1;
 
       DayStructureTF = PERIOD_H4;
-      DaySignalTF    = PERIOD_H1;
+      DaySetupTF    = PERIOD_H1;
       DayEntryTF     = PERIOD_M15;
 
       SwingStructureTF = PERIOD_D1;
-      SwingSignalTF    = PERIOD_H4;
+      SwingSetupTF    = PERIOD_H4;
       SwingEntryTF     = PERIOD_H1;
      }
   };

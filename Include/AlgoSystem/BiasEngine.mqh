@@ -176,7 +176,7 @@ public:
       result.bos_long=false;
       result.bos_short=false;
       result.choch=false;
-      result.bar_time=context.signal_market.closed_bar_time;
+      result.bar_time=context.setup_market.closed_bar_time;
       result.symbol=m_symbol;
       result.timeframe=m_structure_tf;
       result.reason="";
@@ -257,7 +257,7 @@ public:
 
       if(profile.valid && profile.poc > 0)
         {
-         double close=context.signal_market.closed_bar.close;
+         double close=context.setup_market.closed_bar.close;
          if(close > profile.vah)
            {
             if(result.bias==BIAS_BEARISH || result.bias==BIAS_CONFLICTED)

@@ -540,7 +540,7 @@ public:
       result.event_consumed=false;
       result.symbol=m_symbol;
       result.timeframe=m_timeframe;
-      result.bar_time=context.signal_market.closed_bar_time;
+      result.bar_time=context.setup_market.closed_bar_time;
       result.reason="";
 
       if(!m_initialized)

@@ -288,6 +288,7 @@ bool ResolveFreshnessForSymbol(const string symbol,
    return true;
   }
 
+bool ValidInputSet()
   {
    if(InpGoldSymbol=="" &&
       InpSilverSymbol=="" &&
@@ -637,6 +638,7 @@ public:
 CSymbolRuntime g_runtime[3];
 
 CAlgoStateManager   g_state;
+CRiskEngine         g_risk_engine;
 CAlgoPortfolioRisk  g_portfolio_risk;
 CTradeExecutor      g_executor;
 CExecutionLedger    g_execution_ledger;
@@ -1894,14 +1896,14 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
 
    // Only handle transactions for our managed magics
    bool is_managed_magic =
-       trans.magic==MAGIC_HYBRID_SCALP ||
-       trans.magic==MAGIC_HYBRID_DAY   ||
-       trans.magic==MAGIC_HYBRID_SWING ||
-       trans.magic==MAGIC_TREND ||
-       trans.magic==MAGIC_BREAKOUT ||
-       trans.magic==MAGIC_MOMENTUM ||
-       trans.magic==MAGIC_MEAN_REVERSION ||
-       trans.magic==MAGIC_RELATIVE_VALUE;
+        request.magic==MAGIC_HYBRID_SCALP ||
+        request.magic==MAGIC_HYBRID_DAY   ||
+        request.magic==MAGIC_HYBRID_SWING ||
+        request.magic==MAGIC_TREND ||
+        request.magic==MAGIC_BREAKOUT ||
+        request.magic==MAGIC_MOMENTUM ||
+        request.magic==MAGIC_MEAN_REVERSION ||
+        request.magic==MAGIC_RELATIVE_VALUE;
 
    if(!is_managed_magic)
       return;
@@ -1914,7 +1916,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
       "order="+IntegerToString((long)trans.order)+
       " deal="+IntegerToString((long)trans.deal)+
       " position="+IntegerToString((long)trans.position)+
-      " magic="+IntegerToString((long)trans.magic));
+      " magic="+IntegerToString((long)request.magic));
 
    // Event-driven reconciliation: when a broker transaction related
    // to our EA occurs, reconcile unresolved attempts. Reduces the
