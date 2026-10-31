@@ -1623,13 +1623,22 @@ ENUM_SYSTEM_INIT_STATUS InitializeSystemWhenReady()
        return SYSTEM_INIT_FAILED;
       }
 
-    if(!g_execution_ledger.Initialize("AlgoMultiAssetEA_ExecutionLedger.sqlite"))
-      {
-       // Fail closed for new entries - ledger required for attempt tracking
-       g_initialization_started=false;
-       LogInitFailure("ExecutionLedger.Initialize");
-       return SYSTEM_INIT_FAILED;
-      }
+     if(!g_execution_ledger.Initialize("AlgoMultiAssetEA_ExecutionLedger.sqlite"))
+       {
+        // Fail closed for new entries - ledger required for attempt tracking
+        g_initialization_started=false;
+        string ledger_stage=g_execution_ledger.LastInitStage();
+        if(ledger_stage=="")
+           ledger_stage="ExecutionLedger.Initialize";
+        string ledger_operation=g_execution_ledger.LastInitOperation();
+        int ledger_error=g_execution_ledger.LastInitError();
+        g_logger.Event(
+           LOG_ERROR, "INIT", "INIT_FAILED",
+           "", "", ledger_stage, "", "FAIL", "INIT",
+           "operation="+ledger_operation+" LastError="+IntegerToString(ledger_error),
+           ledger_error);
+        return SYSTEM_INIT_FAILED;
+       }
 
     int unresolved_count = 0;
     int unresolved = g_execution_ledger.RecoverUnresolved(unresolved_count);

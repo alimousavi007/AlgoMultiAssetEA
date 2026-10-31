@@ -69,6 +69,9 @@ private:
    string             m_db_filename;
    int                m_schema_version;
    int                m_open_attempts_count;
+   string             m_last_init_stage;
+   string             m_last_init_operation;
+   int                m_last_init_error;
 
    bool               CreateSchema();
    bool               MigrateSchema();
@@ -85,6 +88,9 @@ public:
 
     bool               IsInitialized() const { return m_initialized && m_db_available; }
     bool               IsAvailable() const { return m_db_available; }
+   string             LastInitStage() const { return m_last_init_stage; }
+   string             LastInitOperation() const { return m_last_init_operation; }
+   int                LastInitError() const { return m_last_init_error; }
 
     bool               GetAttemptState(const string attempt_id, ENUM_EXEC_ATTEMPT_STATE &state);
     bool               GetAttempt(const string attempt_id, ExecutionAttemptRecord &record);
@@ -123,7 +129,10 @@ CExecutionLedger::CExecutionLedger()
    m_db_available = false;
    m_db_filename = "";
    m_schema_version = 1;
-   m_open_attempts_count = 0;
+    m_open_attempts_count = 0;
+    m_last_init_stage = "";
+    m_last_init_operation = "";
+    m_last_init_error = 0;
   }
 
 //+------------------------------------------------------------------+
@@ -142,27 +151,41 @@ bool CExecutionLedger::Initialize(const string db_name)
    if(m_initialized)
       return m_db_available;
 
-   m_db_filename = db_name;
-   m_db_handle = DatabaseOpen(m_db_filename, DATABASE_OPEN_READWRITE | DATABASE_OPEN_CREATE);
+    m_last_init_stage = "";
+    m_last_init_operation = "";
+    m_last_init_error = 0;
 
-   if(m_db_handle == INVALID_HANDLE)
-     {
-      m_db_available = false;
-      m_initialized = true;
-      return false;
-     }
+    m_db_filename = db_name;
+    ResetLastError();
+    m_db_handle = DatabaseOpen(m_db_filename, DATABASE_OPEN_READWRITE | DATABASE_OPEN_CREATE);
+
+    if(m_db_handle == INVALID_HANDLE)
+      {
+       m_last_init_stage = "ExecutionLedger.DatabaseOpen";
+       m_last_init_operation = "DatabaseOpen";
+       m_last_init_error = GetLastError();
+       m_db_available = false;
+       m_initialized = true;
+       return false;
+      }
 
    m_db_available = true;
 
    // Check schema
-   if(!CreateSchema())
-     {
-      DatabaseClose(m_db_handle);
-      m_db_handle = INVALID_HANDLE;
-      m_db_available = false;
-      m_initialized = true;
-      return false;
-     }
+    if(!CreateSchema())
+      {
+       if(m_last_init_stage == "")
+         {
+          m_last_init_stage = "ExecutionLedger.CreateSchema";
+          m_last_init_operation = "CreateSchema";
+          m_last_init_error = GetLastError();
+         }
+       DatabaseClose(m_db_handle);
+       m_db_handle = INVALID_HANDLE;
+       m_db_available = false;
+       m_initialized = true;
+       return false;
+      }
 
    if(!MigrateSchema())
      {
@@ -234,10 +257,9 @@ bool CExecutionLedger::ExecuteSQL(const string sql)
    if(m_db_handle == INVALID_HANDLE)
       return false;
 
-   int res = DatabaseExecute(m_db_handle, sql);
-   if(res != 0)
-      return false;
-   return true;
+    if(!DatabaseExecute(m_db_handle, sql))
+       return false;
+    return true;
   }
 
 //+------------------------------------------------------------------+
@@ -279,10 +301,16 @@ bool CExecutionLedger::CreateSchema()
                  "schema_version INTEGER"
                  ");";
 
-   if(!ExecuteSQL(sql1))
-      return false;
+    ResetLastError();
+    if(!ExecuteSQL(sql1))
+      {
+       m_last_init_stage = "ExecutionLedger.CreateSchema";
+       m_last_init_operation = "ExecuteSQL(sql1:CREATE_EXECUTION_ATTEMPTS)";
+       m_last_init_error = GetLastError();
+       return false;
+      }
 
-   string sql2 = "CREATE TABLE IF NOT EXISTS execution_state_history ("
+    string sql2 = "CREATE TABLE IF NOT EXISTS execution_state_history ("
                  "id INTEGER PRIMARY KEY AUTOINCREMENT,"
                  "attempt_id TEXT,"
                  "old_state INTEGER,"
@@ -292,37 +320,76 @@ bool CExecutionLedger::CreateSchema()
                  "retcode INTEGER"
                  ");";
 
-   if(!ExecuteSQL(sql2))
-      return false;
+    ResetLastError();
+    if(!ExecuteSQL(sql2))
+      {
+       m_last_init_stage = "ExecutionLedger.CreateSchema";
+       m_last_init_operation = "ExecuteSQL(sql2:CREATE_EXECUTION_STATE_HISTORY)";
+       m_last_init_error = GetLastError();
+       return false;
+      }
 
-   string sql3 = "CREATE TABLE IF NOT EXISTS execution_schema_meta ("
+    string sql3 = "CREATE TABLE IF NOT EXISTS execution_schema_meta ("
                  "key TEXT PRIMARY KEY,"
                  "value TEXT"
                  ");";
 
-   if(!ExecuteSQL(sql3))
-      return false;
+    ResetLastError();
+    if(!ExecuteSQL(sql3))
+      {
+       m_last_init_stage = "ExecutionLedger.CreateSchema";
+       m_last_init_operation = "ExecuteSQL(sql3:CREATE_EXECUTION_SCHEMA_META)";
+       m_last_init_error = GetLastError();
+       return false;
+      }
 
    // Check/set schema version
    string check_sql = "SELECT value FROM execution_schema_meta WHERE key='schema_version';";
-   int handle = DatabasePrepare(m_db_handle, check_sql);
-   if(handle == INVALID_HANDLE)
-      return false;
+    ResetLastError();
+    int handle = DatabasePrepare(m_db_handle, check_sql);
+    if(handle == INVALID_HANDLE)
+      {
+       m_last_init_stage = "ExecutionLedger.CreateSchema";
+       m_last_init_operation = "DatabasePrepare(check_schema_version)";
+       m_last_init_error = GetLastError();
+       return false;
+      }
 
-   bool has_version = false;
-   if(DatabaseRead(handle))
-     {
-      string ver = DatabaseColumnString(handle, 0);
-      if(ver == IntegerToString(m_schema_version))
-         has_version = true;
-     }
-   DatabaseFinalize(handle);
+    bool has_version = false;
+    ResetLastError();
+    bool read_ok = DatabaseRead(handle);
+    if(!read_ok)
+      {
+       int read_error = GetLastError();
+       // 5126 = ERR_DATABASE_NO_MORE_DATA: normal end-of-results
+       if(read_error != 5126)
+         {
+          m_last_init_stage = "ExecutionLedger.CreateSchema";
+          m_last_init_operation = "DatabaseRead(check_schema_version)";
+          m_last_init_error = read_error;
+          DatabaseFinalize(handle);
+          return false;
+         }
+      }
+    else
+      {
+       string ver = DatabaseColumnString(handle, 0);
+       if(ver == IntegerToString(m_schema_version))
+          has_version = true;
+      }
+    DatabaseFinalize(handle);
 
    if(!has_version)
      {
       string set_ver = "INSERT OR REPLACE INTO execution_schema_meta (key, value) VALUES ('schema_version', '" + IntegerToString(m_schema_version) + "');";
-      if(!ExecuteSQL(set_ver))
-         return false;
+    ResetLastError();
+    if(!ExecuteSQL(set_ver))
+      {
+       m_last_init_stage = "ExecutionLedger.CreateSchema";
+       m_last_init_operation = "ExecuteSQL(set_schema_version)";
+       m_last_init_error = GetLastError();
+       return false;
+      }
      }
 
    return true;
