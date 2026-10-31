@@ -1672,7 +1672,9 @@ ENUM_SYSTEM_INIT_STATUS InitializeSystemWhenReady()
       InpTimeExit,
       InpMaxHoldingMinutes);
 
-   if(!g_position_manager.Initialize())
+    g_position_manager.SetExecutor(GetPointer(g_executor));
+
+    if(!g_position_manager.Initialize())
      {
       g_initialization_started=false;
       LogInitFailure("PositionManager.Initialize");
