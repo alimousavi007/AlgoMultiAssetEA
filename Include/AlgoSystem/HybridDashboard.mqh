@@ -242,6 +242,17 @@ private:
             ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_HIDDEN, true);
             ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_ZORDER, 1);
            }
+         else
+           {
+            ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+            ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
+            ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_FONTSIZE, 7);
+            ObjectSetString(m_chart_id, m_label_names[i], OBJPROP_FONT, "Consolas");
+            ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_SELECTABLE, false);
+            ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_SELECTED, false);
+            ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_HIDDEN, true);
+            ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_ZORDER, 1);
+           }
         }
      }
 
@@ -319,13 +330,30 @@ public:
        int y_start = 30 + 14;
        int y_step = 14;
 
+       if(ObjectFind(m_chart_id, m_bg_name) >= 0)
+         {
+          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_XSIZE, panel_width);
+          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_YSIZE, 180);
+         }
+
+       // Hide stale labels beyond status area
+       for(int li=2; li<m_label_count; li++)
+         {
+          if(ObjectFind(m_chart_id, m_label_names[li]) >= 0)
+            {
+             ObjectSetString(m_chart_id, m_label_names[li], OBJPROP_TEXT, "");
+             ObjectSetInteger(m_chart_id, m_label_names[li], OBJPROP_XDISTANCE, 10000);
+             ObjectSetInteger(m_chart_id, m_label_names[li], OBJPROP_YDISTANCE, 10000);
+            }
+         }
+
        SetLabelText(0, m_title, "SILVER");
        PositionLabel(0, x_col1, y_start);
 
        SetLabelText(1, "STATUS: " + status, "AMBER");
        PositionLabel(1, x_col1, y_start + y_step);
 
-      ChartRedraw(m_chart_id);
+       ChartRedraw(m_chart_id);
      }
 
    void Update(const HybridDecision& decision,
@@ -497,7 +525,7 @@ public:
            m_bg_name = "AlgoHybridDashboard_BG_" + IntegerToString((int)chart_id);
           }
 
-        CreateObjects();
+       CreateObjects();
 
        int panel_x_from_right = 230;
        int panel_width = m_compact_view ? 220 : 280;
@@ -506,6 +534,52 @@ public:
        int x_col2 = x_col1 + 110;
        int y_start = 30 + 14;
        int y_step = 14;
+
+       if(ObjectFind(m_chart_id, m_bg_name) >= 0)
+         {
+          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_XSIZE, panel_width);
+          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_YSIZE, 180);
+         }
+
+       // Hide stale labels
+       for(int li=2; li<m_label_count; li++)
+         {
+          if(ObjectFind(m_chart_id, m_label_names[li]) >= 0)
+            {
+             ObjectSetString(m_chart_id, m_label_names[li], OBJPROP_TEXT, "");
+             ObjectSetInteger(m_chart_id, m_label_names[li], OBJPROP_XDISTANCE, 10000);
+             ObjectSetInteger(m_chart_id, m_label_names[li], OBJPROP_YDISTANCE, 10000);
+            }
+         }
+
+       SetLabelText(0, m_title, "SILVER");
+       PositionLabel(0, x_col1, y_start);
+
+       SetLabelText(1, "STATUS: " + m_status_text, "AMBER");
+       PositionLabel(1, x_col1, y_start + y_step);
+
+       ChartRedraw(m_chart_id);
+
+       if(ObjectFind(m_chart_id, m_bg_name) >= 0)
+         {
+          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_XSIZE, panel_width);
+          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_YSIZE, 180);
+         }
+         {
+          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_XSIZE, panel_width);
+          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_YSIZE, 180);
+         }
+
+       // Hide stale labels
+       for(int li=2; li<m_label_count; li++)
+         {
+          if(ObjectFind(m_chart_id, m_label_names[li]) >= 0)
+            {
+             ObjectSetString(m_chart_id, m_label_names[li], OBJPROP_TEXT, "");
+             ObjectSetInteger(m_chart_id, m_label_names[li], OBJPROP_XDISTANCE, 10000);
+             ObjectSetInteger(m_chart_id, m_label_names[li], OBJPROP_YDISTANCE, 10000);
+            }
+         }
 
       int row = 0;
       SetLabelText(0, m_title, "SILVER");

@@ -500,20 +500,28 @@ public:
 
    CHybridSignalEngine hybrid_engine;
 
-   bool              valid;
-   string            last_failure;
+    bool              valid;
+    string            last_failure;
 
-                     CSymbolRuntime()
-     {
-      symbol="";
-      style=STYLE_DAY_TRADING;
-       context_tf=PERIOD_CURRENT;
-       structure_tf=PERIOD_CURRENT;
-       setup_tf=PERIOD_CURRENT;
-       entry_tf=PERIOD_CURRENT;
-      valid=false;
-      last_failure="";
-     }
+    // Runtime gate visibility
+    string            last_gate_status;
+    string            last_gate_reason;
+    datetime          last_gate_time;
+
+                      CSymbolRuntime()
+      {
+       symbol="";
+       style=STYLE_DAY_TRADING;
+        context_tf=PERIOD_CURRENT;
+        structure_tf=PERIOD_CURRENT;
+        setup_tf=PERIOD_CURRENT;
+        entry_tf=PERIOD_CURRENT;
+       valid=false;
+       last_failure="";
+       last_gate_status="";
+       last_gate_reason="";
+       last_gate_time=0;
+      }
 
      bool              Initialize(const string in_symbol,
                      const ENUM_TRADING_STYLE in_style,
@@ -572,6 +580,10 @@ public:
           last_failure="HybridEngine.Initialize failed";
           return false;
          }
+
+       last_gate_status="";
+       last_gate_reason="";
+       last_gate_time=0;
 
       hybrid_engine.SetVolumeProfileParams(
          InpProfileSessionBars,
@@ -721,9 +733,31 @@ void ShowRuntimeGateStatus(CSymbolRuntime &runtime,
    g_dashboard.ShowStatus(dashboard_status);
   }
 
-//==================================================================
-// Hybrid decision pipeline
-//==================================================================
+void LogRuntimeGate(CSymbolRuntime &runtime,
+                    const string phase,
+                    const string gate,
+                    const string result,
+                    const string reason)
+  {
+   if(runtime.symbol=="")
+      return;
+   if(runtime.last_gate_status==phase &&
+      runtime.last_gate_reason==reason)
+     {
+      return;
+     }
+   runtime.last_gate_status=phase;
+   runtime.last_gate_reason=reason;
+   runtime.last_gate_time=TimeCurrent();
+   g_logger.Event(
+      LOG_DEBUG, "RUNTIME", phase,
+      runtime.symbol, "", "",
+      gate, result, reason);
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
 void ProcessHybridDecision(CSymbolRuntime& runtime,
                            HybridDecision& decision,
                            const PortfolioState& portfolio_state)
@@ -1128,19 +1162,21 @@ void ProcessRuntime(CSymbolRuntime& runtime)
    if(!runtime.valid || !g_system_ready)
       return;
 
-   if(!g_session_filter.IsAllowed(TimeCurrent()))
-     {
-      ShowRuntimeGateStatus(runtime, "BLOCKED: SESSION FILTER");
-      return;
-     }
+    if(!g_session_filter.IsAllowed(TimeCurrent()))
+      {
+       ShowRuntimeGateStatus(runtime, "BLOCKED: SESSION FILTER");
+       LogRuntimeGate(runtime, "SESSION_FILTER", "SESSION", "BLOCK", "NOT_ALLOWED");
+       return;
+      }
 
-   if(!runtime.market_entry.IsNewClosedBar(
-         runtime.symbol,
-         runtime.entry_tf))
-     {
-      ShowRuntimeGateStatus(runtime, "WAITING: ENTRY BAR");
-      return;
-     }
+    if(!runtime.market_entry.IsNewClosedBar(
+          runtime.symbol,
+          runtime.entry_tf))
+      {
+       ShowRuntimeGateStatus(runtime, "WAITING: ENTRY BAR");
+       LogRuntimeGate(runtime, "ENTRY_BAR_WAIT", "ENTRY_BAR", "WAIT", "NO_NEW_CLOSED_BAR");
+       return;
+      }
 
     MarketSnapshot context_market;
     MarketSnapshot structure_market;
@@ -1158,14 +1194,15 @@ void ProcessRuntime(CSymbolRuntime& runtime)
           runtime.context_tf,
           context_market))
      {
-      g_logger.Event(
-         LOG_ERROR, "MARKET", "MARKET_SNAPSHOT_FAILED",
-         runtime.symbol, "", "",
-         "", "FAIL", "SIGNAL_SNAPSHOT",
-         "Market signal snapshot failed", GetLastError());
-      ResetLastError();
-      ShowRuntimeGateStatus(runtime, "BLOCKED: SIGNAL DATA");
-      return;
+       g_logger.Event(
+          LOG_ERROR, "MARKET", "MARKET_SNAPSHOT_FAILED",
+          runtime.symbol, "", "",
+          "", "FAIL", "SIGNAL_SNAPSHOT",
+          "Market signal snapshot failed", GetLastError());
+       ResetLastError();
+       ShowRuntimeGateStatus(runtime, "BLOCKED: SIGNAL DATA");
+       LogRuntimeGate(runtime, "MARKET_SNAPSHOT", "CONTEXT_SNAPSHOT", "FAIL", "SNAPSHOT_FAILED");
+       return;
      }
 
    ResetLastError();
@@ -1174,14 +1211,15 @@ void ProcessRuntime(CSymbolRuntime& runtime)
          runtime.structure_tf,
          structure_market))
      {
-      g_logger.Event(
-         LOG_ERROR, "MARKET", "MARKET_SNAPSHOT_FAILED",
-         runtime.symbol, "", "",
-         "", "FAIL", "STRUCTURE_SNAPSHOT",
-         "Market structure snapshot failed", GetLastError());
-      ResetLastError();
-      ShowRuntimeGateStatus(runtime, "BLOCKED: STRUCTURE DATA");
-      return;
+       g_logger.Event(
+          LOG_ERROR, "MARKET", "MARKET_SNAPSHOT_FAILED",
+          runtime.symbol, "", "",
+          "", "FAIL", "STRUCTURE_SNAPSHOT",
+          "Market structure snapshot failed", GetLastError());
+       ResetLastError();
+       ShowRuntimeGateStatus(runtime, "BLOCKED: STRUCTURE DATA");
+       LogRuntimeGate(runtime, "MARKET_SNAPSHOT", "STRUCTURE_SNAPSHOT", "FAIL", "SNAPSHOT_FAILED");
+       return;
      }
 
    ResetLastError();
@@ -1190,14 +1228,15 @@ void ProcessRuntime(CSymbolRuntime& runtime)
           runtime.setup_tf,
           setup_market))
       {
-       g_logger.Event(
-          LOG_ERROR, "MARKET", "MARKET_SNAPSHOT_FAILED",
-          runtime.symbol, "", "",
-          "", "FAIL", "SETUP_SNAPSHOT",
-          "Market setup snapshot failed", GetLastError());
-       ResetLastError();
-       ShowRuntimeGateStatus(runtime, "BLOCKED: SETUP DATA");
-       return;
+        g_logger.Event(
+           LOG_ERROR, "MARKET", "MARKET_SNAPSHOT_FAILED",
+           runtime.symbol, "", "",
+           "", "FAIL", "SETUP_SNAPSHOT",
+           "Market setup snapshot failed", GetLastError());
+        ResetLastError();
+        ShowRuntimeGateStatus(runtime, "BLOCKED: SETUP DATA");
+        LogRuntimeGate(runtime, "MARKET_SNAPSHOT", "SETUP_SNAPSHOT", "FAIL", "SNAPSHOT_FAILED");
+        return;
       }
 
     if(!runtime.market_entry.GetSnapshot(
@@ -1205,95 +1244,103 @@ void ProcessRuntime(CSymbolRuntime& runtime)
          runtime.entry_tf,
          entry_market))
      {
-      g_logger.Event(
-         LOG_ERROR, "MARKET", "MARKET_SNAPSHOT_FAILED",
-         runtime.symbol, "", "",
-         "", "FAIL", "ENTRY_SNAPSHOT",
-         "Market entry snapshot failed", GetLastError());
-      ResetLastError();
-      ShowRuntimeGateStatus(runtime, "BLOCKED: ENTRY DATA");
-      return;
+       g_logger.Event(
+          LOG_ERROR, "MARKET", "MARKET_SNAPSHOT_FAILED",
+          runtime.symbol, "", "",
+          "", "FAIL", "ENTRY_SNAPSHOT",
+          "Market entry snapshot failed", GetLastError());
+       ResetLastError();
+       ShowRuntimeGateStatus(runtime, "BLOCKED: ENTRY DATA");
+       LogRuntimeGate(runtime, "MARKET_SNAPSHOT", "ENTRY_SNAPSHOT", "FAIL", "SNAPSHOT_FAILED");
+       return;
      }
 
    ResetLastError();
     if(!runtime.feature_context.Calculate(context_market, context_features))
      {
-      g_logger.Event(
-         LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
-         runtime.symbol, "", "",
-         "", "FAIL", "SIGNAL_FEATURES",
-         "Signal feature calculation failed", GetLastError());
-      ResetLastError();
-      ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
-      return;
+       g_logger.Event(
+          LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
+          runtime.symbol, "", "",
+          "", "FAIL", "SIGNAL_FEATURES",
+          "Signal feature calculation failed", GetLastError());
+       ResetLastError();
+       ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
+       LogRuntimeGate(runtime, "FEATURE_CALC", "CONTEXT_FEATURES", "FAIL", "CALC_FAILED");
+       return;
      }
 
    ResetLastError();
    if(!runtime.feature_structure.Calculate(structure_market, structure_features))
      {
-      g_logger.Event(
-         LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
-         runtime.symbol, "", "",
-         "", "FAIL", "STRUCTURE_FEATURES",
-         "Structure feature calculation failed", GetLastError());
-      ResetLastError();
-      ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
-      return;
+       g_logger.Event(
+          LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
+          runtime.symbol, "", "",
+          "", "FAIL", "STRUCTURE_FEATURES",
+          "Structure feature calculation failed", GetLastError());
+       ResetLastError();
+       ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
+       LogRuntimeGate(runtime, "FEATURE_CALC", "STRUCTURE_FEATURES", "FAIL", "CALC_FAILED");
+       return;
      }
    ResetLastError();
     if(!runtime.feature_setup.Calculate(setup_market, setup_features))
       {
-       g_logger.Event(
-          LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
-          runtime.symbol, "", "",
-          "", "FAIL", "SETUP_FEATURES",
-          "Setup feature calculation failed", GetLastError());
-       ResetLastError();
-       ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
-       return;
+        g_logger.Event(
+           LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
+           runtime.symbol, "", "",
+           "", "FAIL", "SETUP_FEATURES",
+           "Setup feature calculation failed", GetLastError());
+        ResetLastError();
+        ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
+        LogRuntimeGate(runtime, "FEATURE_CALC", "SETUP_FEATURES", "FAIL", "CALC_FAILED");
+        return;
       }
     if(!runtime.feature_entry.Calculate(entry_market, entry_features))
      {
-      g_logger.Event(
-         LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
-         runtime.symbol, "", "",
-         "", "FAIL", "ENTRY_FEATURES",
-         "Entry feature calculation failed", GetLastError());
-      ResetLastError();
-      ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
-      return;
+       g_logger.Event(
+          LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
+          runtime.symbol, "", "",
+          "", "FAIL", "ENTRY_FEATURES",
+          "Entry feature calculation failed", GetLastError());
+       ResetLastError();
+       ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
+       LogRuntimeGate(runtime, "FEATURE_CALC", "ENTRY_FEATURES", "FAIL", "CALC_FAILED");
+       return;
      }
-   if(!runtime.market_context.IsNewClosedBar(
-         runtime.symbol,
-         runtime.context_tf))
-     {
-      ShowRuntimeGateStatus(runtime, "WAITING: SIGNAL BAR");
-      return;
-     }
+    if(!runtime.market_context.IsNewClosedBar(
+          runtime.symbol,
+          runtime.context_tf))
+      {
+       ShowRuntimeGateStatus(runtime, "WAITING: SIGNAL BAR");
+       LogRuntimeGate(runtime, "CONTEXT_BAR_WAIT", "CONTEXT_BAR", "WAIT", "NO_NEW_CLOSED_BAR");
+       return;
+      }
 
    PortfolioState portfolio_state;
    if(!g_state.GetPortfolioState(portfolio_state))
      {
-      g_logger.Event(
-         LOG_ERROR, "RISK", "RISK_STATE_UNAVAILABLE",
-         runtime.symbol, "", "",
-         "", "REJECT", "RISK_STATE",
-         "Portfolio state is unavailable; entry blocked");
-      ShowRuntimeGateStatus(runtime, "BLOCKED: RISK STATE UNAVAILABLE");
-      return;
+       g_logger.Event(
+          LOG_ERROR, "RISK", "RISK_STATE_UNAVAILABLE",
+          runtime.symbol, "", "",
+          "", "REJECT", "RISK_STATE",
+          "Portfolio state is unavailable; entry blocked");
+       ShowRuntimeGateStatus(runtime, "BLOCKED: RISK STATE UNAVAILABLE");
+       LogRuntimeGate(runtime, "RISK_STATE", "PORTFOLIO_STATE", "BLOCK", "UNAVAILABLE");
+       return;
      }
 
    LogRiskLockTransition(portfolio_state);
 
    if(portfolio_state.trading_locked)
      {
-      g_logger.Event(
-         LOG_WARNING, "RISK", "RISK_LOCK_ACTIVE",
-         runtime.symbol, "", "",
-         "", "REJECT", "RISK_LOCK",
-         "Trading locked by portfolio state");
-      ShowRuntimeGateStatus(runtime, "BLOCKED: RISK LOCK");
-      return;
+       g_logger.Event(
+          LOG_WARNING, "RISK", "RISK_LOCK_ACTIVE",
+          runtime.symbol, "", "",
+          "", "REJECT", "RISK_LOCK",
+          "Trading locked by portfolio state");
+       ShowRuntimeGateStatus(runtime, "BLOCKED: RISK LOCK");
+       LogRuntimeGate(runtime, "RISK_LOCK", "PORTFOLIO_RISK", "BLOCK", "TRADING_LOCKED");
+       return;
      }
 
    bool ok=false;
@@ -1311,12 +1358,13 @@ void ProcessRuntime(CSymbolRuntime& runtime)
 
    if(!ok || !ctx.valid)
      {
-      g_logger.Event(
-         LOG_WARNING, "HYBRID", "CONTEXT_BUILD_FAILED",
-         runtime.symbol, "", "",
-         "", "WARN", "CONTEXT_INVALID", ctx.reason);
-      ShowRuntimeGateStatus(runtime, "BLOCKED: CONTEXT INVALID");
-      return;
+       g_logger.Event(
+          LOG_WARNING, "HYBRID", "CONTEXT_BUILD_FAILED",
+          runtime.symbol, "", "",
+          "", "WARN", "CONTEXT_INVALID", ctx.reason);
+       ShowRuntimeGateStatus(runtime, "BLOCKED: CONTEXT INVALID");
+       LogRuntimeGate(runtime, "CONTEXT_BUILD", "FEATURE_CONTEXT", "BLOCK", ctx.reason);
+       return;
      }
 
    HybridDecision decision = runtime.hybrid_engine.Evaluate(

@@ -39,6 +39,11 @@
 !Include/AlgoSystem/
 !Include/AlgoSystem/**
 
+# Ignore all .log files
+*.log
+**/*.log
+*.log.*
+
 
 # Shared Agent Skills (Kilo + Copilot compatibility)
 !.agents/

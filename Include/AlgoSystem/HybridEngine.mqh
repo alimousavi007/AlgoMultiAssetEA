@@ -577,55 +577,141 @@ private:
           reasons += " freshness_config_invalid";
          }
 
-       // Context role freshness (closed bar)
-       if(m_freshness_valid &&
-          ctx.context_market.valid &&
-          (TimeCurrent() - ctx.context_market.closed_bar_time) >
-          (datetime)m_freshness_context_seconds)
-         {
-          gates.data_fresh=false;
-          if(gates.first_failure_reason=="")
-             gates.first_failure_reason="STALE_CONTEXT_DATA";
-          reasons += " stale_context";
-         }
-
-       // Structure role freshness (closed bar)
-       if(m_freshness_valid &&
-          ctx.structure_market.valid &&
-          (TimeCurrent() - ctx.structure_market.closed_bar_time) >
-          (datetime)m_freshness_structure_seconds)
-         {
-          gates.data_fresh=false;
-          if(gates.first_failure_reason=="")
-             gates.first_failure_reason="STALE_STRUCTURE_DATA";
-          reasons += " stale_structure";
-         }
-
-       // Setup role freshness (closed bar)
-       if(m_freshness_valid &&
-          ctx.setup_market.valid &&
-          (TimeCurrent() - ctx.setup_market.closed_bar_time) >
-          (datetime)m_freshness_setup_seconds)
-         {
-          gates.data_fresh=false;
-          if(gates.first_failure_reason=="")
-             gates.first_failure_reason="STALE_SETUP_DATA";
-          reasons += " stale_setup";
-         }
-
-        // Entry role freshness (tick-time based for all styles)
-        if(m_freshness_valid && ctx.entry_market.valid)
+        // Context role freshness (closed bar)
+        if(m_freshness_valid &&
+           ctx.context_market.valid)
           {
-           datetime entry_source_time = ctx.entry_market.current_time;
-           if((TimeCurrent() - entry_source_time) >
-              (datetime)m_freshness_entry_seconds)
-            {
-             gates.data_fresh=false;
-             if(gates.first_failure_reason=="")
-                gates.first_failure_reason="STALE_ENTRY_DATA";
-             reasons += " stale_entry";
-            }
-         }
+           int ctx_period = PeriodSeconds(ctx.context_tf);
+           if(ctx_period <= 0)
+             {
+              gates.data_fresh=false;
+              if(gates.first_failure_reason=="")
+                 gates.first_failure_reason="FRESHNESS_CONFIG_INVALID";
+              reasons += " freshness_config_invalid_ctx";
+             }
+           else
+             {
+              datetime ctx_bar_close_time = ctx.context_market.closed_bar_time + ctx_period;
+              datetime ctx_age_ref = TimeCurrent();
+              long ctx_age_sec = (long)(ctx_age_ref - ctx_bar_close_time);
+              if(ctx_age_sec < 0)
+                {
+                 gates.data_fresh=false;
+                 if(gates.first_failure_reason=="")
+                    gates.first_failure_reason="FUTURE_BAR_TIME_CONTEXT";
+                 reasons += " future_bar_time_context";
+                }
+              else if(ctx_age_sec > (long)m_freshness_context_seconds)
+                {
+                 gates.data_fresh=false;
+                 if(gates.first_failure_reason=="")
+                    gates.first_failure_reason="STALE_CONTEXT_DATA";
+                 reasons += " stale_context";
+                }
+             }
+          }
+
+        // Structure role freshness (closed bar)
+        if(m_freshness_valid &&
+           ctx.structure_market.valid)
+          {
+           int str_period = PeriodSeconds(ctx.structure_tf);
+           if(str_period <= 0)
+             {
+              gates.data_fresh=false;
+              if(gates.first_failure_reason=="")
+                 gates.first_failure_reason="FRESHNESS_CONFIG_INVALID";
+              reasons += " freshness_config_invalid_str";
+             }
+           else
+             {
+              datetime str_bar_close_time = ctx.structure_market.closed_bar_time + str_period;
+              datetime str_age_ref = TimeCurrent();
+              long str_age_sec = (long)(str_age_ref - str_bar_close_time);
+              if(str_age_sec < 0)
+                {
+                 gates.data_fresh=false;
+                 if(gates.first_failure_reason=="")
+                    gates.first_failure_reason="FUTURE_BAR_TIME_STRUCTURE";
+                 reasons += " future_bar_time_structure";
+                }
+              else if(str_age_sec > (long)m_freshness_structure_seconds)
+                {
+                 gates.data_fresh=false;
+                 if(gates.first_failure_reason=="")
+                    gates.first_failure_reason="STALE_STRUCTURE_DATA";
+                 reasons += " stale_structure";
+                }
+             }
+          }
+
+        // Setup role freshness (closed bar)
+        if(m_freshness_valid &&
+           ctx.setup_market.valid)
+          {
+           int stp_period = PeriodSeconds(ctx.setup_tf);
+           if(stp_period <= 0)
+             {
+              gates.data_fresh=false;
+              if(gates.first_failure_reason=="")
+                 gates.first_failure_reason="FRESHNESS_CONFIG_INVALID";
+              reasons += " freshness_config_invalid_stp";
+             }
+           else
+             {
+              datetime stp_bar_close_time = ctx.setup_market.closed_bar_time + stp_period;
+              datetime stp_age_ref = TimeCurrent();
+              long stp_age_sec = (long)(stp_age_ref - stp_bar_close_time);
+              if(stp_age_sec < 0)
+                {
+                 gates.data_fresh=false;
+                 if(gates.first_failure_reason=="")
+                    gates.first_failure_reason="FUTURE_BAR_TIME_SETUP";
+                 reasons += " future_bar_time_setup";
+                }
+              else if(stp_age_sec > (long)m_freshness_setup_seconds)
+                {
+                 gates.data_fresh=false;
+                 if(gates.first_failure_reason=="")
+                    gates.first_failure_reason="STALE_SETUP_DATA";
+                 reasons += " stale_setup";
+                }
+             }
+          }
+
+         // Entry role freshness (tick-time based for all styles)
+         if(m_freshness_valid && ctx.entry_market.valid)
+           {
+            int ent_period = PeriodSeconds(ctx.entry_tf);
+            if(ent_period <= 0)
+              {
+               gates.data_fresh=false;
+               if(gates.first_failure_reason=="")
+                  gates.first_failure_reason="FRESHNESS_CONFIG_INVALID";
+               reasons += " freshness_config_invalid_ent";
+              }
+            else
+              {
+               // Use bar close time for entry closed bar as well for consistency
+               datetime ent_bar_close_time = ctx.entry_market.closed_bar_time + ent_period;
+               datetime ent_age_ref = TimeCurrent();
+               long ent_age_sec = (long)(ent_age_ref - ent_bar_close_time);
+               if(ent_age_sec < 0)
+                 {
+                  gates.data_fresh=false;
+                  if(gates.first_failure_reason=="")
+                     gates.first_failure_reason="FUTURE_BAR_TIME_ENTRY";
+                  reasons += " future_bar_time_entry";
+                 }
+               else if(ent_age_sec > (long)m_freshness_entry_seconds)
+                 {
+                  gates.data_fresh=false;
+                  if(gates.first_failure_reason=="")
+                     gates.first_failure_reason="STALE_ENTRY_DATA";
+                  reasons += " stale_entry";
+                 }
+              }
+           }
 
        // Legacy single stale check removed; per-role checks above.
 
