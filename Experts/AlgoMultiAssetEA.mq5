@@ -32,109 +32,110 @@
 //==================================================================
 // Inputs — Reorganized into logical groups
 //==================================================================
-input group "01 — General"
-input ENUM_TRADING_STYLE InpTradingStyle=STYLE_DAY_TRADING;
-input ENUM_TRADING_MODE  InpMode=MODE_SIGNAL_ONLY;
-input bool               InpLiveAutoConfirm=false;
-input bool               InpDashboard=true;
-input ENUM_LOG_LEVEL     InpLogLevel=LOG_INFO;
-input bool               InpLogFile=true;
-input bool               InpLogFlushEachWrite=true;
-input int                InpLogSummarySeconds=60;
+input group "01. General & Trading Mode"
+input(name="Trading Style")                ENUM_TRADING_STYLE InpTradingStyle=STYLE_DAY_TRADING;
+input(name="Execution Mode")               ENUM_TRADING_MODE  InpMode=MODE_SIGNAL_ONLY;
+input(name="Confirm Live Automatic Trading") bool               InpLiveAutoConfirm=false;
+input(name="Enable Dashboard")             bool               InpDashboard=true;
+input(name="Log Level")                    ENUM_LOG_LEVEL     InpLogLevel=LOG_INFO;
+input(name="Log to File")                  bool               InpLogFile=true;
+input(name="Flush Log on Each Write")      bool               InpLogFlushEachWrite=true;
+input(name="Log Summary Interval (Seconds)") int              InpLogSummarySeconds=60;
 
-input group "02 — Symbols and Timeframes"
-input string InpGoldSymbol="XAUUSDb";
-input string InpSilverSymbol="XAGUSDb";
-input string InpBitcoinSymbol="BTCUSD";
+input group "02. Trading Symbols"
+input(name="Gold Symbol")                  string             InpGoldSymbol="XAUUSDb";
+input(name="Silver Symbol")                string             InpSilverSymbol="XAGUSDb";
+input(name="Bitcoin Symbol")               string             InpBitcoinSymbol="BTCUSD";
 
-input group "03 — Hybrid Decision"
-input double InpMinRR=1.50;
-input double InpMinScore=70.0;
-input double InpConflictThreshold=15.0;
-input double InpEntryToleranceScalp=5.0;
-input double InpEntryToleranceDay=20.0;
-input double InpEntryToleranceSwing=50.0;
-input bool   InpAllowMeanReversion=false;
+input group "03. Hybrid Decision"
+input(name="Minimum Reward/Risk Ratio")    double             InpMinRR=1.50;
+input(name="Minimum Signal Score")         double             InpMinScore=70.0;
+input(name="Signal Conflict Threshold")    double             InpConflictThreshold=15.0;
+input(name="Entry Tolerance - Scalping (Points)") double       InpEntryToleranceScalp=5.0;
+input(name="Entry Tolerance - Day Trading (Points)") double    InpEntryToleranceDay=20.0;
+input(name="Entry Tolerance - Swing (Points)") double          InpEntryToleranceSwing=50.0;
+input(name="Allow Mean Reversion")         bool               InpAllowMeanReversion=false;
 
-input group "04 — Volume Profile"
-input int    InpProfileSessionBars=78;
-input int    InpProfileRollingBars=156;
-input double InpValueAreaPercent=0.68;
-input bool   InpProfileEnabled=true;
+input group "04. Volume Profile"
+input(name="Volume Profile Session Bars")  int                InpProfileSessionBars=78;
+input(name="Volume Profile Rolling Bars")  int                InpProfileRollingBars=156;
+input(name="Value Area Percent")           double             InpValueAreaPercent=0.68;
+input(name="Enable Volume Profile")        bool               InpProfileEnabled=true;
 
-input group "05 — Liquidity and Structure"
-input int    InpSwingLookback=5;
-input int    InpEqualTolerancePoints=3;
-input int    InpMaxLevelAgeBars=100;
-input int    InpSweepConfirmBars=3;
+input group "05. Liquidity & Market Structure"
+input(name="Swing Lookback (Bars)")        int                InpSwingLookback=5;
+input(name="Equal Level Tolerance (Points)") int              InpEqualTolerancePoints=3;
+input(name="Max Level Age (Bars)")         int                InpMaxLevelAgeBars=100;
+input(name="Sweep Confirmation Bars")      int                InpSweepConfirmBars=3;
 
-input group "06 — Divergence and Momentum"
-input int    InpRSIPeriod=14;
-input int    InpMACD_Fast=12;
-input int    InpMACD_Slow=26;
-input int    InpMACD_Signal=9;
-input double InpPivotTolerancePercent=0.02;
-input int    InpMaxDivergenceAgeBars=30;
-input int    InpMomentumLookback=50;
+input group "06. Divergence & Momentum"
+input(name="RSI Period")                   int                InpRSIPeriod=14;
+input(name="MACD Fast EMA")                int                InpMACD_Fast=12;
+input(name="MACD Slow EMA")                int                InpMACD_Slow=26;
+input(name="MACD Signal EMA")              int                InpMACD_Signal=9;
+input(name="Pivot Tolerance (%)")          double             InpPivotTolerancePercent=0.02;
+input(name="Max Divergence Age (Bars)")    int                InpMaxDivergenceAgeBars=30;
+input(name="Momentum Lookback (Bars)")     int                InpMomentumLookback=50;
 
-input group "07 — Regime"
-input int    InpADXPeriod=14;
-input int    InpADXTrendThreshold=25;
-input double InpHighVolatilityRatio=1.50;
-input double InpLowVolatilityRatio=0.70;
-input int    InpRangeLookback=20;
-input int    InpHysteresisBars=3;
+input group "07. Market Regime"
+input(name="ADX Period")                   int                InpADXPeriod=14;
+input(name="ADX Trend Threshold")          int                InpADXTrendThreshold=25;
+input(name="High Volatility Ratio")        double             InpHighVolatilityRatio=1.50;
+input(name="Low Volatility Ratio")         double             InpLowVolatilityRatio=0.70;
+input(name="Range Lookback (Bars)")        int                InpRangeLookback=20;
+input(name="Hysteresis Bars")              int                InpHysteresisBars=3;
 
-input group "08 — News and Event Risk"
-input bool   InpNewsEnabled=false;
-input bool   InpNewsPreventNewEntries=true;
-input int    InpNewsBlackoutMinutesBefore=30;
-input int    InpNewsBlackoutMinutesAfter=30;
-input int    InpNewsCooldownMinutes=60;
-input int    InpNewsImpactThreshold=3;
-input bool   InpNewsClosePositions=false;
+input group "08. News Filter"
+input(name="Enable News Filter")           bool               InpNewsEnabled=false;
+input(name="Prevent New Entries on News")  bool               InpNewsPreventNewEntries=true;
+input(name="News Blackout Before (Minutes)") int             InpNewsBlackoutMinutesBefore=30;
+input(name="News Blackout After (Minutes)") int              InpNewsBlackoutMinutesAfter=30;
+input(name="News Cooldown (Minutes)")      int                InpNewsCooldownMinutes=60;
+input(name="News Impact Threshold")        int                InpNewsImpactThreshold=3;
+input(name="Close Positions on News")      bool               InpNewsClosePositions=false;
 
-input group "09 — Risk and Execution"
-input double InpRiskPercent=1.0;
-input double InpDailyLossLimit=3.0;
-input double InpMonthlyLossLimit=10.0;
-input int    InpMaxConsecutiveLosses=3;
-input int    InpMaxPositionsTotal=3;
-input int    InpMaxPositionsPerSymbol=1;
-input int    InpMaxPositionsPerStrategy=1;
-input double InpMaxPortfolioRisk=3.0;
-input double InpMaxPreciousMetalsRisk=2.0;
-input double InpMarginSafetyFraction=0.80;
-input ulong  InpDeviationPoints=20;
+input group "09. Risk Management & Execution"
+input(name="Risk Per Trade (%)")           double             InpRiskPercent=1.0;
+input(name="Daily Loss Limit (%)")         double             InpDailyLossLimit=3.0;
+input(name="Monthly Loss Limit (%)")       double             InpMonthlyLossLimit=10.0;
+input(name="Max Consecutive Losses")       int                InpMaxConsecutiveLosses=3;
+input(name="Max Total Open Positions")     int                InpMaxPositionsTotal=3;
+input(name="Max Positions Per Symbol")     int                InpMaxPositionsPerSymbol=1;
+input(name="Max Positions Per Strategy")   int                InpMaxPositionsPerStrategy=1;
+input(name="Max Portfolio Risk (%)")       double             InpMaxPortfolioRisk=3.0;
+input(name="Max Precious Metals Risk (%)") double             InpMaxPreciousMetalsRisk=2.0;
+input(name="Margin Safety Fraction")       double             InpMarginSafetyFraction=0.80;
+input(name="Maximum Execution Deviation (Points)") ulong      InpDeviationPoints=20;
 
-input group "10 — Sessions and Filters"
-input bool InpSessionFilter=true;
-input int  InpSessionStartHour=0;
-input int  InpSessionEndHour=24;
-input bool InpUseSpreadFilter=true;
-input int  InpMaxSpreadPoints=50;
+input group "10. Trading Sessions & Market Filters"
+input(name="Enable Session Filter")        bool               InpSessionFilter=true;
+input(name="Session Start Hour (Server)")  int                InpSessionStartHour=0;
+input(name="Session End Hour (Server)")    int                InpSessionEndHour=24;
+input(name="Enable Spread Filter")         bool               InpUseSpreadFilter=true;
+input(name="Max Spread (Points)")          int                InpMaxSpreadPoints=50;
 
-input group "11 — Dashboard"
-input bool InpDashboardCompact=true;
-input bool InpDashboardDiagnostics=false;
-input bool InpDashboardOverlay=true;
+input group "11. Dashboard & Diagnostics"
+input(name="Compact Dashboard View")       bool               InpDashboardCompact=true;
+input(name="Show Diagnostics")             bool               InpDashboardDiagnostics=false;
+input(name="Show Overlay")                 bool               InpDashboardOverlay=true;
 
-input group "12 — Position Management"
-input bool   InpBreakEven=false;
-input double InpBreakEvenTriggerR=1.0;
-input double InpBreakEvenOffsetPoints=0.0;
-input bool   InpTrailing=false;
-input ENUM_TIMEFRAMES InpTrailingTF=PERIOD_H1;
-input int    InpTrailingATRPeriod=14;
-input double InpTrailingATRMultiplier=2.0;
-input bool   InpTimeExit=false;
-input int    InpMaxHoldingMinutes=240;
+input group "12. Position Management"
+input(name="Enable Break-Even")            bool               InpBreakEven=false;
+input(name="Break-Even Trigger (R)")       double             InpBreakEvenTriggerR=1.0;
+input(name="Break-Even Offset (Points)")   double             InpBreakEvenOffsetPoints=0.0;
+input(name="Enable Trailing Stop")         bool               InpTrailing=false;
+input(name="Trailing Timeframe")           ENUM_TIMEFRAMES    InpTrailingTF=PERIOD_H1;
+input(name="Trailing ATR Period")          int                InpTrailingATRPeriod=14;
+input(name="Trailing ATR Multiplier")      double             InpTrailingATRMultiplier=2.0;
+input(name="Enable Time Exit")             bool               InpTimeExit=false;
+input(name="Max Holding Time (Minutes)")   int                InpMaxHoldingMinutes=240;
 
-input int    InpFreshnessContextSeconds=300;
-input int    InpFreshnessStructureSeconds=300;
-input int    InpFreshnessSetupSeconds=300;
-input int    InpFreshnessEntrySeconds=60;
-input string InpFreshnessOverrides="";
+input group "13. Data Freshness"
+input(name="Context Data Maximum Age (Seconds)") int           InpFreshnessContextSeconds=300;
+input(name="Structure Data Maximum Age (Seconds)") int         InpFreshnessStructureSeconds=300;
+input(name="Setup Data Maximum Age (Seconds)") int             InpFreshnessSetupSeconds=300;
+input(name="Entry Data Maximum Age (Seconds)") int              InpFreshnessEntrySeconds=60;
+input(name="Freshness Overrides")          string             InpFreshnessOverrides="";
 #define InpMinimumSignalScore InpMinScore
 
 //==================================================================
