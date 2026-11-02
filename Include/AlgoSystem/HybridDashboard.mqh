@@ -197,44 +197,51 @@ private:
 
    void CreateObjects()
      {
-      if(ObjectFind(m_chart_id, m_bg_name) >= 0)
-         ObjectDelete(m_chart_id, m_bg_name);
+      if(ObjectFind(m_chart_id, m_bg_name) < 0)
+        {
+         if(!ObjectCreate(m_chart_id, m_bg_name, OBJ_RECTANGLE_LABEL, 0, 0, 0))
+            return;
 
-      if(!ObjectCreate(m_chart_id, m_bg_name, OBJ_RECTANGLE_LABEL, 0, 0, 0))
-         return;
+         int width = m_compact_view ? 220 : 280;
+         int height = 180;
 
-      int width = m_compact_view ? 220 : 280;
-      int height = 180;
-
-      ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
-      ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_XDISTANCE, 230);
-      ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_YDISTANCE, 30);
-      ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_XSIZE, width);
-      ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_YSIZE, height);
-       ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_BGCOLOR, clrDarkSlateGray);
-       ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_COLOR, clrDimGray);
-       ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_BORDER_TYPE, BORDER_FLAT);
-      ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_BACK, false);
-      ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_HIDDEN, true);
+         ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+         ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_XDISTANCE, 230);
+         ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_YDISTANCE, 30);
+         ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_XSIZE, width);
+         ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_YSIZE, height);
+         ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_BGCOLOR, clrDarkSlateGray);
+         ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_COLOR, clrDimGray);
+         ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+         ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_BACK, false);
+         ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_HIDDEN, true);
+        }
+      else
+        {
+         int width = m_compact_view ? 220 : 280;
+         int height = 180;
+         ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_XSIZE, width);
+         ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_YSIZE, height);
+        }
 
       for(int i=0; i<m_label_count; i++)
         {
          m_label_names[i] = LabelName(i);
 
-         if(ObjectFind(m_chart_id, m_label_names[i]) >= 0)
-            ObjectDelete(m_chart_id, m_label_names[i]);
+         if(ObjectFind(m_chart_id, m_label_names[i]) < 0)
+           {
+            if(!ObjectCreate(m_chart_id, m_label_names[i], OBJ_LABEL, 0, 0, 0))
+               continue;
 
-         if(!ObjectCreate(m_chart_id, m_label_names[i], OBJ_LABEL, 0, 0, 0))
-            continue;
-
-         ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_CORNER, CORNER_RIGHT_UPPER);
-         ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
-          ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_FONTSIZE, 7);
-          ObjectSetString(m_chart_id, m_label_names[i], OBJPROP_FONT, "Consolas");
-         ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_SELECTABLE, false);
-         ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_SELECTED, false);
-         ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_HIDDEN, true);
-         ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_ZORDER, 1);
+            ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+            ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
+            ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_FONTSIZE, 7);
+            ObjectSetString(m_chart_id, m_label_names[i], OBJPROP_FONT, "Consolas");
+            ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_SELECTABLE, false);
+            ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_SELECTED, false);
+            ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_HIDDEN, true);
+            ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_ZORDER, 1);
+           }
         }
      }
 
@@ -294,6 +301,31 @@ public:
          return;
 
       m_status_text = status;
+
+      long chart_id = ChartID();
+       if(m_chart_id != chart_id || m_bg_name == "")
+         {
+          m_chart_id = chart_id;
+          m_bg_name = "AlgoHybridDashboard_BG_" + IntegerToString((int)chart_id);
+         }
+
+       CreateObjects();
+
+       int panel_x_from_right = 230;
+       int panel_width = m_compact_view ? 220 : 280;
+       int panel_pad_x = 6;
+       int x_col1 = panel_x_from_right - panel_width + panel_pad_x;
+       int x_col2 = x_col1 + 110;
+       int y_start = 30 + 14;
+       int y_step = 14;
+
+       SetLabelText(0, m_title, "SILVER");
+       PositionLabel(0, x_col1, y_start);
+
+       SetLabelText(1, "STATUS: " + status, "AMBER");
+       PositionLabel(1, x_col1, y_start + y_step);
+
+      ChartRedraw(m_chart_id);
      }
 
    void Update(const HybridDecision& decision,
@@ -315,20 +347,23 @@ public:
          }
 
        if(TimeCurrent() - m_last_update_time < 3)
-         return;
+          return;
 
-      if(decision.style != m_last_style)
-        {
-         m_last_style = decision.style;
-         Clear();
-        }
+       if(decision.style != m_last_style)
+         {
+          m_last_style = decision.style;
+          Clear();
+         }
 
-      CreateObjects();
+       CreateObjects();
 
-      int x_col1 = 10;
-      int x_col2 = 120;
-      int y_start = 20;
-      int y_step = 14;
+       int panel_x_from_right = 230;
+       int panel_width = m_compact_view ? 220 : 280;
+       int panel_pad_x = 6;
+       int x_col1 = panel_x_from_right - panel_width + panel_pad_x;
+       int x_col2 = x_col1 + 110;
+       int y_start = 30 + 14;
+       int y_step = 14;
 
       int row = 0;
       SetLabelText(0, m_title, "SILVER");
@@ -450,23 +485,27 @@ public:
       if(!m_enabled)
          return;
 
-      long chart_id = ChartID();
-      string chart_symbol = ChartSymbol(0);
+       long chart_id = ChartID();
+       string chart_symbol = ChartSymbol(0);
 
-      if(chart_symbol != "" && market.symbol != chart_symbol)
-          return;
+       if(chart_symbol != "" && market.symbol != chart_symbol)
+           return;
 
-       if(m_chart_id != chart_id || m_bg_name == "")
-         {
-          m_chart_id = chart_id;
-          m_bg_name = "AlgoHybridDashboard_BG_" + IntegerToString((int)chart_id);
-         }
+        if(m_chart_id != chart_id || m_bg_name == "")
+          {
+           m_chart_id = chart_id;
+           m_bg_name = "AlgoHybridDashboard_BG_" + IntegerToString((int)chart_id);
+          }
 
-       CreateObjects();
+        CreateObjects();
 
-      int x_col1 = 10;
-      int y_start = 20;
-      int y_step = 14;
+       int panel_x_from_right = 230;
+       int panel_width = m_compact_view ? 220 : 280;
+       int panel_pad_x = 6;
+       int x_col1 = panel_x_from_right - panel_width + panel_pad_x;
+       int x_col2 = x_col1 + 110;
+       int y_start = 30 + 14;
+       int y_step = 14;
 
       int row = 0;
       SetLabelText(0, m_title, "SILVER");
@@ -478,23 +517,23 @@ public:
       SetLabelText(2, "STYLE: " + StyleText(m_last_style), "SILVER");
       PositionLabel(2, x_col1, y_start + y_step * (++row));
 
-      row = 1;
-      SetLabelText(5, "STATUS: " + m_status_text, "AMBER");
-      PositionLabel(5, 120, y_start + y_step * row);
+       row = 1;
+       SetLabelText(5, "STATUS: " + m_status_text, "AMBER");
+       PositionLabel(5, x_col2, y_start + y_step * row);
 
-      SetLabelText(6, "BID/ASK: " +
-         DoubleToString(market.bid, (int)market.properties.digits) + "/" +
-         DoubleToString(market.ask, (int)market.properties.digits), "SILVER");
-      PositionLabel(6, 120, y_start + y_step * (++row));
+       SetLabelText(6, "BID/ASK: " +
+          DoubleToString(market.bid, (int)market.properties.digits) + "/" +
+          DoubleToString(market.ask, (int)market.properties.digits), "SILVER");
+       PositionLabel(6, x_col2, y_start + y_step * (++row));
 
-      row = 3;
-      SetLabelText(7, "SPREAD: " +
-         DoubleToString(market.spread_points / market.properties.point, 1) + " pts", "SILVER");
-      PositionLabel(7, 120, y_start + y_step * row);
+       row = 3;
+       SetLabelText(7, "SPREAD: " +
+          DoubleToString(market.spread_points / market.properties.point, 1) + " pts", "SILVER");
+       PositionLabel(7, x_col2, y_start + y_step * row);
 
-      row = 4;
-      SetLabelText(8, "BAR: " + TimeToString(market.closed_bar_time, TIME_DATE|TIME_MINUTES), "SILVER");
-      PositionLabel(8, 120, y_start + y_step * row);
+       row = 4;
+       SetLabelText(8, "BAR: " + TimeToString(market.closed_bar_time, TIME_DATE|TIME_MINUTES), "SILVER");
+       PositionLabel(8, x_col2, y_start + y_step * row);
 
       m_last_update_time = TimeCurrent();
       ChartRedraw(m_chart_id);
