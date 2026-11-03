@@ -130,22 +130,28 @@ class CHybridDashboard
 
     void CreateObjects()
       {
-       if(ObjectFind(m_chart_id,m_bg_name)<0)
-         {
-          if(!ObjectCreate(m_chart_id,m_bg_name,OBJ_RECTANGLE_LABEL,0,0,0)) return;
-          ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_CORNER,CORNER_LEFT_UPPER);
-          ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_XDISTANCE,20);
-          ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_YDISTANCE,20);
-          ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_XSIZE,260);
-          ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_YSIZE,180);
-          ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_BGCOLOR,clrDarkSlateBlue);
-          ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_COLOR,clrSilver);
-          ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_BORDER_TYPE,BORDER_FLAT);
-          ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_BACK,false);
-          ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_SELECTABLE,false);
-          ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_HIDDEN,false);
-          ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_ZORDER,10);
-         }
+if(ObjectFind(m_chart_id,m_bg_name)<0)
+          {
+           if(!ObjectCreate(m_chart_id,m_bg_name,OBJ_RECTANGLE_LABEL,0,0,0))
+             {
+              // Log failure but continue; labels may still be created
+             }
+           else
+             {
+              ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_CORNER,CORNER_LEFT_UPPER);
+              ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_XDISTANCE,20);
+              ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_YDISTANCE,20);
+              ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_XSIZE,260);
+              ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_YSIZE,180);
+              ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_BGCOLOR,clrDarkSlateBlue);
+              ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_COLOR,clrSilver);
+              ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_BORDER_TYPE,BORDER_FLAT);
+              ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_BACK,false);
+              ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_SELECTABLE,false);
+              ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_HIDDEN,false);
+              ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_ZORDER,10);
+             }
+          }
        for(int i=0;i<m_label_count;i++)
          {
           m_label_names[i]=LabelName(i);
@@ -167,8 +173,23 @@ class CHybridDashboard
       {
        m_layout.valid=false;
        long w=0,h=0;
-       if(!ChartGetInteger(m_chart_id,CHART_WIDTH_IN_PIXELS,w)||w<=0) return;
-       if(!ChartGetInteger(m_chart_id,CHART_HEIGHT_IN_PIXELS,h)||h<=0) return;
+       bool ok_w=ChartGetInteger(m_chart_id,CHART_WIDTH_IN_PIXELS,w)&&w>0;
+       bool ok_h=ChartGetInteger(m_chart_id,CHART_HEIGHT_IN_PIXELS,h)&&h>0;
+       if(!ok_w||!ok_h)
+         {
+          // Fallback: use last valid layout or a safe default
+          if(!m_layout.valid)
+            {
+             m_layout.chart_width=400; m_layout.chart_height=300;
+             m_layout.panel_width=300; m_layout.panel_x=84; m_layout.panel_y=16;
+             m_layout.padding=6; m_layout.row_height=13; m_layout.font_size=8;
+             m_layout.column_1_x=m_layout.panel_x+m_layout.padding;
+             m_layout.column_2_x=m_layout.column_1_x+150;
+             m_layout.visible_rows=4; m_layout.panel_height=80;
+             m_layout.view_mode=0; m_layout.valid=true;
+            }
+          return;
+         }
        m_layout.chart_width=(int)w; m_layout.chart_height=(int)h;
        if(m_layout.chart_width<260||m_layout.chart_height<160) m_view_mode=2;
        else if(m_layout.chart_width<400||m_layout.chart_height<260) m_view_mode=1;
