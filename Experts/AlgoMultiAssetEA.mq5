@@ -43,6 +43,9 @@ input(name="Flush Log on Each Write")      bool               InpLogFlushEachWri
 input(name="Log Summary Interval (Seconds)") int              InpLogSummarySeconds=60;
 
 input group "02. Trading Symbols"
+input(name="Use Dynamic Forex Universe")   bool               InpUseDynamicForex=true;
+input(name="Forex Universe Max Symbols")   int                InpForexMaxSymbols=80;
+input(name="Include Gold/Silver/Crypto")   bool               InpIncludeMetalsCrypto=false;
 input(name="Gold Symbol")                  string             InpGoldSymbol="XAUUSDb";
 input(name="Silver Symbol")                string             InpSilverSymbol="XAGUSDb";
 input(name="Bitcoin Symbol")               string             InpBitcoinSymbol="BTCUSD";
@@ -154,16 +157,6 @@ string StyleName(ENUM_TRADING_STYLE style)
       default:
          return "UNKNOWN";
      }
-  }
-
-//+------------------------------------------------------------------+
-//|                                                                  |
-//+------------------------------------------------------------------+
-string TimeframeText(ENUM_TIMEFRAMES tf)
-  {
-   string s=EnumToString(tf);
-   StringReplace(s,"PERIOD_","");
-   return s;
   }
 
 //+------------------------------------------------------------------+
@@ -648,7 +641,10 @@ public:
 //==================================================================
 // Globals
 //==================================================================
-CSymbolRuntime g_runtime[3];
+CSymbolRuntime g_runtime[256];
+string g_runtime_wait_state[256];
+string g_runtime_init_failure[256];
+int g_runtime_count_max=256;
 
 CAlgoStateManager   g_state;
 CRiskEngine         g_risk_engine;
@@ -661,9 +657,6 @@ CHybridDashboard    g_dashboard;
 CSessionFilter      g_session_filter;
 CTesterFitness      g_tester_fitness;
 COptimizationController g_optimizer;
-
-string g_runtime_wait_state[3];
-string g_runtime_init_failure[3];
 bool g_system_ready=false;
 bool g_initialization_started=false;
 bool g_initialization_failed=false;
@@ -681,7 +674,7 @@ void UpdateDashboardForChart()
    g_last_runtime_dashboard_status="";
    string chart_symbol=ChartSymbol(0);
 
-   for(int i=0;i<3;i++)
+   for(int i=0;i<256;i++)
      {
       if(!g_runtime[i].valid ||
          g_runtime[i].symbol!=chart_symbol)
@@ -707,6 +700,16 @@ void UpdateDashboardForChart()
 
    g_dashboard.ShowStatus(
       "CHART SYMBOL NOT CONFIGURED | "+chart_symbol);
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+string TimeframeText(ENUM_TIMEFRAMES tf)
+  {
+   string ts=EnumToString(tf);
+   StringReplace(ts,"PERIOD_","");
+   return ts;
   }
 
 //+------------------------------------------------------------------+
@@ -1417,15 +1420,12 @@ enum ENUM_SYSTEM_INIT_STATUS
 //+------------------------------------------------------------------+
 int InitializePendingRuntimes()
   {
-   string symbols[3];
-   symbols[0]=InpGoldSymbol;
-   symbols[1]=InpSilverSymbol;
-   symbols[2]=InpBitcoinSymbol;
+   string symbols[];
+   DiscoverForexSymbols(symbols);
 
-   string roles[3];
-   roles[0]="GOLD";
-   roles[1]="SILVER";
-   roles[2]="BITCOIN";
+   string roles[];
+   ArrayResize(roles,ArraySize(symbols));
+   for(int r=0;r<ArraySize(roles);r++) roles[r]="FX";
 
     ENUM_TIMEFRAMES context_tf;
     ENUM_TIMEFRAMES structure_tf;
@@ -1443,14 +1443,20 @@ int InitializePendingRuntimes()
     timeframes[1]=structure_tf;
     timeframes[2]=setup_tf;
     timeframes[3]=entry_tf;
+    timeframes[3]=entry_tf;
 
    bool tester_single_symbol =
       (MQLInfoInteger(MQL_TESTER)!=0);
    int runtime_count=0;
+   for(int i=0;i<256;i++)
+     {
+      if(g_runtime[i].valid) runtime_count++;
+     }
 
    for(int i=0;i<ArraySize(symbols);i++)
      {
-      if(symbols[i]=="")
+      if(i>=256) break;
+      if(StringLen(symbols[i])==0)
          continue;
 
       if(tester_single_symbol &&
@@ -1887,7 +1893,7 @@ void OnTick()
    if(!risk_state_ready)
       return;
 
-   for(int i=0;i<3;i++)
+   for(int i=0;i<256;i++)
       ProcessRuntime(g_runtime[i]);
   }
 
@@ -1934,8 +1940,11 @@ void OnTimer()
    if(!risk_state_ready)
       return;
 
-   for(int i=0;i<3;i++)
-      ProcessRuntime(g_runtime[i]);
+   for(int i=0;i<256;i++)
+      {
+       if(g_runtime[i].valid)
+          ProcessRuntime(g_runtime[i]);
+      }
    }
 
 //+------------------------------------------------------------------+
@@ -1989,6 +1998,14 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
 //==================================================================
 // OnDeinit
 //==================================================================
+void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
+  {
+   if(id == CHARTEVENT_CHART_CHANGE)
+     {
+      g_dashboard.HandleChartGeometryChange();
+     }
+  }
+
 void OnDeinit(const int reason)
   {
    if(g_system_ready)
@@ -2063,9 +2080,90 @@ int OnTesterInit()
 
 //+------------------------------------------------------------------+
 //|                                                                  |
+//+------------------------------------------------------------------
+bool IsForexSymbol(const string symbol)
+  {
+   if(symbol=="")
+      return false;
+   if(StringFind(symbol,"=")>=0)
+      return false;
+   if(StringFind(symbol,"^")>=0)
+      return false;
+   string base="";
+   string quote="";
+   if(SymbolInfoString(symbol,SYMBOL_CURRENCY_BASE,base) && SymbolInfoString(symbol,SYMBOL_CURRENCY_PROFIT,quote))
+     {
+      StringToUpper(base);
+      StringToUpper(quote);
+      if(StringLen(base)==3 && StringLen(quote)==3 && base!=quote)
+         return true;
+     }
+   if(StringLen(symbol)>=6)
+     {
+      string c1=StringSubstr(symbol,0,3);
+      string c2=StringSubstr(symbol,3,3);
+      StringToUpper(c1);
+      StringToUpper(c2);
+      if(c1==c2) return false;
+      bool ok1=false, ok2=false;
+      string fx[]={"EUR","USD","GBP","JPY","AUD","NZD","CAD","CHF","SEK","NOK","DKK","MXN","ZAR","TRY","SGD","HKD","PLN","HUF","CZK","RUB","CNH","THB"};
+      for(int i=0;i<ArraySize(fx);i++) if(c1==fx[i]) { ok1=true; break; }
+      for(int i=0;i<ArraySize(fx);i++) if(c2==fx[i]) { ok2=true; break; }
+      if(ok1 && ok2) return true;
+     }
+   return false;
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------
+int DiscoverForexSymbols(string &symbols_out[])
+  {
+   ArrayResize(symbols_out,0);
+   if(!InpUseDynamicForex)
+     {
+      if(InpGoldSymbol!="") { int sz=ArraySize(symbols_out); ArrayResize(symbols_out,sz+1); symbols_out[sz]=InpGoldSymbol; }
+      if(InpSilverSymbol!="") { int sz=ArraySize(symbols_out); ArrayResize(symbols_out,sz+1); symbols_out[sz]=InpSilverSymbol; }
+      if(InpBitcoinSymbol!="") { int sz=ArraySize(symbols_out); ArrayResize(symbols_out,sz+1); symbols_out[sz]=InpBitcoinSymbol; }
+      return ArraySize(symbols_out);
+     }
+   int total=SymbolsTotal(false);
+   for(int i=0;i<total;i++)
+     {
+      string sn=SymbolName(i,true);
+      if(sn=="") continue;
+      if(!IsForexSymbol(sn)) continue;
+      if(!InpIncludeMetalsCrypto)
+        {
+         string su=sn; StringToUpper(su);
+         if(StringFind(su,"XAU")>=0 || StringFind(su,"XAG")>=0 || StringFind(su,"GOLD")>=0 || StringFind(su,"SILVER")>=0 || StringFind(su,"BTC")>=0 || StringFind(su,"ETH")>=0 || StringFind(su,"BITCOIN")>=0) continue;
+        }
+      bool exists=false;
+      for(int j=0;j<ArraySize(symbols_out);j++) if(symbols_out[j]==sn) { exists=true; break; }
+      if(exists) continue;
+      int sz2=ArraySize(symbols_out);
+      if(sz2>=InpForexMaxSymbols) break;
+      ArrayResize(symbols_out,sz2+1);
+      symbols_out[sz2]=sn;
+     }
+   if(ArraySize(symbols_out)==0)
+     {
+      if(InpGoldSymbol!="") { int sz=ArraySize(symbols_out); ArrayResize(symbols_out,sz+1); symbols_out[sz]=InpGoldSymbol; }
+      if(InpSilverSymbol!="") { int sz=ArraySize(symbols_out); ArrayResize(symbols_out,sz+1); symbols_out[sz]=InpSilverSymbol; }
+      if(InpBitcoinSymbol!="") { int sz=ArraySize(symbols_out); ArrayResize(symbols_out,sz+1); symbols_out[sz]=InpBitcoinSymbol; }
+     }
+   return ArraySize(symbols_out);
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+
+
+//+------------------------------------------------------------------+
+//|                                                                  |
 //+------------------------------------------------------------------+
 void OnTesterDeinit()
   {
   }
 //+------------------------------------------------------------------+
-

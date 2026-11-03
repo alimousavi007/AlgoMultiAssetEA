@@ -45,6 +45,26 @@ class CHybridDashboard
     colorRef m_color_silver;
     colorRef m_color_lime;
 
+struct DashboardLayout
+     {
+      int chart_width;
+      int chart_height;
+      int panel_x;
+      int panel_y;
+      int panel_width;
+      int panel_height;
+      int padding;
+      int row_height;
+      int font_size;
+      int column_1_x;
+      int column_2_x;
+      int visible_rows;
+      int view_mode; // 0 FULL,1 COMPACT,2 MINIMAL
+      bool valid;
+     };
+
+   DashboardLayout m_layout;
+
 public:
     CHybridDashboard()
       {
@@ -59,9 +79,14 @@ public:
        m_last_update_time=0;
        m_last_display_symbol="";
        m_last_style=STYLE_DAY_TRADING;
-       m_status_text="INITIALIZING";
-       m_decision_text="";
-       m_rejection_text="";
+m_status_text="INITIALIZING";
+        m_decision_text="";
+        m_rejection_text="";
+
+        m_layout.chart_width=0; m_layout.chart_height=0; m_layout.panel_x=0; m_layout.panel_y=0;
+        m_layout.panel_width=0; m_layout.panel_height=0; m_layout.padding=6; m_layout.row_height=14;
+        m_layout.font_size=7; m_layout.column_1_x=0; m_layout.column_2_x=0; m_layout.visible_rows=0;
+        m_layout.view_mode=1; m_layout.valid=false;
 
        m_color_green.r=100;  m_color_green.g=220;   m_color_green.b=100;
        m_color_red.r=220;    m_color_red.g=100;     m_color_red.b=100;
@@ -82,6 +107,64 @@ public:
    void ShowDiagnostics(bool show) { m_show_diagnostics=show; }
    void ShowOverlay(bool show) { m_show_overlay=show; }
    void SetTitle(const string title) { m_title=title; }
+
+    void RecalculateDashboardLayout()
+      {
+       m_layout.valid=false;
+       long w=0,h=0;
+       if(!ChartGetInteger(m_chart_id, CHART_WIDTH_IN_PIXELS, w) || w<=0)
+          return;
+       if(!ChartGetInteger(m_chart_id, CHART_HEIGHT_IN_PIXELS, h) || h<=0)
+          return;
+       m_layout.chart_width=(int)w;
+       m_layout.chart_height=(int)h;
+       // auto view mode
+       if(m_layout.chart_width < 300 || m_layout.chart_height < 200)
+          m_layout.view_mode=2; // MINIMAL
+       else if(m_layout.chart_width < 420 || m_layout.chart_height < 320)
+          m_layout.view_mode=1; // COMPACT
+       else
+          m_layout.view_mode=0; // FULL
+       m_compact_view = (m_layout.view_mode != 0);
+       int pw = (m_layout.view_mode==2)? 160 : (m_layout.view_mode==1)? 220 : 300;
+       if(pw > m_layout.chart_width-20) pw = m_layout.chart_width-20;
+       if(pw < 120) pw = 120;
+       m_layout.panel_width=pw;
+       m_layout.panel_x = m_layout.chart_width - pw - 20;
+       if(m_layout.panel_x < 0) m_layout.panel_x=0;
+       m_layout.panel_y=20;
+       m_layout.padding=6;
+       m_layout.row_height=14;
+       m_layout.font_size=7;
+       m_layout.column_1_x=m_layout.panel_x+m_layout.padding;
+       m_layout.column_2_x=m_layout.column_1_x + (pw/2);
+       m_layout.visible_rows = (m_layout.chart_height-40)/m_layout.row_height;
+       if(m_layout.visible_rows < 3) m_layout.visible_rows=3;
+       // panel height
+       int ph = m_layout.visible_rows*m_layout.row_height + 20;
+       if(ph > m_layout.chart_height-20) ph = m_layout.chart_height-20;
+       if(ph < 60) ph=60;
+       m_layout.panel_height=ph;
+       // validate
+       if(m_layout.panel_width<=0 || m_layout.panel_height<=0) return;
+       if(m_layout.panel_x<0 || m_layout.panel_y<0) return;
+       if(m_layout.panel_x+m_layout.panel_width > m_layout.chart_width) return;
+       if(m_layout.panel_y+m_layout.panel_height > m_layout.chart_height) return;
+       m_layout.valid=true;
+      }
+
+    void HandleChartGeometryChange()
+      {
+       RecalculateDashboardLayout();
+       if(m_bg_name!="" && ObjectFind(m_chart_id, m_bg_name)>=0 && m_layout.valid)
+         {
+          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_XDISTANCE, m_layout.panel_x);
+          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_YDISTANCE, m_layout.panel_y);
+          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_XSIZE, m_layout.panel_width);
+          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_YSIZE, m_layout.panel_height);
+         }
+       ChartRedraw(m_chart_id);
+      }
 
    void Clear()
      {
@@ -195,66 +278,69 @@ private:
       return DoubleToString(score, 1);
      }
 
-   void CreateObjects()
-     {
-      if(ObjectFind(m_chart_id, m_bg_name) < 0)
-        {
-         if(!ObjectCreate(m_chart_id, m_bg_name, OBJ_RECTANGLE_LABEL, 0, 0, 0))
-            return;
+    void CreateObjects()
+      {
+       if(ObjectFind(m_chart_id, m_bg_name) < 0)
+         {
+          if(!ObjectCreate(m_chart_id, m_bg_name, OBJ_RECTANGLE_LABEL, 0, 0, 0))
+             return;
 
-         int width = m_compact_view ? 220 : 280;
-         int height = 180;
+          int width = m_compact_view ? 240 : 320;
+          int height = 190;
 
-         ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
-         ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_XDISTANCE, 230);
-         ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_YDISTANCE, 30);
-         ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_XSIZE, width);
-         ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_YSIZE, height);
-         ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_BGCOLOR, clrDarkSlateGray);
-         ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_COLOR, clrDimGray);
-         ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_BORDER_TYPE, BORDER_FLAT);
-         ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_BACK, false);
-         ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_HIDDEN, true);
-        }
-      else
-        {
-         int width = m_compact_view ? 220 : 280;
-         int height = 180;
-         ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_XSIZE, width);
-         ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_YSIZE, height);
-        }
+ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+           ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_XDISTANCE, 20);
+           ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_YDISTANCE, 20);
+          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_XSIZE, width);
+          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_YSIZE, height);
+          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_BGCOLOR, clrDarkSlateBlue);
+          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_COLOR, clrSilver);
+          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_BACK, false);
+          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_SELECTABLE, false);
+          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_HIDDEN, true);
+         }
+       else
+         {
+          int width = m_compact_view ? 240 : 320;
+          int height = 190;
+          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_XSIZE, width);
+          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_YSIZE, height);
+          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_XDISTANCE, 20);
+          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_YDISTANCE, 20);
+         }
 
-      for(int i=0; i<m_label_count; i++)
-        {
-         m_label_names[i] = LabelName(i);
+       for(int i=0; i<m_label_count; i++)
+         {
+          m_label_names[i] = LabelName(i);
 
-         if(ObjectFind(m_chart_id, m_label_names[i]) < 0)
-           {
-            if(!ObjectCreate(m_chart_id, m_label_names[i], OBJ_LABEL, 0, 0, 0))
-               continue;
+          if(ObjectFind(m_chart_id, m_label_names[i]) < 0)
+            {
+             if(!ObjectCreate(m_chart_id, m_label_names[i], OBJ_LABEL, 0, 0, 0))
+                continue;
 
-            ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_CORNER, CORNER_RIGHT_UPPER);
-            ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
-            ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_FONTSIZE, 7);
-            ObjectSetString(m_chart_id, m_label_names[i], OBJPROP_FONT, "Consolas");
-            ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_SELECTABLE, false);
-            ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_SELECTED, false);
-            ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_HIDDEN, true);
-            ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_ZORDER, 1);
-           }
-         else
-           {
-            ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_CORNER, CORNER_RIGHT_UPPER);
-            ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
-            ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_FONTSIZE, 7);
-            ObjectSetString(m_chart_id, m_label_names[i], OBJPROP_FONT, "Consolas");
-            ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_SELECTABLE, false);
-            ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_SELECTED, false);
-            ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_HIDDEN, true);
-            ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_ZORDER, 1);
-           }
-        }
-     }
+             ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_CORNER, CORNER_LEFT_UPPER);
+             ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
+             ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_FONTSIZE, 7);
+             ObjectSetString(m_chart_id, m_label_names[i], OBJPROP_FONT, "Consolas");
+             ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_SELECTABLE, false);
+             ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_SELECTED, false);
+             ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_HIDDEN, true);
+             ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_ZORDER, 1);
+            }
+          else
+            {
+             ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_CORNER, CORNER_LEFT_UPPER);
+             ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
+             ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_FONTSIZE, 7);
+             ObjectSetString(m_chart_id, m_label_names[i], OBJPROP_FONT, "Consolas");
+             ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_SELECTABLE, false);
+             ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_SELECTED, false);
+             ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_HIDDEN, true);
+             ObjectSetInteger(m_chart_id, m_label_names[i], OBJPROP_ZORDER, 1);
+            }
+         }
+      }
 
    void PositionLabel(const int index, int x, int y)
      {
@@ -306,35 +392,42 @@ private:
       }
 
 public:
-   void ShowStatus(const string status)
-     {
-      if(!m_enabled)
-         return;
+    void ShowStatus(const string status)
+      {
+       if(!m_enabled)
+          return;
 
-      m_status_text = status;
+       m_status_text = status;
 
-      long chart_id = ChartID();
-       if(m_chart_id != chart_id || m_bg_name == "")
-         {
-          m_chart_id = chart_id;
-          m_bg_name = "AlgoHybridDashboard_BG_" + IntegerToString((int)chart_id);
-         }
+long chart_id = ChartID();
+         if(m_chart_id != chart_id || m_bg_name == "")
+           {
+            m_chart_id = chart_id;
+            m_bg_name = "AlgoHybridDashboard_BG_" + IntegerToString((int)chart_id);
+           }
 
-       CreateObjects();
+        RecalculateDashboardLayout();
+        if(!m_layout.valid)
+           return;
 
-       int panel_x_from_right = 230;
-       int panel_width = m_compact_view ? 220 : 280;
-       int panel_pad_x = 6;
-       int x_col1 = panel_x_from_right - panel_width + panel_pad_x;
-       int x_col2 = x_col1 + 110;
-       int y_start = 30 + 14;
-       int y_step = 14;
+        long chart_w = ChartGetInteger(m_chart_id, CHART_WIDTH_IN_PIXELS);
+        if(chart_w <= 0)
+           return;
 
-       if(ObjectFind(m_chart_id, m_bg_name) >= 0)
-         {
-          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_XSIZE, panel_width);
-          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_YSIZE, 180);
-         }
+        int panel_width = m_compact_view ? 240 : 320;
+        int panel_x = (int)chart_w - panel_width - 20;
+        int panel_pad_x = 6;
+        int x_col1 = panel_x + panel_pad_x;
+        int y_start = 20 + 14;
+        int y_step = 14;
+
+        if(ObjectFind(m_chart_id, m_bg_name) >= 0)
+          {
+           ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_XDISTANCE, panel_x);
+           ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_YDISTANCE, 20);
+           ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_XSIZE, panel_width);
+           ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_YSIZE, 190);
+          }
 
        // Hide stale labels beyond status area
        for(int li=2; li<m_label_count; li++)
@@ -344,6 +437,7 @@ public:
              ObjectSetString(m_chart_id, m_label_names[li], OBJPROP_TEXT, "");
              ObjectSetInteger(m_chart_id, m_label_names[li], OBJPROP_XDISTANCE, 10000);
              ObjectSetInteger(m_chart_id, m_label_names[li], OBJPROP_YDISTANCE, 10000);
+             ObjectSetInteger(m_chart_id, m_label_names[li], OBJPROP_HIDDEN, true);
             }
          }
 
@@ -385,13 +479,17 @@ public:
 
        CreateObjects();
 
-       int panel_x_from_right = 230;
-       int panel_width = m_compact_view ? 220 : 280;
-       int panel_pad_x = 6;
-       int x_col1 = panel_x_from_right - panel_width + panel_pad_x;
-       int x_col2 = x_col1 + 110;
-       int y_start = 30 + 14;
-       int y_step = 14;
+long chart_w = ChartGetInteger(m_chart_id, CHART_WIDTH_IN_PIXELS);
+        if(chart_w <= 0)
+           return;
+
+        int panel_width = m_compact_view ? 220 : 280;
+        int panel_x = (int)chart_w - panel_width - 20;
+        int panel_pad_x = 6;
+        int x_col1 = panel_x + panel_pad_x;
+        int x_col2 = x_col1 + 110;
+        int y_start = 30 + 14;
+        int y_step = 14;
 
       int row = 0;
       SetLabelText(0, m_title, "SILVER");
@@ -525,20 +623,26 @@ public:
            m_bg_name = "AlgoHybridDashboard_BG_" + IntegerToString((int)chart_id);
           }
 
-       CreateObjects();
+        CreateObjects();
 
-       int panel_x_from_right = 230;
-       int panel_width = m_compact_view ? 220 : 280;
-       int panel_pad_x = 6;
-       int x_col1 = panel_x_from_right - panel_width + panel_pad_x;
-       int x_col2 = x_col1 + 110;
-       int y_start = 30 + 14;
-       int y_step = 14;
+        long chart_w = ChartGetInteger(m_chart_id, CHART_WIDTH_IN_PIXELS);
+        if(chart_w <= 0)
+           return;
+
+        int panel_width = m_compact_view ? 240 : 320;
+        int panel_x = (int)chart_w - panel_width - 20;
+        int panel_pad_x = 6;
+        int x_col1 = panel_x + panel_pad_x;
+        int x_col2 = x_col1 + 120;
+        int y_start = 20 + 14;
+        int y_step = 14;
 
        if(ObjectFind(m_chart_id, m_bg_name) >= 0)
          {
+          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_XDISTANCE, panel_x);
+          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_YDISTANCE, 20);
           ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_XSIZE, panel_width);
-          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_YSIZE, 180);
+          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_YSIZE, 190);
          }
 
        // Hide stale labels
@@ -563,11 +667,11 @@ public:
        if(ObjectFind(m_chart_id, m_bg_name) >= 0)
          {
           ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_XSIZE, panel_width);
-          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_YSIZE, 180);
+          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_YSIZE, 190);
          }
          {
           ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_XSIZE, panel_width);
-          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_YSIZE, 180);
+          ObjectSetInteger(m_chart_id, m_bg_name, OBJPROP_YSIZE, 190);
          }
 
        // Hide stale labels
@@ -578,6 +682,7 @@ public:
              ObjectSetString(m_chart_id, m_label_names[li], OBJPROP_TEXT, "");
              ObjectSetInteger(m_chart_id, m_label_names[li], OBJPROP_XDISTANCE, 10000);
              ObjectSetInteger(m_chart_id, m_label_names[li], OBJPROP_YDISTANCE, 10000);
+             ObjectSetInteger(m_chart_id, m_label_names[li], OBJPROP_HIDDEN, true);
             }
          }
 
