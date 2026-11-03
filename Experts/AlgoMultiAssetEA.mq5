@@ -2127,7 +2127,7 @@ int DiscoverForexSymbols(string &symbols_out[])
       if(InpBitcoinSymbol!="") { int sz=ArraySize(symbols_out); ArrayResize(symbols_out,sz+1); symbols_out[sz]=InpBitcoinSymbol; }
       return ArraySize(symbols_out);
      }
-   int total=SymbolsTotal(false);
+   int total=SymbolsTotal(true);
    for(int i=0;i<total;i++)
      {
       string sn=SymbolName(i,true);
