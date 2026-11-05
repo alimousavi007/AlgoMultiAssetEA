@@ -1719,56 +1719,88 @@ bool CExecutionLedger::AcquireAuthority(const string authority_key, const string
    return true;
   }
 
-bool CExecutionLedger::ReleaseAuthority(const string authority_key, const string owner_token, long current_epoch)
-  {
-   if(!m_db_available || m_db_handle == INVALID_HANDLE)
-      return false;
-   if(!DatabaseTransactionBegin(m_db_handle))
-      return false;
-   datetime now = TimeCurrent();
-   string sql = "UPDATE account_authority SET claim_state=" + IntegerToString((int)GATEWAY_AUTHORITY_RELEASED) +
-                ", released_at=" + IntegerToString((long)now) + "," +
-                " owner_instance_token='', last_reason='RELEASED' " +
-                "WHERE GatewayAuthorityKey='" + EscapeSQL(authority_key) + "' " +
-                "AND owner_instance_token='" + EscapeSQL(owner_token) + "' " +
-                "AND authority_epoch=" + IntegerToString(current_epoch) + ";";
-   if(!ExecuteSQL(sql))
-     {
-      DatabaseTransactionRollback(m_db_handle);
-      return false;
-     }
-   if(!DatabaseTransactionCommit(m_db_handle))
-     {
-      DatabaseTransactionRollback(m_db_handle);
-      return false;
-     }
-   return true;
-  }
+ bool CExecutionLedger::ReleaseAuthority(const string authority_key, const string owner_token, long current_epoch)
+   {
+    if(!m_db_available || m_db_handle == INVALID_HANDLE)
+       return false;
+    if(!DatabaseTransactionBegin(m_db_handle))
+       return false;
+    datetime now = TimeCurrent();
+    string sql = "UPDATE account_authority SET claim_state=" + IntegerToString((int)GATEWAY_AUTHORITY_RELEASED) +
+                 ", released_at=" + IntegerToString((long)now) + "," +
+                 " owner_instance_token='', last_reason='RELEASED' " +
+                 "WHERE GatewayAuthorityKey='" + EscapeSQL(authority_key) + "' " +
+                 "AND owner_instance_token='" + EscapeSQL(owner_token) + "' " +
+                 "AND authority_epoch=" + IntegerToString(current_epoch) + ";";
+    if(!ExecuteSQL(sql))
+      {
+       DatabaseTransactionRollback(m_db_handle);
+       return false;
+      }
+    // Verify exactly one row was affected (conditional update)
+    int changes_handle = DatabasePrepare(m_db_handle, "SELECT changes();");
+    if(changes_handle == INVALID_HANDLE)
+      {
+       DatabaseTransactionRollback(m_db_handle);
+       return false;
+      }
+    int affected = 0;
+    if(DatabaseRead(changes_handle))
+       DatabaseColumnInteger(changes_handle, 0, affected);
+    DatabaseFinalize(changes_handle);
+    if(affected != 1)
+      {
+       DatabaseTransactionRollback(m_db_handle);
+       return false;
+      }
+    if(!DatabaseTransactionCommit(m_db_handle))
+      {
+       DatabaseTransactionRollback(m_db_handle);
+       return false;
+      }
+    return true;
+   }
 
-bool CExecutionLedger::HeartbeatAuthority(const string authority_key, const string owner_token, long current_epoch)
-  {
-   if(!m_db_available || m_db_handle == INVALID_HANDLE)
-      return false;
-   if(!DatabaseTransactionBegin(m_db_handle))
-      return false;
-   datetime now = TimeCurrent();
-   string sql = "UPDATE account_authority SET heartbeat_at=" + IntegerToString((long)now) +
-                " WHERE GatewayAuthorityKey='" + EscapeSQL(authority_key) + "' " +
-                "AND owner_instance_token='" + EscapeSQL(owner_token) + "' " +
-                "AND authority_epoch=" + IntegerToString(current_epoch) + " " +
-                "AND claim_state=" + IntegerToString((int)GATEWAY_AUTHORITY_CLAIMED) + ";";
-   if(!ExecuteSQL(sql))
-     {
-      DatabaseTransactionRollback(m_db_handle);
-      return false;
-     }
-   if(!DatabaseTransactionCommit(m_db_handle))
-     {
-      DatabaseTransactionRollback(m_db_handle);
-      return false;
-     }
-   return true;
-  }
+ bool CExecutionLedger::HeartbeatAuthority(const string authority_key, const string owner_token, long current_epoch)
+   {
+    if(!m_db_available || m_db_handle == INVALID_HANDLE)
+       return false;
+    if(!DatabaseTransactionBegin(m_db_handle))
+       return false;
+    datetime now = TimeCurrent();
+    string sql = "UPDATE account_authority SET heartbeat_at=" + IntegerToString((long)now) +
+                 " WHERE GatewayAuthorityKey='" + EscapeSQL(authority_key) + "' " +
+                 "AND owner_instance_token='" + EscapeSQL(owner_token) + "' " +
+                 "AND authority_epoch=" + IntegerToString(current_epoch) + " " +
+                 "AND claim_state=" + IntegerToString((int)GATEWAY_AUTHORITY_CLAIMED) + ";";
+    if(!ExecuteSQL(sql))
+      {
+       DatabaseTransactionRollback(m_db_handle);
+       return false;
+      }
+    // Verify exactly one row was affected (conditional update)
+    int changes_handle = DatabasePrepare(m_db_handle, "SELECT changes();");
+    if(changes_handle == INVALID_HANDLE)
+      {
+       DatabaseTransactionRollback(m_db_handle);
+       return false;
+      }
+    int affected = 0;
+    if(DatabaseRead(changes_handle))
+       DatabaseColumnInteger(changes_handle, 0, affected);
+    DatabaseFinalize(changes_handle);
+    if(affected != 1)
+      {
+       DatabaseTransactionRollback(m_db_handle);
+       return false;
+      }
+    if(!DatabaseTransactionCommit(m_db_handle))
+      {
+       DatabaseTransactionRollback(m_db_handle);
+       return false;
+      }
+    return true;
+   }
 
 bool CExecutionLedger::ValidateAuthority(const string authority_key, const string owner_token, long current_epoch)
   {

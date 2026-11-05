@@ -4,6 +4,7 @@
 #include <Trade/Trade.mqh>
 #include "Interfaces.mqh"
 #include "Utilities.mqh"
+#include "ExecutionLedger.mqh"
 
 //+------------------------------------------------------------------+
 //| Trade Executor                                                   |
@@ -20,6 +21,28 @@ private:
 
    bool m_initialized;
    string m_last_validation_reason;
+
+   // E2.6: shared execution authorization boundary (fail-closed)
+   CExecutionLedger *m_auth_ledger;
+   string            m_auth_key;
+   string            m_auth_token;
+   long              m_auth_epoch;
+   bool              m_auth_is_coordinator;
+   bool              m_auth_configured;
+
+   bool HasExecutionAuthority(string &reason) const
+     {
+      reason="";
+      if(!m_auth_configured || m_auth_ledger==NULL)
+         return RejectOpenValidation(reason,"Execution authority context is not configured");
+      if(!m_auth_ledger.IsAvailable())
+         return RejectOpenValidation(reason,"Execution ledger is unavailable for authority validation");
+      if(!m_auth_is_coordinator)
+         return RejectOpenValidation(reason,"Not coordinator - execution denied");
+      if(!m_auth_ledger.ValidateAuthority(m_auth_key, m_auth_token, m_auth_epoch))
+         return RejectOpenValidation(reason,"Authority validation failed - execution denied");
+      return true;
+     }
 
    bool RejectOpenValidation(string &reason,
                              const string detail) const
@@ -635,6 +658,30 @@ public:
       m_deviation_points=20;
       m_initialized=false;
       m_last_validation_reason="";
+      m_auth_ledger=NULL;
+      m_auth_key="";
+      m_auth_token="";
+      m_auth_epoch=0;
+      m_auth_is_coordinator=false;
+      m_auth_configured=false;
+     }
+
+   // E2.6: configure/sync authority context used by all broker mutations.
+   void ConfigureAuthority(CExecutionLedger *ledger,
+                           const string authority_key,
+                           const string owner_token)
+     {
+      m_auth_ledger=ledger;
+      m_auth_key=authority_key;
+      m_auth_token=owner_token;
+      m_auth_configured=(m_auth_ledger!=NULL && m_auth_key!="" && m_auth_token!="");
+     }
+
+   void SyncAuthority(const long epoch,
+                      const bool is_coordinator)
+     {
+      m_auth_epoch=epoch;
+      m_auth_is_coordinator=is_coordinator;
      }
 
    //+----------------------------------------------------------------+
@@ -723,6 +770,20 @@ public:
 
          return false;
         }
+
+      // E2.6: shared broker-mutation authorization boundary (OPEN/CLOSE/MODIFY)
+      {
+       string auth_reason="";
+       if(!HasExecutionAuthority(auth_reason))
+         {
+          result.success=false;
+          result.reconciliation_required=false;
+          result.failure_class="AUTHORIZATION_DENIED";
+          result.message=auth_reason;
+          m_last_validation_reason=auth_reason;
+          return false;
+         }
+      }
 
       //--- open long/short
       if(request.intent==ORDER_INTENT_OPEN_LONG ||

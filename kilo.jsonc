@@ -1,6 +1,7 @@
 {
   "$schema": "https://app.kilo.ai/config.json",
   "instructions": [
+    ".kilo/rules/core.md",
     ".kilo/rules/mql5.md"
   ],
   "plugin": [

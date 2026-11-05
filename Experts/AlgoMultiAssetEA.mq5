@@ -1175,40 +1175,45 @@ if(struct_res != EVIDENCE_SUFFICIENT_NO_INVALIDATION)
     attempt_rec.stop_loss = request.stop_loss;
     attempt_rec.take_profit = request.take_profit;
 
-    if(!g_execution_ledger.CreateIntent(attempt_rec))
-      {
-       g_logger.Event(
-          LOG_ERROR, "EXECUTION", "INTENT_CREATE_FAILED",
-          request.symbol, "", "",
-          request.signal_id,
-          "FAIL", "LEDGER_ERROR", "Failed to create intent in ledger");
-       runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
-       return;
-      }
-
-    // Mark submission bound (after all validations passed)
-    if(!g_execution_ledger.MarkSubmissionBound(request.attempt_id, "Pre-submit validation passed"))
-      {
-       g_logger.Event(
-          LOG_ERROR, "EXECUTION", "SUBMISSION_BOUND_FAILED",
-          request.symbol, "", "",
-          request.signal_id,
-          "FAIL", "LEDGER_ERROR", "Failed to mark submission bound");
-       runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
-       return;
-      }
-
-     // E2.6: Execution authorization boundary
-     if(g_coordinator_mode != COORD_MODE_COORDINATOR)
+     if(!g_execution_ledger.CreateIntent(attempt_rec))
        {
-        g_logger.Event(LOG_ERROR, "EXECUTION", "AUTHORIZATION_DENIED", request.symbol, "", "", request.signal_id, "FAIL", "AUTHORITY", "Not Coordinator - execution denied");
+        g_logger.Event(
+           LOG_ERROR, "EXECUTION", "INTENT_CREATE_FAILED",
+           request.symbol, "", "",
+           request.signal_id,
+           "FAIL", "LEDGER_ERROR", "Failed to create intent in ledger");
         runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
         return;
        }
-     string authority_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
-     if(!g_execution_ledger.ValidateAuthority(authority_key, g_owner_instance_token, g_authority_epoch))
+
+      // E2.6: Execution authorization boundary (must run before submission-bound state)
+      if(g_coordinator_mode != COORD_MODE_COORDINATOR)
+        {
+         g_logger.Event(LOG_ERROR, "EXECUTION", "AUTHORIZATION_DENIED", request.symbol, "", "", request.signal_id, "FAIL", "AUTHORITY", "Not Coordinator - execution denied");
+         g_execution_ledger.ResolveAttempt(request.attempt_id, EXEC_STATE_ABORTED, "Authorization denied: not coordinator");
+         runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+         return;
+        }
+      {
+       string authority_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
+       g_executor.SyncAuthority(g_authority_epoch, (g_coordinator_mode == COORD_MODE_COORDINATOR));
+       if(!g_execution_ledger.ValidateAuthority(authority_key, g_owner_instance_token, g_authority_epoch))
+         {
+          g_logger.Event(LOG_ERROR, "EXECUTION", "AUTHORIZATION_DENIED", request.symbol, "", "", request.signal_id, "FAIL", "AUTHORITY", "Authority validation failed - execution denied");
+          g_execution_ledger.ResolveAttempt(request.attempt_id, EXEC_STATE_ABORTED, "Authorization denied: authority validation failed");
+          runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+          return;
+         }
+      }
+
+     // Mark submission bound (after all validations passed)
+     if(!g_execution_ledger.MarkSubmissionBound(request.attempt_id, "Pre-submit validation passed"))
        {
-        g_logger.Event(LOG_ERROR, "EXECUTION", "AUTHORIZATION_DENIED", request.symbol, "", "", request.signal_id, "FAIL", "AUTHORITY", "Authority validation failed - execution denied");
+        g_logger.Event(
+           LOG_ERROR, "EXECUTION", "SUBMISSION_BOUND_FAILED",
+           request.symbol, "", "",
+           request.signal_id,
+           "FAIL", "LEDGER_ERROR", "Failed to mark submission bound");
         runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
         return;
        }
@@ -1815,9 +1820,15 @@ ENUM_SYSTEM_INIT_STATUS InitializeSystemWhenReady()
       return SYSTEM_INIT_FAILED;
      }
 
-   g_executor.SetDeviationPoints(InpDeviationPoints);
+    g_executor.SetDeviationPoints(InpDeviationPoints);
 
-    if(!g_executor.Initialize())
+    // E2.6: configure shared broker-mutation authorization context (fail-closed in executor)
+    g_executor.ConfigureAuthority(GetPointer(g_execution_ledger),
+                                  AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN)),
+                                  g_owner_instance_token);
+    g_executor.SyncAuthority(g_authority_epoch, (g_coordinator_mode == COORD_MODE_COORDINATOR));
+
+     if(!g_executor.Initialize())
       {
        g_initialization_started=false;
        LogInitFailure("TradeExecutor.Initialize");
@@ -1888,32 +1899,36 @@ ENUM_SYSTEM_INIT_STATUS InitializeSystemWhenReady()
    if(g_execution_ledger.IsAvailable())
      {
       int astate = g_execution_ledger.GetAuthorityState(authority_key);
-      if(astate == (int)GATEWAY_AUTHORITY_ORPHANED || astate == -1)
-        {
-         g_coordinator_mode = COORD_MODE_UNAVAILABLE;
-         g_logger.Event(LOG_WARNING, "INIT", "COORDINATOR_UNAVAILABLE", _Symbol, "", "", "", "FAIL", "AUTHORITY", "Authority unavailable or orphaned");
-        }
+       if(astate == (int)GATEWAY_AUTHORITY_ORPHANED || astate == -1)
+         {
+          g_coordinator_mode = COORD_MODE_UNAVAILABLE;
+          g_executor.SyncAuthority(g_authority_epoch, false);
+          g_logger.Event(LOG_WARNING, "INIT", "COORDINATOR_UNAVAILABLE", _Symbol, "", "", "", "FAIL", "AUTHORITY", "Authority unavailable or orphaned");
+         }
       else
         {
          long epoch = 0;
-         if(g_execution_ledger.AcquireAuthority(authority_key, g_owner_instance_token, epoch))
-           {
-            g_coordinator_mode = COORD_MODE_COORDINATOR;
-            g_authority_epoch = epoch;
-            runtime_count = InitializePendingRuntimes();
-           }
-         else
-           {
-            g_coordinator_mode = COORD_MODE_CHART_CONTEXT;
-            g_logger.Event(LOG_INFO, "INIT", "CHART_CONTEXT_ONLY", _Symbol, "", "", "", "INFO", "AUTHORITY", "Another coordinator owns authority");
-           }
+          if(g_execution_ledger.AcquireAuthority(authority_key, g_owner_instance_token, epoch))
+            {
+             g_coordinator_mode = COORD_MODE_COORDINATOR;
+             g_authority_epoch = epoch;
+             g_executor.SyncAuthority(g_authority_epoch, true);
+             runtime_count = InitializePendingRuntimes();
+            }
+          else
+            {
+             g_coordinator_mode = COORD_MODE_CHART_CONTEXT;
+             g_executor.SyncAuthority(g_authority_epoch, false);
+             g_logger.Event(LOG_INFO, "INIT", "CHART_CONTEXT_ONLY", _Symbol, "", "", "", "INFO", "AUTHORITY", "Another coordinator owns authority");
+            }
         }
      }
    else
-     {
-      // Ledger unavailable: fail-closed, no coordinator
-      g_coordinator_mode = COORD_MODE_UNAVAILABLE;
-     }
+      {
+       // Ledger unavailable: fail-closed, no coordinator
+       g_coordinator_mode = COORD_MODE_UNAVAILABLE;
+       g_executor.SyncAuthority(g_authority_epoch, false);
+      }
 
    if(!g_state.Reconstruct())
      {
@@ -2183,12 +2198,13 @@ void OnTimer()
              }
           }
        string authority_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
-       if(!g_execution_ledger.HeartbeatAuthority(authority_key, g_owner_instance_token, g_authority_epoch) ||
-          !g_execution_ledger.ValidateAuthority(authority_key, g_owner_instance_token, g_authority_epoch))
-         {
-          g_coordinator_mode = COORD_MODE_UNAVAILABLE;
-          g_logger.Event(LOG_WARNING, "SYSTEM", "COORDINATOR_LOST", _Symbol, "", "", "", "FAIL", "AUTHORITY", "Heartbeat/validation failed");
-         }
+        if(!g_execution_ledger.HeartbeatAuthority(authority_key, g_owner_instance_token, g_authority_epoch) ||
+           !g_execution_ledger.ValidateAuthority(authority_key, g_owner_instance_token, g_authority_epoch))
+          {
+           g_coordinator_mode = COORD_MODE_UNAVAILABLE;
+           g_executor.SyncAuthority(g_authority_epoch, false);
+           g_logger.Event(LOG_WARNING, "SYSTEM", "COORDINATOR_LOST", _Symbol, "", "", "", "FAIL", "AUTHORITY", "Heartbeat/validation failed");
+          }
       }
 
      // Chart Context registration retry
