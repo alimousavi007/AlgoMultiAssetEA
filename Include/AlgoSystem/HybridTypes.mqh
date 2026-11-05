@@ -371,6 +371,7 @@ struct TradePlan
    double            score_short;
 
    string            setup_id;
+   string            logical_setup_key;
    datetime          signal_time;
 
    double            entry;

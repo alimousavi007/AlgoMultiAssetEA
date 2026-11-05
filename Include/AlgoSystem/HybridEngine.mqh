@@ -71,6 +71,7 @@ private:
    bool               m_last_signal_consumed;
 
    ENUM_TRADING_STYLE m_active_style;
+   string            m_strategy_group_key;
 
 public:
                      CHybridSignalEngine()
@@ -105,6 +106,7 @@ public:
       m_last_signal_direction=SIGNAL_NONE;
       m_last_signal_consumed=false;
       m_active_style=STYLE_DAY_TRADING;
+      m_strategy_group_key="ALGO_MULTI_ASSET_EA_DEFAULT";
      }
 
     void              SetParameters(ENUM_TRADING_STYLE style,
@@ -319,7 +321,40 @@ private:
      }
 
 public:
-    string            GenerateSetupID(datetime bar_time,
+    void              SetStrategyGroupKey(const string key)
+     {
+      m_strategy_group_key = (key == "" ? "ALGO_MULTI_ASSET_EA_DEFAULT" : key);
+     }
+
+   string            ComputeLogicalSetupKey(datetime setup_bar_time,
+                                            ENUM_SIGNAL_DIRECTION direction,
+                                            ENUM_TIMEFRAMES setup_tf)
+     {
+      // Canonical serialization v1 (length-prefixed components)
+      string key = "LSK1|";
+      // StrategyGroupKey
+      key += IntegerToString(StringLen(m_strategy_group_key)) + ":" + m_strategy_group_key + "|";
+      // CanonicalSymbol (symbol member)
+      key += IntegerToString(StringLen(m_symbol)) + ":" + m_symbol + "|";
+      // SetupType: use "DEFAULT_SETUP" (no distinct setup types currently)
+      string setup_type = "DEFAULT_SETUP";
+      key += IntegerToString(StringLen(setup_type)) + ":" + setup_type + "|";
+      // Direction
+      key += IntegerToString((int)direction) + "|";
+      // OriginatingClosedBarTime
+      key += IntegerToString((long)setup_bar_time) + "|";
+      // SetupTimeframeRole
+      key += IntegerToString((int)setup_tf);
+      // Simple deterministic hash
+      uint h = 5381;
+      for(int i = 0; i < StringLen(key); i++)
+        {
+         h = ((h << 5) + h) + (uint)StringGetCharacter(key, i);
+        }
+      return "LSK_" + IntegerToString((long)h, 16);
+     }
+
+   string            GenerateSetupID(datetime bar_time,
                                        ENUM_SIGNAL_DIRECTION direction,
                                        double entry_price)
       {
@@ -1352,6 +1387,7 @@ public:
        plan.score_long=long_score;
        plan.score_short=short_score;
        plan.setup_id=GenerateSetupID(ctx.setup_market.closed_bar_time, selected_direction, entry_price);
+       plan.logical_setup_key=ComputeLogicalSetupKey(ctx.setup_market.closed_bar_time, selected_direction, m_setup_tf);
        plan.signal_time=ctx.setup_market.closed_bar_time;
        plan.entry=entry_price;
        plan.stop=stop;

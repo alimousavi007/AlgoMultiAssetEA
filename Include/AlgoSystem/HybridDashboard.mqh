@@ -6,10 +6,22 @@
 class CHybridDashboard
   {
  private:
-    bool               m_enabled;
-    int                m_view_mode; // 0 FULL, 1 COMPACT, 2 MINIMAL
+bool               m_enabled;
+    int                m_view_mode;
     bool               m_show_diagnostics;
     bool               m_show_overlay;
+
+    // D2: snapshot-driven analytical fields (consumer only)
+    string             m_snap_style;
+    string             m_snap_regime;
+    string             m_snap_bias;
+    string             m_snap_long;
+    string             m_snap_short;
+    string             m_snap_stage;
+    string             m_snap_reason;
+    datetime           m_snap_time;
+    datetime           m_snap_success_time;
+    bool               m_snap_valid;
 
     long               m_chart_id;
     string             m_bg_name;
@@ -58,6 +70,16 @@ class CHybridDashboard
        m_view_mode=0;
        m_show_diagnostics=true;
        m_show_overlay=true;
+       m_snap_style="NOT EVALUATED";
+       m_snap_regime="NOT EVALUATED";
+       m_snap_bias="NOT EVALUATED";
+       m_snap_long="NOT EVALUATED";
+       m_snap_short="NOT EVALUATED";
+       m_snap_stage="NOT_EVALUATED";
+       m_snap_reason="";
+       m_snap_time=0;
+       m_snap_success_time=0;
+       m_snap_valid=false;
        m_chart_id=0;
        m_bg_name="";
        m_title="ALGO HYBRID";
@@ -83,6 +105,20 @@ class CHybridDashboard
 
     void Enable(bool enabled){ m_enabled=enabled; if(!enabled) Clear(); }
     void SetViewMode(int mode){ if(mode<0||mode>2) return; m_view_mode=mode; }
+    // D2: consumer-only snapshot setter
+    void SetRuntimeSnapshot(const string style, const string regime, const string bias, const string longt, const string shortt, const string stage, const string reason, const datetime snap_time, const datetime success_time, const bool valid)
+      {
+       m_snap_style = (style=="" ? "NOT EVALUATED" : style);
+       m_snap_regime = (regime=="" ? "NOT EVALUATED" : regime);
+       m_snap_bias = (bias=="" ? "NOT EVALUATED" : bias);
+       m_snap_long = (longt=="" ? "NOT EVALUATED" : longt);
+       m_snap_short = (shortt=="" ? "NOT EVALUATED" : shortt);
+       m_snap_stage = (stage=="" ? "NOT_EVALUATED" : stage);
+       m_snap_reason = reason;
+       m_snap_time = snap_time;
+       m_snap_success_time = success_time;
+       m_snap_valid = valid;
+      }
     void ShowDiagnostics(bool show){ m_show_diagnostics=show; }
     void ShowOverlay(bool show){ m_show_overlay=show; }
     void SetTitle(const string title){ m_title=title; }
@@ -117,13 +153,31 @@ class CHybridDashboard
     color ColorFromString(const string c) const
       {
        string n=c; StringTrimLeft(n); StringTrimRight(n); StringToUpper(n);
-       if(n=="GREEN") return clrLimeGreen;
-       if(n=="RED") return clrSalmon;
-       if(n=="AMBER") return clrOrange;
-       if(n=="GREY") return clrGray;
-       if(n=="LIME") return clrLime;
-       if(n=="SILVER") return clrSilver;
-       return clrWhite;
+if(n=="GREEN") return clrDarkGreen;
+        if(n=="RED") return clrDarkRed;
+        if(n=="AMBER") return clrDarkOrange;
+        if(n=="GREY") return clrDimGray;
+        if(n=="LIME") return clrSeaGreen;
+        if(n=="SILVER") return clrDarkSlateGray;
+        if(n=="TEAL") return clrTeal;
+        if(n=="CHARCOAL") return clrBlack;
+        return clrBlack;
+      }
+    string TimeframeText(ENUM_TIMEFRAMES tf) const
+      {
+       switch(tf)
+         {
+          case PERIOD_M1: return "M1";
+          case PERIOD_M5: return "M5";
+          case PERIOD_M15: return "M15";
+          case PERIOD_M30: return "M30";
+          case PERIOD_H1: return "H1";
+          case PERIOD_H4: return "H4";
+          case PERIOD_D1: return "D1";
+          case PERIOD_W1: return "W1";
+          case PERIOD_MN1: return "MN1";
+          default: return "TF";
+         }
       }
     string ShortReason(const string r) const
       { if(StringLen(r)<=20) return r; return StringSubstr(r,0,17)+"..."; }
@@ -139,19 +193,27 @@ if(ObjectFind(m_chart_id,m_bg_name)<0)
            else
              {
               ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_CORNER,CORNER_LEFT_UPPER);
-              ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_XDISTANCE,20);
-              ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_YDISTANCE,20);
-              ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_XSIZE,260);
-              ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_YSIZE,180);
-              ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_BGCOLOR,clrDarkSlateBlue);
-              ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_COLOR,clrSilver);
+ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_XDISTANCE,m_layout.valid?m_layout.panel_x:20);
+           ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_YDISTANCE,m_layout.valid?m_layout.panel_y:20);
+           ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_XSIZE,m_layout.valid?m_layout.panel_width:260);
+           ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_YSIZE,m_layout.valid?m_layout.panel_height:180);
+ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_BGCOLOR,clrWhite);
+           ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_COLOR,clrSilver);
               ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_BORDER_TYPE,BORDER_FLAT);
               ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_BACK,false);
               ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_SELECTABLE,false);
               ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_HIDDEN,false);
-              ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_ZORDER,10);
-             }
-          }
+               ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_ZORDER,10);
+         }
+         }
+// Ensure background geometry is always synced with layout
+       if(ObjectFind(m_chart_id,m_bg_name)>=0 && m_layout.valid)
+         {
+          ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_XDISTANCE,m_layout.panel_x);
+          ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_YDISTANCE,m_layout.panel_y);
+          ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_XSIZE,m_layout.panel_width);
+          ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_YSIZE,m_layout.panel_height);
+         }
        for(int i=0;i<m_label_count;i++)
          {
           m_label_names[i]=LabelName(i);
@@ -173,21 +235,12 @@ if(ObjectFind(m_chart_id,m_bg_name)<0)
       {
        m_layout.valid=false;
        long w=0,h=0;
-       bool ok_w=ChartGetInteger(m_chart_id,CHART_WIDTH_IN_PIXELS,w)&&w>0;
-       bool ok_h=ChartGetInteger(m_chart_id,CHART_HEIGHT_IN_PIXELS,h)&&h>0;
+       bool ok_w=ChartGetInteger(m_chart_id,CHART_WIDTH_IN_PIXELS,0,w)&&w>0;
+       bool ok_h=ChartGetInteger(m_chart_id,CHART_HEIGHT_IN_PIXELS,0,h)&&h>0;
        if(!ok_w||!ok_h)
          {
-          // Fallback: use last valid layout or a safe default
-          if(!m_layout.valid)
-            {
-             m_layout.chart_width=400; m_layout.chart_height=300;
-             m_layout.panel_width=300; m_layout.panel_x=84; m_layout.panel_y=16;
-             m_layout.padding=6; m_layout.row_height=13; m_layout.font_size=8;
-             m_layout.column_1_x=m_layout.panel_x+m_layout.padding;
-             m_layout.column_2_x=m_layout.column_1_x+150;
-             m_layout.visible_rows=4; m_layout.panel_height=80;
-             m_layout.view_mode=0; m_layout.valid=true;
-            }
+          // No fabricated dimensions: defer rendering until valid geometry
+          m_layout.valid=false;
           return;
          }
        m_layout.chart_width=(int)w; m_layout.chart_height=(int)h;
@@ -206,10 +259,9 @@ if(ObjectFind(m_chart_id,m_bg_name)<0)
        m_layout.font_size=(m_view_mode==2)?7:(m_view_mode==1)?8:9;
        m_layout.column_1_x=m_layout.panel_x+m_layout.padding;
        m_layout.column_2_x=m_layout.column_1_x+(pw/2);
-       m_layout.visible_rows=(m_layout.chart_height-40)/m_layout.row_height;
+       m_layout.visible_rows=(m_view_mode==2)?4:(m_view_mode==1)?6:8;
        if(m_layout.visible_rows<4) m_layout.visible_rows=4;
-       int ph=m_layout.visible_rows*m_layout.row_height+16;
-       if(ph>m_layout.chart_height-16) ph=m_layout.chart_height-16;
+       int ph=m_layout.visible_rows*m_layout.row_height+36;
        if(ph<80) ph=80;
        m_layout.panel_height=ph;
        if(m_layout.panel_width<=0||m_layout.panel_height<=0) return;
@@ -266,13 +318,39 @@ if(ObjectFind(m_chart_id,m_bg_name)<0)
        RecalculateDashboardLayout();
        if(!m_layout.valid) return;
        CreateObjects();
-       // Header
-       SetLabelText(0,m_title+"  |  "+status,m_view_mode==2?"AMBER":"SILVER");
-       PositionLabel(0,m_layout.column_1_x,m_layout.panel_y+4);
-       // Hide rest
-       for(int li=1;li<m_label_count;li++)
+       // Restore visibility for all core labels first
+       for(int li=0;li<=8;li++)
          if(ObjectFind(m_chart_id,m_label_names[li])>=0)
-           { ObjectSetString(m_chart_id,m_label_names[li],OBJPROP_TEXT,""); ObjectSetInteger(m_chart_id,m_label_names[li],OBJPROP_HIDDEN,true); }
+           ObjectSetInteger(m_chart_id,m_label_names[li],OBJPROP_TIMEFRAMES,OBJ_ALL_PERIODS);
+
+       int x1=m_layout.column_1_x; int ys=m_layout.panel_y+4; int step=m_layout.row_height;
+       // Branding
+       SetLabelText(0,m_title,"SILVER"); PositionLabel(0,x1,ys);
+       // Symbol / timeframe
+       SetLabelText(1,ChartSymbol(0)+"  "+TimeframeText(Period()),"SILVER"); PositionLabel(1,x1,ys+step);
+       // Status
+       SetLabelText(2,"STATUS: "+status,"SILVER"); PositionLabel(2,x1,ys+step*2);
+       // Strategy summary
+       // Strategy summary fields: no real engine snapshot is wired yet; show explicit
+       // NOT EVALUATED rather than fabricated values.
+       SetLabelText(3,"STYLE: "+m_snap_style,"GREY"); PositionLabel(3,x1,ys+step*3);
+       SetLabelText(4,"REGIME: "+m_snap_regime,"GREY"); PositionLabel(4,x1,ys+step*4);
+       SetLabelText(5,"BIAS: "+m_snap_bias,"GREY"); PositionLabel(5,x1,ys+step*5);
+       SetLabelText(6,"LONG SCORE: "+m_snap_long,"GREY"); PositionLabel(6,x1,ys+step*6);
+       SetLabelText(7,"SHORT SCORE: "+m_snap_short,"GREY"); PositionLabel(7,x1,ys+step*7);
+       // Diagnostics toggle handled by OBJ_BUTTON; hide label 8
+       SetLabelText(8,"","GREY");
+       if(ObjectFind(m_chart_id,m_label_names[8])>=0) ObjectSetInteger(m_chart_id,m_label_names[8],OBJPROP_TIMEFRAMES,OBJ_NO_PERIODS);
+       // Hide rest, mode-aware: 0=FULL shows all, 1=NORMAL hides 8+, 2=COMPACT hides 3+
+       int hide_from = (m_view_mode==2) ? 3 : (m_view_mode==1 ? 8 : 9);
+       for(int li=hide_from;li<m_label_count;li++)
+         if(ObjectFind(m_chart_id,m_label_names[li])>=0)
+           { ObjectSetString(m_chart_id,m_label_names[li],OBJPROP_TEXT,""); ObjectSetInteger(m_chart_id,m_label_names[li],OBJPROP_TIMEFRAMES,OBJ_NO_PERIODS); }
+       // COMPACT: also hide analytical labels 3-7
+       if(m_view_mode==2)
+         for(int li=3;li<=7;li++)
+           if(ObjectFind(m_chart_id,m_label_names[li])>=0)
+             ObjectSetInteger(m_chart_id,m_label_names[li],OBJPROP_TIMEFRAMES,OBJ_NO_PERIODS);
        ChartRedraw(m_chart_id);
       }
 
@@ -337,3 +415,4 @@ if(ObjectFind(m_chart_id,m_bg_name)<0)
       }
   };
 #endif
+

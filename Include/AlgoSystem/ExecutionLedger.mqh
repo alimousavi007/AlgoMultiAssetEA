@@ -22,6 +22,24 @@ enum ENUM_EXEC_ATTEMPT_STATE
    EXEC_STATE_ABORTED
   };
 
+// E2.3: Setup Claim state
+enum ENUM_SETUP_CLAIM_STATE
+  {
+   SETUP_CLAIM_UNCLAIMED = 0,
+   SETUP_CLAIM_ACTIVE,
+   SETUP_CLAIM_RETRY_AUTHORIZED,
+   SETUP_CLAIM_RESOLVED
+  };
+
+// E2.4: Gateway Authority state
+enum ENUM_GATEWAY_AUTHORITY_STATE
+  {
+   GATEWAY_AUTHORITY_UNCLAIMED = 0,
+   GATEWAY_AUTHORITY_CLAIMED,
+   GATEWAY_AUTHORITY_RELEASED,
+   GATEWAY_AUTHORITY_ORPHANED
+  };
+
 //+------------------------------------------------------------------+
 //| Execution Attempt Record                                         |
 //+------------------------------------------------------------------+
@@ -112,6 +130,40 @@ public:
     bool               ReconcileUnresolved(int max_attempts=10);
     int                RecoverUnresolved(int &out_count);
     bool               HasBlockingUnresolved(string &blocking_reason);
+
+    // E2.3: Setup Claim lifecycle
+    enum ENUM_CLAIM_RESULT { CLAIM_CREATED=0, CLAIM_ALREADY_EXISTS, CLAIM_IDENTITY_COLLISION, CLAIM_ERROR };
+    ENUM_CLAIM_RESULT  CreateClaim(const string strategy_group_key,
+                                    const string logical_setup_key,
+                                    const string canonical_identity,
+                                    int serialization_version,
+                                    ExecutionAttemptRecord &initial_attempt);
+    bool               RetryAuthorize(const string claim_id,
+                                     const string attempt_id,
+                                     const string reason);
+    bool               RetryCreate(const string claim_id,
+                                  const string new_attempt_id,
+                                  ExecutionAttemptRecord &new_attempt);
+    bool               ResolveClaim(const string claim_id,
+                                   const string attempt_id,
+                                   ENUM_EXEC_ATTEMPT_STATE final_state,
+                                   const string reason);
+
+    // E2.4: Gateway Authority
+    bool               ProvisionAuthority(const string authority_key);
+    bool               AcquireAuthority(const string authority_key,
+                                       const string owner_token,
+                                       long &out_epoch);
+    bool               ReleaseAuthority(const string authority_key,
+                                      const string owner_token,
+                                      long current_epoch);
+    bool               HeartbeatAuthority(const string authority_key,
+                                        const string owner_token,
+                                        long current_epoch);
+    bool               ValidateAuthority(const string authority_key,
+                                       const string owner_token,
+                                       long current_epoch);
+    int                GetAuthorityState(const string authority_key);
 
     // State history
     bool               LogStateTransition(const string attempt_id, ENUM_EXEC_ATTEMPT_STATE old_state,
@@ -339,6 +391,54 @@ bool CExecutionLedger::CreateSchema()
       {
        m_last_init_stage = "ExecutionLedger.CreateSchema";
        m_last_init_operation = "ExecuteSQL(sql3:CREATE_EXECUTION_SCHEMA_META)";
+       m_last_init_error = GetLastError();
+       return false;
+      }
+
+    // E2.3: setup_claims table
+    string sql4 = "CREATE TABLE IF NOT EXISTS setup_claims ("
+                 "claim_id TEXT PRIMARY KEY,"
+                 "strategy_group_key TEXT,"
+                 "logical_setup_key TEXT,"
+                 "canonical_identity TEXT,"
+                 "serialization_version INTEGER,"
+                 "claim_state INTEGER,"
+                 "current_attempt_id TEXT,"
+                 "retry_sequence INTEGER,"
+                 "created_at INTEGER,"
+                 "updated_at INTEGER,"
+                 "resolved_at INTEGER,"
+                 "last_reason TEXT,"
+                 "UNIQUE(strategy_group_key, logical_setup_key)"
+                 ");";
+
+    ResetLastError();
+    if(!ExecuteSQL(sql4))
+      {
+       m_last_init_stage = "ExecutionLedger.CreateSchema";
+       m_last_init_operation = "ExecuteSQL(sql4:CREATE_SETUP_CLAIMS)";
+       m_last_init_error = GetLastError();
+       return false;
+      }
+
+    // E2.4: account_authority table
+    string sql5 = "CREATE TABLE IF NOT EXISTS account_authority ("
+                 "GatewayAuthorityKey TEXT PRIMARY KEY,"
+                 "claim_state INTEGER,"
+                 "authority_epoch INTEGER,"
+                 "owner_instance_token TEXT,"
+                 "created_at INTEGER,"
+                 "claimed_at INTEGER,"
+                 "released_at INTEGER,"
+                 "heartbeat_at INTEGER,"
+                 "last_reason TEXT"
+                 ");";
+
+    ResetLastError();
+    if(!ExecuteSQL(sql5))
+      {
+       m_last_init_stage = "ExecutionLedger.CreateSchema";
+       m_last_init_operation = "ExecuteSQL(sql5:CREATE_ACCOUNT_AUTHORITY)";
        m_last_init_error = GetLastError();
        return false;
       }
@@ -1280,5 +1380,436 @@ bool CExecutionLedger::LogStateTransition(const string attempt_id, ENUM_EXEC_ATT
 
     return ExecuteSQL(sql);
    }
+
+// E2.3: Setup Claim lifecycle implementations (minimal, fail-closed)
+CExecutionLedger::ENUM_CLAIM_RESULT CExecutionLedger::CreateClaim(
+    const string strategy_group_key,
+    const string logical_setup_key,
+    const string canonical_identity,
+    int serialization_version,
+    ExecutionAttemptRecord &initial_attempt)
+  {
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+      return CLAIM_ERROR;
+   if(strategy_group_key == "" || logical_setup_key == "" || canonical_identity == "")
+      return CLAIM_ERROR;
+   // Check existing claim
+   string check_sql = "SELECT claim_id, canonical_identity FROM setup_claims WHERE strategy_group_key='" +
+                      EscapeSQL(strategy_group_key) + "' AND logical_setup_key='" + EscapeSQL(logical_setup_key) + "';";
+   int handle = DatabasePrepare(m_db_handle, check_sql);
+   if(handle == INVALID_HANDLE)
+      return CLAIM_ERROR;
+   bool exists = false;
+   string existing_canonical = "";
+   if(DatabaseRead(handle))
+     {
+      exists = true;
+      DatabaseColumnText(handle, 1, existing_canonical);
+     }
+   DatabaseFinalize(handle);
+   if(exists)
+     {
+      if(existing_canonical != canonical_identity)
+         return CLAIM_IDENTITY_COLLISION;
+      return CLAIM_ALREADY_EXISTS;
+     }
+   // Persist initial Attempt first (separate transaction)
+   if(initial_attempt.attempt_id == "")
+      initial_attempt.attempt_id = GenerateAttemptId();
+   if(!CreateIntent(initial_attempt))
+      return CLAIM_ERROR;
+   // Create claim row (atomic)
+   if(!DatabaseTransactionBegin(m_db_handle))
+      return CLAIM_ERROR;
+   string claim_id = "CLAIM_" + IntegerToString((long)TimeCurrent()) + "_" + IntegerToString(MathRand());
+   datetime now = TimeCurrent();
+   string insert_claim = "INSERT INTO setup_claims (claim_id, strategy_group_key, logical_setup_key, canonical_identity, "
+                        "serialization_version, claim_state, current_attempt_id, retry_sequence, created_at, updated_at, last_reason) "
+                        "VALUES ('" + EscapeSQL(claim_id) + "','" + EscapeSQL(strategy_group_key) + "','" +
+                        EscapeSQL(logical_setup_key) + "','" + EscapeSQL(canonical_identity) + "'," +
+                        IntegerToString(serialization_version) + "," + IntegerToString((int)SETUP_CLAIM_ACTIVE) + ",'" +
+                        EscapeSQL(initial_attempt.attempt_id) + "',0," + IntegerToString((long)now) + "," +
+                        IntegerToString((long)now) + ",'CREATED');";
+   if(!ExecuteSQL(insert_claim))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return CLAIM_ERROR;
+     }
+   if(!DatabaseTransactionCommit(m_db_handle))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return CLAIM_ERROR;
+     }
+   return CLAIM_CREATED;
+  }
+
+bool CExecutionLedger::RetryAuthorize(const string claim_id, const string attempt_id, const string reason)
+  {
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+      return false;
+   string check_sql = "SELECT claim_state, current_attempt_id FROM setup_claims WHERE claim_id='" + EscapeSQL(claim_id) + "';";
+   int handle = DatabasePrepare(m_db_handle, check_sql);
+   if(handle == INVALID_HANDLE)
+      return false;
+   int claim_state = -1;
+   string current_attempt = "";
+   if(DatabaseRead(handle))
+     {
+      DatabaseColumnInteger(handle, 0, claim_state);
+      DatabaseColumnText(handle, 1, current_attempt);
+     }
+   DatabaseFinalize(handle);
+   if(claim_state != (int)SETUP_CLAIM_ACTIVE)
+      return false;
+   if(current_attempt != attempt_id)
+      return false;
+   ENUM_EXEC_ATTEMPT_STATE st;
+   if(!GetAttemptState(attempt_id, st))
+      return false;
+   if(st != EXEC_STATE_FINAL_FAILURE)
+      return false;
+   // Evidence validation: proven terminal non-execution required
+   ExecutionAttemptRecord rec;
+   if(!GetAttempt(attempt_id, rec))
+      return false;
+   if(rec.failure_class == "" || rec.failure_class == "AMBIGUOUS" ||
+      rec.failure_class == "TIMEOUT" || rec.failure_class == "RECONCILIATION_REQUIRED")
+      return false;
+   if(rec.last_retcode == TRADE_RETCODE_TIMEOUT || rec.last_retcode == TRADE_RETCODE_CONNECTION)
+      return false;
+   if(!DatabaseTransactionBegin(m_db_handle))
+      return false;
+   string sql = "UPDATE setup_claims SET claim_state=" + IntegerToString((int)SETUP_CLAIM_RETRY_AUTHORIZED) +
+                ", updated_at=" + IntegerToString((long)TimeCurrent()) +
+                ", last_reason='" + EscapeSQL(reason) + "' " +
+                "WHERE claim_id='" + EscapeSQL(claim_id) + "' AND claim_state=" +
+                IntegerToString((int)SETUP_CLAIM_ACTIVE) + ";";
+   if(!ExecuteSQL(sql))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   if(!DatabaseTransactionCommit(m_db_handle))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   return true;
+  }
+
+bool CExecutionLedger::RetryCreate(const string claim_id, const string new_attempt_id, ExecutionAttemptRecord &new_attempt)
+  {
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+      return false;
+   string check_sql = "SELECT claim_state, current_attempt_id, retry_sequence FROM setup_claims WHERE claim_id='" + EscapeSQL(claim_id) + "';";
+   int handle = DatabasePrepare(m_db_handle, check_sql);
+   if(handle == INVALID_HANDLE)
+      return false;
+   int claim_state = -1;
+   string current_attempt = "";
+   int retry_seq = 0;
+   if(DatabaseRead(handle))
+     {
+      DatabaseColumnInteger(handle, 0, claim_state);
+      DatabaseColumnText(handle, 1, current_attempt);
+      DatabaseColumnInteger(handle, 2, retry_seq);
+     }
+   DatabaseFinalize(handle);
+   if(claim_state != (int)SETUP_CLAIM_RETRY_AUTHORIZED)
+      return false;
+   // Create new durable Attempt Intent first
+   if(new_attempt.attempt_id == "")
+      new_attempt.attempt_id = GenerateAttemptId();
+   if(!CreateIntent(new_attempt))
+      return false;
+   // Consume retry authorization and update claim
+   if(!DatabaseTransactionBegin(m_db_handle))
+      return false;
+   string sql = "UPDATE setup_claims SET claim_state=" + IntegerToString((int)SETUP_CLAIM_ACTIVE) +
+                ", current_attempt_id='" + EscapeSQL(new_attempt.attempt_id) + "'," +
+                " retry_sequence=" + IntegerToString(retry_seq + 1) + "," +
+                " updated_at=" + IntegerToString((long)TimeCurrent()) + " " +
+                "WHERE claim_id='" + EscapeSQL(claim_id) + "' AND claim_state=" +
+                IntegerToString((int)SETUP_CLAIM_RETRY_AUTHORIZED) + ";";
+   if(!ExecuteSQL(sql))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   if(!DatabaseTransactionCommit(m_db_handle))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   return true;
+  }
+
+bool CExecutionLedger::ResolveClaim(const string claim_id, const string attempt_id,
+                                   ENUM_EXEC_ATTEMPT_STATE final_state, const string reason)
+  {
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+      return false;
+   string check_sql = "SELECT claim_state, current_attempt_id FROM setup_claims WHERE claim_id='" + EscapeSQL(claim_id) + "';";
+   int handle = DatabasePrepare(m_db_handle, check_sql);
+   if(handle == INVALID_HANDLE)
+      return false;
+   int claim_state = -1;
+   string current_attempt = "";
+   if(DatabaseRead(handle))
+     {
+      DatabaseColumnInteger(handle, 0, claim_state);
+      DatabaseColumnText(handle, 1, current_attempt);
+     }
+   DatabaseFinalize(handle);
+   if(claim_state != (int)SETUP_CLAIM_ACTIVE)
+      return false;
+   if(current_attempt != attempt_id)
+      return false;
+   // Verify persisted Attempt state supports requested terminal disposition
+   ExecutionAttemptRecord att_rec;
+   if(!GetAttempt(attempt_id, att_rec))
+      return false;
+   if(final_state != EXEC_STATE_COMPLETED && final_state != EXEC_STATE_FINAL_FAILURE &&
+      final_state != EXEC_STATE_ABORTED)
+      return false;
+   bool state_supports = false;
+   if(final_state == EXEC_STATE_COMPLETED && att_rec.state == EXEC_STATE_COMPLETED)
+      state_supports = true;
+   else if(final_state == EXEC_STATE_FINAL_FAILURE && att_rec.state == EXEC_STATE_FINAL_FAILURE)
+      state_supports = true;
+   else if(final_state == EXEC_STATE_ABORTED && att_rec.state == EXEC_STATE_ABORTED)
+      state_supports = true;
+   if(!state_supports)
+      return false;
+   if(!DatabaseTransactionBegin(m_db_handle))
+      return false;
+   string sql = "UPDATE setup_claims SET claim_state=" + IntegerToString((int)SETUP_CLAIM_RESOLVED) +
+                ", resolved_at=" + IntegerToString((long)TimeCurrent()) +
+                ", updated_at=" + IntegerToString((long)TimeCurrent()) +
+                ", last_reason='" + EscapeSQL(reason) + "' " +
+                "WHERE claim_id='" + EscapeSQL(claim_id) + "' AND claim_state=" +
+                IntegerToString((int)SETUP_CLAIM_ACTIVE) + ";";
+   if(!ExecuteSQL(sql))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   if(!DatabaseTransactionCommit(m_db_handle))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   return true;
+  }
+
+// E2.4: Gateway Authority implementations (fail-closed)
+bool CExecutionLedger::ProvisionAuthority(const string authority_key)
+  {
+   if(!m_db_available || m_db_handle == INVALID_HANDLE || authority_key == "")
+      return false;
+   // Idempotent: insert UNCLAIMED only if not exists
+   string check_sql = "SELECT claim_state FROM account_authority WHERE GatewayAuthorityKey='" + EscapeSQL(authority_key) + "';";
+   int handle = DatabasePrepare(m_db_handle, check_sql);
+   if(handle == INVALID_HANDLE)
+      return false;
+   bool exists = false;
+   if(DatabaseRead(handle))
+      exists = true;
+   DatabaseFinalize(handle);
+   if(exists)
+      return true; // already provisioned
+   if(!DatabaseTransactionBegin(m_db_handle))
+      return false;
+   datetime now = TimeCurrent();
+   string sql = "INSERT INTO account_authority (GatewayAuthorityKey, claim_state, authority_epoch, created_at, last_reason) "
+                "VALUES ('" + EscapeSQL(authority_key) + "'," + IntegerToString((int)GATEWAY_AUTHORITY_UNCLAIMED) +
+                ",0," + IntegerToString((long)now) + ",'PROVISIONED');";
+   if(!ExecuteSQL(sql))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   if(!DatabaseTransactionCommit(m_db_handle))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   return true;
+  }
+
+bool CExecutionLedger::AcquireAuthority(const string authority_key, const string owner_token, long &out_epoch)
+  {
+   out_epoch = 0;
+   if(!m_db_available || m_db_handle == INVALID_HANDLE || authority_key == "" || owner_token == "")
+      return false;
+   // Provision if missing
+   if(!ProvisionAuthority(authority_key))
+      return false;
+   // Read current state
+   string check_sql = "SELECT claim_state, authority_epoch FROM account_authority WHERE GatewayAuthorityKey='" + EscapeSQL(authority_key) + "';";
+   int handle = DatabasePrepare(m_db_handle, check_sql);
+   if(handle == INVALID_HANDLE)
+      return false;
+   int state = -1;
+   long epoch = 0;
+   if(DatabaseRead(handle))
+     {
+      DatabaseColumnInteger(handle, 0, state);
+      // authority_epoch is INTEGER; read as long via DatabaseColumnLong? use integer
+      // MQL5 DatabaseColumnLong exists
+     }
+   DatabaseFinalize(handle);
+   if(state == (int)GATEWAY_AUTHORITY_ORPHANED)
+      return false; // blocks acquisition
+   if(state != (int)GATEWAY_AUTHORITY_UNCLAIMED && state != (int)GATEWAY_AUTHORITY_RELEASED)
+      return false; // already owned
+   // Conditional acquisition
+   if(!DatabaseTransactionBegin(m_db_handle))
+      return false;
+   datetime now = TimeCurrent();
+   string sql = "UPDATE account_authority SET claim_state=" + IntegerToString((int)GATEWAY_AUTHORITY_CLAIMED) +
+                ", owner_instance_token='" + EscapeSQL(owner_token) + "'," +
+                " authority_epoch=authority_epoch+1," +
+                " claimed_at=" + IntegerToString((long)now) + "," +
+                " heartbeat_at=" + IntegerToString((long)now) + "," +
+                " last_reason='ACQUIRED' " +
+                "WHERE GatewayAuthorityKey='" + EscapeSQL(authority_key) + "' " +
+                "AND (claim_state=" + IntegerToString((int)GATEWAY_AUTHORITY_UNCLAIMED) +
+                " OR claim_state=" + IntegerToString((int)GATEWAY_AUTHORITY_RELEASED) + ");";
+   if(!ExecuteSQL(sql))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   // Verify exactly one row was affected
+   int changes_handle = DatabasePrepare(m_db_handle, "SELECT changes();");
+   if(changes_handle == INVALID_HANDLE)
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   int affected = 0;
+   if(DatabaseRead(changes_handle))
+      DatabaseColumnInteger(changes_handle, 0, affected);
+   DatabaseFinalize(changes_handle);
+   if(affected != 1)
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   // Read back epoch
+   string read_sql = "SELECT authority_epoch FROM account_authority WHERE GatewayAuthorityKey='" + EscapeSQL(authority_key) + "' AND owner_instance_token='" + EscapeSQL(owner_token) + "';";
+   int rhandle = DatabasePrepare(m_db_handle, read_sql);
+   if(rhandle != INVALID_HANDLE && DatabaseRead(rhandle))
+     {
+      DatabaseColumnLong(rhandle, 0, out_epoch);
+     }
+   if(rhandle != INVALID_HANDLE)
+      DatabaseFinalize(rhandle);
+   if(out_epoch <= 0)
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   if(!DatabaseTransactionCommit(m_db_handle))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   return true;
+  }
+
+bool CExecutionLedger::ReleaseAuthority(const string authority_key, const string owner_token, long current_epoch)
+  {
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+      return false;
+   if(!DatabaseTransactionBegin(m_db_handle))
+      return false;
+   datetime now = TimeCurrent();
+   string sql = "UPDATE account_authority SET claim_state=" + IntegerToString((int)GATEWAY_AUTHORITY_RELEASED) +
+                ", released_at=" + IntegerToString((long)now) + "," +
+                " owner_instance_token='', last_reason='RELEASED' " +
+                "WHERE GatewayAuthorityKey='" + EscapeSQL(authority_key) + "' " +
+                "AND owner_instance_token='" + EscapeSQL(owner_token) + "' " +
+                "AND authority_epoch=" + IntegerToString(current_epoch) + ";";
+   if(!ExecuteSQL(sql))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   if(!DatabaseTransactionCommit(m_db_handle))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   return true;
+  }
+
+bool CExecutionLedger::HeartbeatAuthority(const string authority_key, const string owner_token, long current_epoch)
+  {
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+      return false;
+   if(!DatabaseTransactionBegin(m_db_handle))
+      return false;
+   datetime now = TimeCurrent();
+   string sql = "UPDATE account_authority SET heartbeat_at=" + IntegerToString((long)now) +
+                " WHERE GatewayAuthorityKey='" + EscapeSQL(authority_key) + "' " +
+                "AND owner_instance_token='" + EscapeSQL(owner_token) + "' " +
+                "AND authority_epoch=" + IntegerToString(current_epoch) + " " +
+                "AND claim_state=" + IntegerToString((int)GATEWAY_AUTHORITY_CLAIMED) + ";";
+   if(!ExecuteSQL(sql))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   if(!DatabaseTransactionCommit(m_db_handle))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   return true;
+  }
+
+bool CExecutionLedger::ValidateAuthority(const string authority_key, const string owner_token, long current_epoch)
+  {
+   if(!m_db_available || m_db_handle == INVALID_HANDLE || authority_key == "" || owner_token == "")
+      return false;
+   string sql = "SELECT claim_state, owner_instance_token, authority_epoch FROM account_authority WHERE GatewayAuthorityKey='" + EscapeSQL(authority_key) + "';";
+   int handle = DatabasePrepare(m_db_handle, sql);
+   if(handle == INVALID_HANDLE)
+      return false;
+   int state = -1;
+   string token = "";
+   long epoch = 0;
+   if(DatabaseRead(handle))
+     {
+      DatabaseColumnInteger(handle, 0, state);
+      DatabaseColumnText(handle, 1, token);
+      DatabaseColumnLong(handle, 2, epoch);
+     }
+   DatabaseFinalize(handle);
+   if(state != (int)GATEWAY_AUTHORITY_CLAIMED)
+      return false;
+   if(token != owner_token)
+      return false;
+   if(epoch != current_epoch)
+      return false;
+   return true;
+  }
+
+int CExecutionLedger::GetAuthorityState(const string authority_key)
+  {
+   if(!m_db_available || m_db_handle == INVALID_HANDLE || authority_key == "")
+      return -1;
+   string sql = "SELECT claim_state FROM account_authority WHERE GatewayAuthorityKey='" + EscapeSQL(authority_key) + "';";
+   int handle = DatabasePrepare(m_db_handle, sql);
+   if(handle == INVALID_HANDLE)
+      return -1;
+   int state = -1;
+   if(DatabaseRead(handle))
+      DatabaseColumnInteger(handle, 0, state);
+   DatabaseFinalize(handle);
+   return state;
+  }
 
 #endif

@@ -33,9 +33,14 @@
 // Inputs — Reorganized into logical groups
 //==================================================================
 input group "01. General & Trading Mode"
-input(name="Trading Style")                ENUM_TRADING_STYLE InpTradingStyle=STYLE_DAY_TRADING;
+input(name="Trading Style")                ENUM_TRADING_STYLE 
+InpTradingStyle=STYLE_DAY_TRADING;
+input(name="Strategy Group Key")            string InpStrategyGroupKey="ALGO_MULTI_ASSET_EA_DEFAULT";
 input(name="Execution Mode")               ENUM_TRADING_MODE  InpMode=MODE_SIGNAL_ONLY;
 input(name="Confirm Live Automatic Trading") bool               InpLiveAutoConfirm=false;
+
+enum ENUM_DASHBOARD_VIEW_MODE { DASHBOARD_COMPACT, DASHBOARD_NORMAL, DASHBOARD_FULL };
+input(name="Dashboard View Mode")          ENUM_DASHBOARD_VIEW_MODE InpDashboardViewMode=DASHBOARD_FULL;
 input(name="Enable Dashboard")             bool               InpDashboard=true;
 input(name="Log Level")                    ENUM_LOG_LEVEL     InpLogLevel=LOG_INFO;
 input(name="Log to File")                  bool               InpLogFile=true;
@@ -471,6 +476,17 @@ void LogRiskLockTransition(const PortfolioState &state)
 //==================================================================
 // Runtime context — Hybrid
 //==================================================================
+enum ESnapshotFieldState
+  {
+   SNAP_NOT_EVALUATED = 0,
+   SNAP_VALID = 1,
+   SNAP_NO_SIGNAL = 2,
+   SNAP_BLOCKED = 3,
+   SNAP_DATA_UNAVAILABLE = 4,
+   SNAP_STALE = 5,
+   SNAP_CALCULATION_FAILED = 6
+  };
+
 class CSymbolRuntime
   {
 public:
@@ -493,8 +509,33 @@ public:
 
    CHybridSignalEngine hybrid_engine;
 
-    bool              valid;
-    string            last_failure;
+   bool              valid;
+   string            last_failure;
+
+   // D1: Runtime snapshot contract (typed, per-runtime, no fabrication)
+// (enum moved to global scope before class)
+     struct RuntimeSnapshot
+     {
+      int               generation;
+      datetime          snapshot_time;
+      datetime          last_success_time;
+      string            current_stage;
+      string            last_block_reason;
+
+      ENUM_TRADING_STYLE configured_style;
+      string            regime_text;
+      string            bias_text;
+      string            long_text;
+      string            short_text;
+
+      ESnapshotFieldState regime_state;
+      ESnapshotFieldState bias_state;
+      ESnapshotFieldState long_state;
+      ESnapshotFieldState short_state;
+     };
+
+   RuntimeSnapshot      snapshot;
+   int                 snapshot_generation;
 
     // Runtime gate visibility
     string            last_gate_status;
@@ -514,6 +555,22 @@ public:
        last_gate_status="";
        last_gate_reason="";
        last_gate_time=0;
+
+       snapshot_generation=0;
+       snapshot.generation=0;
+       snapshot.snapshot_time=0;
+       snapshot.last_success_time=0;
+       snapshot.current_stage="NOT_EVALUATED";
+       snapshot.last_block_reason="";
+       snapshot.configured_style=STYLE_DAY_TRADING;
+       snapshot.regime_text="NOT EVALUATED";
+       snapshot.bias_text="NOT EVALUATED";
+       snapshot.long_text="NOT EVALUATED";
+       snapshot.short_text="NOT EVALUATED";
+       snapshot.regime_state=SNAP_NOT_EVALUATED;
+       snapshot.bias_state=SNAP_NOT_EVALUATED;
+       snapshot.long_state=SNAP_NOT_EVALUATED;
+       snapshot.short_state=SNAP_NOT_EVALUATED;
       }
 
      bool              Initialize(const string in_symbol,
@@ -530,9 +587,10 @@ public:
        valid=false;
        last_failure="";
 
-       symbol=in_symbol;
-       style=in_style;
-       context_tf=in_context_tf;
+        symbol=in_symbol;
+        style=in_style;
+        snapshot.configured_style=in_style;
+        context_tf=in_context_tf;
        structure_tf=in_structure_tf;
        setup_tf=in_setup_tf;
        entry_tf=in_entry_tf;
@@ -642,6 +700,46 @@ public:
 // Globals
 //==================================================================
 CSymbolRuntime g_runtime[256];
+// E2.3-RD: Chart Context Registration events (custom event base)
+#define CHARTREG_DISCOVERY  1001
+#define CHARTREG_REGISTER   1002
+#define CHARTREG_ACK        1003
+#define CHARTREG_UNREGISTER 1004
+#define CHARTREG_PROTOCOL_VERSION 1
+#define SNAPREG_NOTIFY 1005
+#define SNAPREG_ACK    1006
+long   g_snapshot_sequence = 0;
+#define SNAPREG_NOTIFY 1005
+#define SNAPREG_ACK    1006
+enum ENUM_COORDINATOR_MODE { COORD_MODE_UNINITIALIZED, COORD_MODE_COORDINATOR, COORD_MODE_CHART_CONTEXT, COORD_MODE_UNAVAILABLE };
+ENUM_COORDINATOR_MODE g_coordinator_mode = COORD_MODE_UNINITIALIZED;
+string g_owner_instance_token = "";
+long   g_authority_epoch = 0;
+// Registration state for Chart Context
+enum ENUM_REG_STATE { REG_STATE_UNREGISTERED, REG_STATE_PENDING, REG_STATE_REGISTERED, REG_STATE_REJECTED };
+ENUM_REG_STATE g_reg_state = REG_STATE_UNREGISTERED;
+string g_pending_nonce = "";
+long   g_pending_coord_chart = 0;
+long   g_pending_coord_epoch = 0;
+datetime g_last_reg_request = 0;
+int    g_reg_retry_count = 0;
+#define REG_RETRY_MAX 3
+#define REG_RETRY_INTERVAL 10
+// E2.3-RD: subscriber registry (in-memory, Coordinator-only)
+struct SubscriberRecord
+  {
+   long   chart_id;
+   string owner_token;
+   string strategy_group_key;
+   string config_fingerprint;
+   bool   registered;
+  };
+SubscriberRecord g_subscribers[64];
+int g_subscriber_count = 0;
+// E2.1: Strategy Group identity and Config Fingerprint (single-instance only;
+// cross-instance durable arbitration requires later Ledger/Gateway packages)
+string g_strategy_group_key = "";
+string g_config_fingerprint = "";
 string g_runtime_wait_state[256];
 string g_runtime_init_failure[256];
 int g_runtime_count_max=256;
@@ -693,6 +791,18 @@ void UpdateDashboardForChart()
          ResetLastError();
          return;
         }
+
+      g_dashboard.SetRuntimeSnapshot(
+         EnumToString(g_runtime[i].snapshot.configured_style),
+         g_runtime[i].snapshot.regime_text,
+         g_runtime[i].snapshot.bias_text,
+         g_runtime[i].snapshot.long_text,
+         g_runtime[i].snapshot.short_text,
+         g_runtime[i].snapshot.current_stage,
+         g_runtime[i].snapshot.last_block_reason,
+         g_runtime[i].snapshot.snapshot_time,
+         g_runtime[i].snapshot.last_success_time,
+         (g_runtime[i].snapshot.regime_state==SNAP_VALID));
 
       g_dashboard.RenderMarketView(market);
       return;
@@ -1178,6 +1288,9 @@ void ProcessRuntime(CSymbolRuntime& runtime)
       {
        ShowRuntimeGateStatus(runtime, "WAITING: ENTRY BAR");
        LogRuntimeGate(runtime, "ENTRY_BAR_WAIT", "ENTRY_BAR", "WAIT", "NO_NEW_CLOSED_BAR");
+       runtime.snapshot.current_stage = "WAITING_FOR_NEW_ENTRY_BAR";
+       runtime.snapshot.last_block_reason = "NO_NEW_CLOSED_BAR";
+       runtime.snapshot.configured_style = runtime.style;
        return;
       }
 
@@ -1316,6 +1429,7 @@ void ProcessRuntime(CSymbolRuntime& runtime)
       {
        ShowRuntimeGateStatus(runtime, "WAITING: SIGNAL BAR");
        LogRuntimeGate(runtime, "CONTEXT_BAR_WAIT", "CONTEXT_BAR", "WAIT", "NO_NEW_CLOSED_BAR");
+       runtime.snapshot.configured_style = runtime.style;
        return;
       }
 
@@ -1374,6 +1488,23 @@ void ProcessRuntime(CSymbolRuntime& runtime)
                                 runtime.symbol, ctx, context_market, ok);
 
    ProcessHybridDecision(runtime, decision, portfolio_state);
+
+   // D1.1: publish real engine outputs into the Runtime Snapshot
+   runtime.snapshot_generation++;
+   runtime.snapshot.generation = runtime.snapshot_generation;
+   runtime.snapshot.snapshot_time = TimeCurrent();
+   runtime.snapshot.last_success_time = (decision.valid ? decision.decision_time : runtime.snapshot.last_success_time);
+   runtime.snapshot.current_stage = "EVALUATED";
+   runtime.snapshot.last_block_reason = (decision.valid ? "" : decision.main_reason);
+   runtime.snapshot.configured_style = runtime.style;
+   runtime.snapshot.regime_text = EnumToString(decision.regime);
+   runtime.snapshot.bias_text = EnumToString(decision.bias);
+   runtime.snapshot.long_text = (decision.long_score > 0 ? "LONG CANDIDATE" : "NO LONG");
+   runtime.snapshot.short_text = (decision.short_score > 0 ? "SHORT CANDIDATE" : "NO SHORT");
+   runtime.snapshot.regime_state = (decision.valid ? SNAP_VALID : SNAP_CALCULATION_FAILED);
+   runtime.snapshot.bias_state = (decision.valid ? SNAP_VALID : SNAP_CALCULATION_FAILED);
+   runtime.snapshot.long_state = (decision.valid ? SNAP_VALID : SNAP_CALCULATION_FAILED);
+   runtime.snapshot.short_state = (decision.valid ? SNAP_VALID : SNAP_CALCULATION_FAILED);
   }
 
 //==================================================================
@@ -1600,6 +1731,7 @@ int InitializePendingRuntimes()
         }
 
       g_runtime_init_failure[i]="";
+      g_runtime[i].hybrid_engine.SetStrategyGroupKey(g_strategy_group_key);
       runtime_count++;
       g_logger.Event(
          LOG_INFO, "INIT", "INIT_RUNTIME_READY",
@@ -1736,7 +1868,38 @@ ENUM_SYSTEM_INIT_STATUS InitializeSystemWhenReady()
       return SYSTEM_INIT_FAILED;
      }
 
-   int runtime_count=InitializePendingRuntimes();
+   int runtime_count=0;
+   // E2.4: Coordinator election
+   string authority_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
+   if(g_execution_ledger.IsAvailable())
+     {
+      int astate = g_execution_ledger.GetAuthorityState(authority_key);
+      if(astate == (int)GATEWAY_AUTHORITY_ORPHANED || astate == -1)
+        {
+         g_coordinator_mode = COORD_MODE_UNAVAILABLE;
+         g_logger.Event(LOG_WARNING, "INIT", "COORDINATOR_UNAVAILABLE", _Symbol, "", "", "", "FAIL", "AUTHORITY", "Authority unavailable or orphaned");
+        }
+      else
+        {
+         long epoch = 0;
+         if(g_execution_ledger.AcquireAuthority(authority_key, g_owner_instance_token, epoch))
+           {
+            g_coordinator_mode = COORD_MODE_COORDINATOR;
+            g_authority_epoch = epoch;
+            runtime_count = InitializePendingRuntimes();
+           }
+         else
+           {
+            g_coordinator_mode = COORD_MODE_CHART_CONTEXT;
+            g_logger.Event(LOG_INFO, "INIT", "CHART_CONTEXT_ONLY", _Symbol, "", "", "", "INFO", "AUTHORITY", "Another coordinator owns authority");
+           }
+        }
+     }
+   else
+     {
+      // Ledger unavailable: fail-closed, no coordinator
+      g_coordinator_mode = COORD_MODE_UNAVAILABLE;
+     }
 
    if(!g_state.Reconstruct())
      {
@@ -1765,7 +1928,7 @@ ENUM_SYSTEM_INIT_STATUS InitializeSystemWhenReady()
       " mode="+IntegerToString((int)InpMode)+
       " runtimes_ready="+IntegerToString(runtime_count));
 
-   g_dashboard.SetCompactView(InpDashboardCompact);
+   g_dashboard.SetViewMode(InpDashboardViewMode==DASHBOARD_COMPACT?2:(InpDashboardViewMode==DASHBOARD_NORMAL?1:0));
    g_dashboard.ShowDiagnostics(InpDashboardDiagnostics);
    g_dashboard.ShowOverlay(InpDashboardOverlay);
 
@@ -1776,9 +1939,37 @@ ENUM_SYSTEM_INIT_STATUS InitializeSystemWhenReady()
 //==================================================================
 // OnInit
 //==================================================================
+//+------------------------------------------------------------------+
+//| E2.1: Deterministic Config Fingerprint (v1)                      |
+//+------------------------------------------------------------------+
+string ComputeConfigFingerprint()
+  {
+   // Canonical serialization of trading-relevant settings.
+   // Presentation-only settings (Dashboard, ViewMode, diagnostics) excluded.
+   string s = "CFGV1|";
+   s += "STYLE=" + IntegerToString((int)InpTradingStyle) + "|";
+   s += "MODE=" + IntegerToString((int)InpMode) + "|";
+   s += "LIVECONFIRM=" + (InpLiveAutoConfirm ? "1" : "0") + "|";
+   s += "GROUP=" + InpStrategyGroupKey + "|";
+   // Timeframe roles are global inputs; include if present as inputs (placeholder)
+   s += "DEVIATION=" + IntegerToString(InpDeviationPoints) + "|";
+   // Timeframe roles are resolved internally; include style-dependent policy via MagicForStyle
+   s += "MAGIC=" + IntegerToString((int)MagicForStyle(InpTradingStyle)) + "|";
+   // Simple deterministic hash (not cryptographic)
+   uint h = 5381;
+   for(int i = 0; i < StringLen(s); i++)
+     {
+      h = ((h << 5) + h) + (uint)StringGetCharacter(s, i);
+     }
+   return "FP_" + IntegerToString((long)h, 16);
+  }
+
 int OnInit()
   {
    g_logger.StartRun();
+   // E2.4: Generate unique OwnerInstanceToken
+   g_owner_instance_token = "OI_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN)) + "_" +
+                            IntegerToString((long)TimeCurrent()) + "_" + IntegerToString(MathRand());
    g_logger.SetMinimumLevel(InpLogLevel);
    g_logger.SetSummaryInterval(InpLogSummarySeconds);
    g_logger.SetFlushEachWrite(InpLogFlushEachWrite);
@@ -1795,14 +1986,11 @@ int OnInit()
       "START", "RUN",
       "AlgoMultiAssetEA Hybrid OnInit started RunID="+g_logger.RunId());
 
-   if(!ValidInputSet())
-     {
-      g_logger.Event(
-         LOG_ERROR, "INIT", "INIT_FAILED",
-         "", "", "ValidInputSet", "",
-         "FAIL", "INIT", "Invalid input parameters", 0);
-      return INIT_PARAMETERS_INCORRECT;
-     }
+   g_strategy_group_key = (InpStrategyGroupKey == "" ? "ALGO_MULTI_ASSET_EA_DEFAULT" : InpStrategyGroupKey);
+   g_config_fingerprint = ComputeConfigFingerprint();
+   g_logger.Event(LOG_INFO, "INIT", "STRATEGY_GROUP_IDENTITY",
+      _Symbol, "", "", "", "INFO", "CONFIG",
+       "group=" + g_strategy_group_key + " fingerprint=" + g_config_fingerprint);
 
    if(InpMode==MODE_AUTO &&
       !MQLInfoInteger(MQL_TESTER) &&
@@ -1893,8 +2081,11 @@ void OnTick()
    if(!risk_state_ready)
       return;
 
-   for(int i=0;i<256;i++)
-      ProcessRuntime(g_runtime[i]);
+   if(g_coordinator_mode == COORD_MODE_COORDINATOR)
+     {
+      for(int i=0;i<256;i++)
+         ProcessRuntime(g_runtime[i]);
+     }
   }
 
 //==================================================================
@@ -1921,15 +2112,102 @@ void OnTimer()
         }
      }
 
-    InitializePendingRuntimes();
-
-    // Periodic reconciliation for unresolved attempts
-    static datetime last_reconcile = 0;
-    if(TimeCurrent() - last_reconcile > 60)
+    if(g_coordinator_mode == COORD_MODE_COORDINATOR)
       {
-       g_execution_ledger.ReconcileUnresolved(5);
-       last_reconcile = TimeCurrent();
+       // Discovery: enumerate charts and send discovery probe
+       long chart = ChartFirst();
+       static datetime last_discovery = 0;
+       if(TimeCurrent() - last_discovery < 5)
+          return; // rate limit: 5 seconds
+       last_discovery = TimeCurrent();
+       string nonce = "N" + IntegerToString((long)TimeCurrent()) + IntegerToString((long)ChartID());
+       g_pending_nonce = nonce;
+       while(chart >= 0)
+         {
+          if(chart != ChartID())
+            {
+             string auth_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
+             string probe = "D|" + IntegerToString(CHARTREG_PROTOCOL_VERSION) + "|" + auth_key + "|" + IntegerToString((long)ChartID()) + "|" + IntegerToString(g_authority_epoch) + "|" + nonce;
+             if(StringLen(probe) <= 63)
+               {
+                if(!EventChartCustom(chart, CHARTREG_DISCOVERY, (long)ChartID(), 0.0, probe))
+                  {
+                   // enqueue failed; retry next cycle
+                  }
+               }
+            }
+          chart = ChartNext(chart);
+         }
+        // Canonical state comparison based on time + subscriber count (placeholder for full dashboard hash)
+        static string last_canonical = "";
+        string canonical = IntegerToString((long)TimeCurrent()) + "_" + IntegerToString(g_subscriber_count) + "_" + IntegerToString(g_authority_epoch);
+        if(canonical == last_canonical)
+          {
+           // unchanged; skip
+          }
+        else
+          {
+           last_canonical = canonical;
+           g_snapshot_sequence++;
+           for(int i = 0; i < g_subscriber_count; i++)
+             {
+              long target_chart = g_subscribers[i].chart_id;
+              string obj_name = "AlgoEA_Dashboard";
+              ObjectCreate(target_chart, obj_name, OBJ_LABEL, 0, 0, 0);
+              ObjectSetInteger(target_chart, obj_name, OBJPROP_XDISTANCE, 10);
+              ObjectSetInteger(target_chart, obj_name, OBJPROP_YDISTANCE, 20);
+              ObjectSetString(target_chart, obj_name, OBJPROP_TEXT, "CoordSnap=" + IntegerToString(g_snapshot_sequence) + " Epoch=" + IntegerToString(g_authority_epoch));
+              ChartRedraw(target_chart);
+              string notify = "S|" + IntegerToString(CHARTREG_PROTOCOL_VERSION) + "|" + IntegerToString(g_authority_epoch) + "|" + IntegerToString(g_snapshot_sequence);
+              if(StringLen(notify) <= 63)
+                {
+                 if(!EventChartCustom(target_chart, SNAPREG_NOTIFY, (long)ChartID(), 0.0, notify))
+                   {
+                    // enqueue failed
+                   }
+                }
+             }
+          }
+       string authority_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
+       if(!g_execution_ledger.HeartbeatAuthority(authority_key, g_owner_instance_token, g_authority_epoch) ||
+          !g_execution_ledger.ValidateAuthority(authority_key, g_owner_instance_token, g_authority_epoch))
+         {
+          g_coordinator_mode = COORD_MODE_UNAVAILABLE;
+          g_logger.Event(LOG_WARNING, "SYSTEM", "COORDINATOR_LOST", _Symbol, "", "", "", "FAIL", "AUTHORITY", "Heartbeat/validation failed");
+         }
       }
+
+     // Chart Context registration retry
+     if(g_coordinator_mode == COORD_MODE_CHART_CONTEXT && g_reg_state == REG_STATE_PENDING)
+       {
+        if(TimeCurrent() - g_last_reg_request >= REG_RETRY_INTERVAL && g_reg_retry_count < REG_RETRY_MAX)
+          {
+           // Resend same pending registration request
+           string reg = "R|" + IntegerToString(CHARTREG_PROTOCOL_VERSION) + "|" + AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN)) + "|" +
+                        IntegerToString((long)ChartID()) + "|" + g_owner_instance_token + "|" +
+                        g_strategy_group_key + "|" + g_config_fingerprint + "|" +
+                        IntegerToString(g_pending_coord_chart) + "|" + IntegerToString(g_pending_coord_epoch) + "|" + g_pending_nonce;
+           if(StringLen(reg) <= 63)
+             {
+              if(EventChartCustom(g_pending_coord_chart, CHARTREG_REGISTER, (long)ChartID(), 0.0, reg))
+                {
+                 g_last_reg_request = TimeCurrent();
+                 g_reg_retry_count++;
+                }
+             }
+          }
+        if(g_reg_retry_count >= REG_RETRY_MAX)
+          {
+           g_reg_state = REG_STATE_REJECTED;
+           g_pending_nonce = "";
+          }
+       }
+       static datetime last_reconcile = 0;
+       if(TimeCurrent() - last_reconcile > 60)
+         {
+        g_execution_ledger.ReconcileUnresolved(5);
+        last_reconcile = TimeCurrent();
+         }
 
     bool risk_state_ready=RefreshTradingState();
 
@@ -1940,12 +2218,15 @@ void OnTimer()
    if(!risk_state_ready)
       return;
 
-   for(int i=0;i<256;i++)
-      {
-       if(g_runtime[i].valid)
-          ProcessRuntime(g_runtime[i]);
-      }
-   }
+   if(g_coordinator_mode == COORD_MODE_COORDINATOR)
+     {
+      for(int i=0;i<256;i++)
+        {
+         if(g_runtime[i].valid)
+            ProcessRuntime(g_runtime[i]);
+        }
+     }
+  }
 
 //+------------------------------------------------------------------+
 //| OnTradeTransaction                                               |
@@ -2004,7 +2285,192 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
      {
       g_dashboard.HandleChartGeometryChange();
      }
-  }
+   // E2.3-RD: Chart Context Registration protocol
+   string auth_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
+   if(id == CHARTEVENT_CUSTOM + CHARTREG_DISCOVERY)
+     {
+      // Chart Context receives discovery probe from Coordinator
+      if(g_coordinator_mode != COORD_MODE_CHART_CONTEXT && g_coordinator_mode != COORD_MODE_UNINITIALIZED)
+         return;
+      string parts[];
+      int n = StringSplit(sparam, '|', parts);
+      if(n < 6)
+         return;
+      if((int)StringToInteger(parts[1]) != CHARTREG_PROTOCOL_VERSION)
+         return;
+      if(parts[2] != auth_key)
+         return;
+      long coord_chart = (long)StringToInteger(parts[3]);
+      long coord_epoch = (long)StringToInteger(parts[4]);
+      string disc_nonce = parts[5];
+      g_pending_coord_chart = coord_chart;
+      g_pending_coord_epoch = coord_epoch;
+      g_pending_nonce = disc_nonce;
+      g_reg_state = REG_STATE_PENDING;
+      string reg = "R|" + IntegerToString(CHARTREG_PROTOCOL_VERSION) + "|" + auth_key + "|" +
+                   IntegerToString((long)ChartID()) + "|" + g_owner_instance_token + "|" +
+                   g_strategy_group_key + "|" + g_config_fingerprint + "|" +
+                   IntegerToString(coord_chart) + "|" + IntegerToString(coord_epoch) + "|" + disc_nonce;
+      if(StringLen(reg) <= 63)
+        {
+         if(!EventChartCustom(coord_chart, CHARTREG_REGISTER, (long)ChartID(), 0.0, reg))
+           {
+            // enqueue failed
+           }
+         else
+           {
+            g_last_reg_request = TimeCurrent();
+            g_reg_retry_count = 0;
+           }
+        }
+     }
+   else if(id == CHARTEVENT_CUSTOM + CHARTREG_REGISTER)
+     {
+      // Coordinator receives registration request
+      if(g_coordinator_mode != COORD_MODE_COORDINATOR)
+         return;
+      string parts[];
+      int n = StringSplit(sparam, '|', parts);
+      if(n < 10)
+         return;
+      if((int)StringToInteger(parts[1]) != CHARTREG_PROTOCOL_VERSION)
+         return;
+      if(parts[2] != auth_key)
+         return;
+      long req_chart = (long)StringToInteger(parts[3]);
+      string req_token = parts[4];
+      string req_group = parts[5];
+      string req_fp = parts[6];
+      long target_coord = (long)StringToInteger(parts[7]);
+      long target_epoch = (long)StringToInteger(parts[8]);
+      string req_nonce = parts[9];
+      if(target_coord != ChartID())
+         return;
+      if(target_epoch != g_authority_epoch)
+         return;
+      // Group-level config conflict check
+      bool conflict = false;
+      for(int i = 0; i < g_subscriber_count; i++)
+        {
+         if(g_subscribers[i].strategy_group_key == req_group &&
+            g_subscribers[i].config_fingerprint != req_fp)
+           {
+            conflict = true;
+            break;
+           }
+        }
+      if(conflict)
+         return;
+      // Idempotent registration
+      bool found = false;
+      for(int i = 0; i < g_subscriber_count; i++)
+        {
+         if(g_subscribers[i].chart_id == req_chart && g_subscribers[i].owner_token == req_token)
+           {
+            found = true;
+            break;
+           }
+        }
+      if(!found && g_subscriber_count < 64)
+        {
+         g_subscribers[g_subscriber_count].chart_id = req_chart;
+         g_subscribers[g_subscriber_count].owner_token = req_token;
+         g_subscribers[g_subscriber_count].strategy_group_key = req_group;
+         g_subscribers[g_subscriber_count].config_fingerprint = req_fp;
+         g_subscribers[g_subscriber_count].registered = true;
+         g_subscriber_count++;
+        }
+      // Send ACK with nonce
+      string ack = "A|" + IntegerToString(CHARTREG_PROTOCOL_VERSION) + "|" + auth_key + "|" +
+                   IntegerToString((long)ChartID()) + "|" + g_owner_instance_token + "|" +
+                   IntegerToString(g_authority_epoch) + "|" + IntegerToString(req_chart) + "|" +
+                   req_token + "|" + req_nonce;
+      if(StringLen(ack) <= 63)
+        {
+         if(!EventChartCustom(req_chart, CHARTREG_ACK, (long)ChartID(), 0.0, ack))
+           {
+            // enqueue failed
+           }
+        }
+     }
+   else if(id == CHARTEVENT_CUSTOM + CHARTREG_ACK)
+     {
+      // Chart Context receives ack - validate all fields
+      string parts[];
+      int n = StringSplit(sparam, '|', parts);
+      if(n < 9)
+         return;
+      if((int)StringToInteger(parts[1]) != CHARTREG_PROTOCOL_VERSION)
+         return;
+      if(parts[2] != auth_key)
+         return;
+      long coord_chart = (long)StringToInteger(parts[3]);
+      string coord_token = parts[4];
+      long coord_epoch = (long)StringToInteger(parts[5]);
+      long ack_chart = (long)StringToInteger(parts[6]);
+      string ack_token = parts[7];
+      string ack_nonce = parts[8];
+      if(ack_chart != ChartID())
+         return;
+      if(ack_token != g_owner_instance_token)
+         return;
+      if(coord_chart != g_pending_coord_chart)
+         return;
+      if(coord_epoch != g_pending_coord_epoch)
+         return;
+      if(ack_nonce != g_pending_nonce)
+         return;
+      // All validated - transition to REGISTERED
+      g_reg_state = REG_STATE_REGISTERED;
+     }
+   else if(id == CHARTEVENT_CUSTOM + SNAPREG_NOTIFY)
+     {
+      // Chart Context receives snapshot notification
+      string parts[];
+      int n = StringSplit(sparam, '|', parts);
+      if(n < 4)
+         return;
+      if((int)StringToInteger(parts[1]) != CHARTREG_PROTOCOL_VERSION)
+         return;
+      long coord_epoch = (long)StringToInteger(parts[2]);
+      long snap_seq = (long)StringToInteger(parts[3]);
+      if(coord_epoch != g_pending_coord_epoch)
+         return;
+      // Acknowledge
+      string ack = "K|" + IntegerToString(CHARTREG_PROTOCOL_VERSION) + "|" + IntegerToString((long)ChartID()) + "|" + IntegerToString(snap_seq);
+      if(StringLen(ack) <= 63)
+        {
+         if(!EventChartCustom(g_pending_coord_chart, SNAPREG_ACK, (long)ChartID(), 0.0, ack))
+           {
+            // enqueue failed
+           }
+        }
+     }
+     {
+      if(g_coordinator_mode != COORD_MODE_COORDINATOR)
+         return;
+      string parts[];
+      int n = StringSplit(sparam, '|', parts);
+      if(n < 5)
+         return;
+      if((int)StringToInteger(parts[1]) != CHARTREG_PROTOCOL_VERSION)
+         return;
+      if(parts[2] != auth_key)
+         return;
+      long req_chart = (long)StringToInteger(parts[3]);
+      string req_token = parts[4];
+      for(int i = 0; i < g_subscriber_count; i++)
+        {
+         if(g_subscribers[i].chart_id == req_chart && g_subscribers[i].owner_token == req_token)
+           {
+            for(int j = i; j < g_subscriber_count - 1; j++)
+               g_subscribers[j] = g_subscribers[j+1];
+            g_subscriber_count--;
+            break;
+           }
+        }
+     }
+   }
 
 void OnDeinit(const int reason)
   {
@@ -2016,6 +2482,26 @@ void OnDeinit(const int reason)
          _Symbol, EnumToString((ENUM_TIMEFRAMES)_Period), "", "",
          "STOP", "DEINIT",
          "OnDeinit reason="+IntegerToString(reason));
+     }
+
+   if(g_coordinator_mode == COORD_MODE_COORDINATOR)
+     {
+      string authority_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
+      g_execution_ledger.ReleaseAuthority(authority_key, g_owner_instance_token, g_authority_epoch);
+     }
+   else if(g_coordinator_mode == COORD_MODE_CHART_CONTEXT)
+     {
+      // Best-effort unregister to all charts
+      long chart = ChartFirst();
+      while(chart >= 0)
+        {
+         if(chart != ChartID())
+           {
+            string unreg = "UNREG|" + IntegerToString((long)ChartID()) + "|" + g_owner_instance_token;
+            EventChartCustom(chart, CHARTREG_UNREGISTER, (long)ChartID(), 0.0, unreg);
+           }
+         chart = ChartNext(chart);
+        }
      }
 
    EventKillTimer();
@@ -2167,3 +2653,5 @@ void OnTesterDeinit()
   {
   }
 //+------------------------------------------------------------------+
+
+
