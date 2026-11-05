@@ -1198,7 +1198,21 @@ if(struct_res != EVIDENCE_SUFFICIENT_NO_INVALIDATION)
        return;
       }
 
-    string submit_reason = "";
+     // E2.6: Execution authorization boundary
+     if(g_coordinator_mode != COORD_MODE_COORDINATOR)
+       {
+        g_logger.Event(LOG_ERROR, "EXECUTION", "AUTHORIZATION_DENIED", request.symbol, "", "", request.signal_id, "FAIL", "AUTHORITY", "Not Coordinator - execution denied");
+        runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+        return;
+       }
+     string authority_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
+     if(!g_execution_ledger.ValidateAuthority(authority_key, g_owner_instance_token, g_authority_epoch))
+       {
+        g_logger.Event(LOG_ERROR, "EXECUTION", "AUTHORIZATION_DENIED", request.symbol, "", "", request.signal_id, "FAIL", "AUTHORITY", "Authority validation failed - execution denied");
+        runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+        return;
+       }
+     string submit_reason = "";
     if(!g_execution_ledger.CanSubmit(request.attempt_id, submit_reason))
       {
        g_logger.Event(

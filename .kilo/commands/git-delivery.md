@@ -1,18 +1,41 @@
 ---
-description: Review Git scope and prepare safe delivery
+description: Prepare and perform explicitly authorized Git delivery safely
 ---
 
-Use the delivery-git Skill.
+# Git Delivery
 
-1. Inspect branch, status, diff, untracked files, and relevant history.
-2. Run git diff --check if shell execution is authorized.
-3. Separate current-task changes from pre-existing user changes.
-4. Identify the exact files and intended delivery scope.
-5. Never use reset, clean, stash, restore, rebase, amend,
-   history rewriting, or force-push.
-6. Never stage all files blindly.
-7. Report verification status and any blockers.
-8. Stop before staging or committing unless explicitly authorized.
-9. Commit only with explicit commit authorization.
-10. Push only with explicit push authorization.
-11. Report branch, files, commit and push status in Persian.
+This workflow is for Git inspection and delivery only. It does not authorize commit or push by itself.
+
+## 1. Establish baseline and ownership
+
+- Inspect branch, HEAD, upstream, status, staged/unstaged diff, untracked files, recent history, and relevant remote state.
+- Separate task changes from pre-existing user changes.
+- Confirm the exact files intended for delivery and ensure no unrelated files are included.
+- Run `git diff --check` only if shell use is authorized.
+
+## 2. Safety
+
+Never use reset, clean, restore, stash, checkout/switch, rebase, amend, force-push, or stage-all.
+Never discard user changes.
+Do not stage, commit, or push unless the user explicitly authorizes each operation. Authorization to commit does not imply authorization to push.
+
+## 3. Delivery preflight
+
+Before staging:
+- inspect the complete final diff;
+- confirm relevant validation evidence and known warnings;
+- check secrets, generated artifacts, local paths, logs, credentials, and unintended files;
+- identify branch and exact file list;
+- prepare the proposed commit message.
+
+If any scope ambiguity exists, stop before staging and report it.
+
+## 4. Execute only authorized actions
+
+Stage only explicit file paths. After staging, inspect the staged diff and status again. Commit only if explicitly authorized. Push only if separately authorized. Never force-push.
+
+After each operation, verify resulting HEAD, branch/upstream, and remote status. A successful local commit does not prove push success.
+
+## 5. Output (Persian)
+
+Report baseline, exact staged/committed files, validation evidence, commit SHA, push result, remote tracking status, and any remaining local changes. Distinguish `NOT AUTHORIZED`, `NOT RUN`, `FAILED`, and `SUCCEEDED`.
