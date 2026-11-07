@@ -93,9 +93,15 @@ private:
 
    bool               CreateSchema();
    bool               MigrateSchema();
-   bool               ExecuteSQL(const string sql);
-   string             GenerateAttemptId();
-   string             EscapeSQL(const string s) const;
+    bool               ExecuteSQL(const string sql);
+    bool               LogStateTransitionInTx(const string attempt_id, ENUM_EXEC_ATTEMPT_STATE old_state,
+                                             ENUM_EXEC_ATTEMPT_STATE new_state, const string reason,
+                                             uint retcode=0);
+    bool               PrepareIntentRecord(ExecutionAttemptRecord &record) const;
+    bool               InsertIntentNoTx(const ExecutionAttemptRecord &record);
+    bool               AffectedRowsIsOne(bool &ok);
+    string             GenerateAttemptId();
+    string             EscapeSQL(const string s) const;
 
 public:
                      CExecutionLedger();
@@ -114,11 +120,13 @@ public:
     bool               GetAttempt(const string attempt_id, ExecutionAttemptRecord &record);
     bool               HasUnresolvedForSymbol(const string symbol, bool include_ambiguous);
 
-   // Intent and submission tracking
-   bool               CreateIntent(ExecutionAttemptRecord &record);
-   bool               MarkSubmissionBound(const string attempt_id, const string reason="");
-   bool               CanSubmit(const string attempt_id, string &reason);
-   bool               RecordSubmission(const string attempt_id);
+    // Intent and submission tracking
+    bool               CreateIntent(ExecutionAttemptRecord &record);
+    bool               CreateIntentInTx(ExecutionAttemptRecord &record, string &err);
+    bool               MarkSubmissionBound(const string attempt_id, const string reason="");
+    bool               CanSubmit(const string attempt_id, string &reason);
+    bool               MarkSubmissionMayHaveOccurred(const string attempt_id, const string reason="");
+    bool               RecordSubmission(const string attempt_id);
 
    // Result tracking
    bool               RecordResult(const string attempt_id, const ExecutionResult &result, const string reason="");
@@ -130,19 +138,155 @@ public:
     bool               ReconcileUnresolved(int max_attempts=10);
     int                RecoverUnresolved(int &out_count);
     bool               HasBlockingUnresolved(string &blocking_reason);
+    // RS-02: conservative quarantine for INTENT_DURABLE_NOT_SUBMITTED (no auto-resubmit)
+    bool               QuarantineOrphanIntent(const ExecutionAttemptRecord &rec);
 
-    // E2.3: Setup Claim lifecycle
+    // E2.3 / RS-01: Setup Claim lifecycle (durable logical-setup deduplication)
     enum ENUM_CLAIM_RESULT { CLAIM_CREATED=0, CLAIM_ALREADY_EXISTS, CLAIM_IDENTITY_COLLISION, CLAIM_ERROR };
     ENUM_CLAIM_RESULT  CreateClaim(const string strategy_group_key,
                                     const string logical_setup_key,
                                     const string canonical_identity,
                                     int serialization_version,
                                     ExecutionAttemptRecord &initial_attempt);
+    // RS-01: acquire durable claim for an attempt id WITHOUT creating the intent (EA creates intent
+    // separately). Claim is ACTIVE and bound to attempt_id. Fail-closed. A claim-without-intent
+    // crash state remains fail-closed (blocks same logical setup) and is visible to recovery.
+    ENUM_CLAIM_RESULT  CreateSetupClaim(const string strategy_group_key,
+                                        const string logical_setup_key,
+                                        const string canonical_identity,
+                                        int serialization_version,
+                                        const string attempt_id);
+    // RS-01 atomicity hardening: acquire claim and insert initial intent in one transaction where feasible.
+    // Uses same tx-safe helpers (no nested tx). On any failure, neither claim nor intent is durably committed.
+    ENUM_CLAIM_RESULT  CreateSetupClaimAndIntent(const string strategy_group_key,
+                                                 const string logical_setup_key,
+                                                 const string canonical_identity,
+                                                 int serialization_version,
+                                                 ExecutionAttemptRecord &attempt,
+                                                 string &error_reason);
+    bool               GetSetupClaim(const string strategy_group_key,
+                                     const string logical_setup_key,
+                                     string &claim_id,
+                                     int &claim_state,
+                                     string &current_attempt_id);
+    // RS01: read-only diagnostics for claim-only/orphan records (fail-closed, no auto-release).
+    int                InspectSetupClaims(string &out_report, int &out_orphan_count, int max_rows=20);
+    // E2.6: controlled retry via local chart approval (source implementation; live DB/runtime not authorized).
+    enum ENUM_RETRY_APPROVE_RESULT
+      {
+       RETRY_APPROVE_COMMITTED=0,          // atomic approval+new intent committed; caller may revalidate and use existing submission protocol
+       RETRY_APPROVE_ALREADY_CONSUMED,     // deterministic action id already committed with identical fields (idempotent)
+       RETRY_APPROVE_CANDIDATE_INVALID,    // claim/attempt/evidence/sequence/context no longer eligible
+       RETRY_APPROVE_COMMIT_OUTCOME_UNKNOWN,// commit failed/uncertain; caller must read-back action id, block same op, reconcile
+       RETRY_APPROVE_DB_ERROR,
+       RETRY_APPROVE_NOT_AUTHORIZED
+      };
+    struct RetryLocalContext
+      {
+       string action_source;      // LOCAL_CHART_OBJECT_CLICK
+       string auth_model;         // LOCAL_TERMINAL_SESSION_CONTEXT_ONLY
+       string account_login;
+       string account_server;
+       long   chart_id;
+       string chart_symbol;
+       int    chart_period;
+       string ea_program;
+       int    terminal_build;
+       datetime local_action_time;
+       string bounded_reason;     // optional, bounded; not identity
+      };
+    static string      BuildRetryActionId(const string claim_id,const string prior_attempt_id,int expected_retry_sequence);
+    bool               GetClaimById(const string claim_id,
+                                    const string strategy_group_key,
+                                    const string logical_setup_key,
+                                    int &claim_state,
+                                    string &current_attempt_id,
+                                    int &retry_sequence);
+    bool               IsRetryEligibleFinalFailure(const ExecutionAttemptRecord &attempt,string &why_not);
+    ENUM_RETRY_APPROVE_RESULT ApproveAndCreateRetry(const string claim_id,
+                                                    const string strategy_group_key,
+                                                    const string logical_setup_key,
+                                                    const string prior_attempt_id,
+                                                    int expected_retry_sequence,
+                                                    const RetryLocalContext &ctx,
+                                                    const string evidence_reason,
+                                                    ExecutionAttemptRecord &new_attempt,
+                                                    string &out_action_id,
+                                                    string &out_detail);
+    bool               GetRetryApprovalEventOutcome(const string action_id,string &outcome,string &new_attempt_id);
+    // E2.6 P1-B: bounded read-only durable candidate discovery (no DB writes). Uses same evidence
+    // validator as ApproveAndCreateRetry. Fail-closed on any SQL/parse/DB error.
+    struct RetryEligibleCandidate
+      {
+       bool     valid;
+       string   claim_id;
+       string   strategy_group_key;
+       string   logical_setup_key;
+       string   canonical_identity;
+       int      serialization_version;
+       int      claim_state;
+       string   prior_attempt_id;
+       int      retry_sequence;
+       string   symbol;
+       int      direction;
+       int      attempt_state;
+       string   failure_class;
+       uint     retcode;
+       double   requested_volume;
+       double   executed_volume;
+       double   remaining_volume;
+       ulong    broker_order_ticket;
+       ulong    broker_deal_ticket;
+       ulong    broker_position_ticket;
+       string   evidence_summary;
+       string   eligibility_reason;
+       bool     consumed_by_approval;
+      };
+    int                GetRetryEligibleCandidates(RetryEligibleCandidate &out[], int max_candidates, string &error);
+    // E2.6-R1: read-only visibility for durably approved retry intents after restart/interruption.
+    // NO handoff restoration, NO auto-submit, NO state/claim mutation, NO broker call.
+    struct InterruptedRetryHandoff
+      {
+       bool     valid;
+       string   action_id;
+       string   claim_id;
+       string   strategy_group_key;
+       string   logical_setup_key;
+       string   prior_attempt_id;
+       string   new_attempt_id;
+       int      retry_sequence_before;
+       int      retry_sequence_after;
+       datetime approval_timestamp;
+       string   account_login;
+       string   account_server;
+       bool     approval_event_exists;
+       int      new_attempt_state;      // EXEC_STATE_* or -1 unreadable/missing
+       bool     new_attempt_readable;
+       bool     submitted_recorded;     // durable submitted_at/state evidence only
+       bool     submission_may_have_occurred;
+       bool     reconciliation_required;
+       string   status_code;            // bounded diagnostic (read-only)
+       string   detail;
+      };
+    int                GetInterruptedRetryHandoffs(const string account_login,
+                                                   const string account_server,
+                                                   const string strategy_group_key,
+                                                   InterruptedRetryHandoff &out[],
+                                                   int max_rows,
+                                                   string &error);
+    // Deprecated split wrappers: fail-closed. EA must not call. No direct broker submission.
     bool               RetryAuthorize(const string claim_id,
+                                     const string strategy_group_key,
+                                     const string logical_setup_key,
                                      const string attempt_id,
+                                     int expected_retry_sequence,
+                                     const string operator_approval_ref,
                                      const string reason);
     bool               RetryCreate(const string claim_id,
-                                  const string new_attempt_id,
+                                  const string strategy_group_key,
+                                  const string logical_setup_key,
+                                  const string expected_prior_attempt_id,
+                                  int expected_retry_sequence_after_authorize,
                                   ExecutionAttemptRecord &new_attempt);
     bool               ResolveClaim(const string claim_id,
                                    const string attempt_id,
@@ -169,7 +313,26 @@ public:
     bool               LogStateTransition(const string attempt_id, ENUM_EXEC_ATTEMPT_STATE old_state,
                                           ENUM_EXEC_ATTEMPT_STATE new_state, const string reason,
                                           uint retcode=0);
-  };
+    // RS01-CANON-01: stable canonical identity helpers (legacy v1 compatibility, fail-closed)
+    static string      BuildStableCanonicalIdentity(const string strategy_group_key,
+                                                   const string symbol,
+                                                   const string setup_type,
+                                                   int direction,
+                                                   datetime signal_time,
+                                                   int setup_tf,
+                                                   int version=2);
+    static bool        ParseLegacyV1CanonicalStable(const string canonical_identity,
+                                                   string &out_group,
+                                                   string &out_symbol,
+                                                   string &out_direction,
+                                                   string &out_signal_time,
+                                                   string &out_setup_tf);
+    bool               CanonicalSameLogicalSetup(const string existing_canonical,
+                                                const string new_canonical);
+    bool               UpgradeClaimCanonicalIfSafe(const string claim_id,
+                                                  const string expected_existing,
+                                                  const string new_canonical);
+   };
 
 //+------------------------------------------------------------------+
 //| Constructor                                                       |
@@ -180,7 +343,9 @@ CExecutionLedger::CExecutionLedger()
    m_initialized = false;
    m_db_available = false;
    m_db_filename = "";
-   m_schema_version = 1;
+   // E2.6: schema v2 adds retry_approval_events (durable single-use controlled retry audit/idempotency).
+   // Migration source is backward-compatible; live DB migration execution is NOT authorized in this phase.
+   m_schema_version = 2;
     m_open_attempts_count = 0;
     m_last_init_stage = "";
     m_last_init_operation = "";
@@ -443,6 +608,44 @@ bool CExecutionLedger::CreateSchema()
        return false;
       }
 
+    // E2.6: durable single-use retry approval/audit events (no personal identity; local terminal session context only).
+    // action_id is deterministic and bound to exact claim/prior attempt/retry sequence. No separate PENDING out-of-tx record.
+    string sql6 = "CREATE TABLE IF NOT EXISTS retry_approval_events ("
+                 "action_id TEXT PRIMARY KEY,"
+                 "claim_id TEXT NOT NULL,"
+                 "strategy_group_key TEXT NOT NULL,"
+                 "logical_setup_key TEXT NOT NULL,"
+                 "prior_attempt_id TEXT NOT NULL,"
+                 "new_attempt_id TEXT NOT NULL UNIQUE,"
+                 "retry_sequence_before INTEGER NOT NULL,"
+                 "retry_sequence_after INTEGER NOT NULL,"
+                 "approval_timestamp INTEGER NOT NULL,"
+                 "action_source TEXT NOT NULL,"
+                 "auth_model TEXT NOT NULL,"
+                 "account_login TEXT,"
+                 "account_server TEXT,"
+                 "chart_id INTEGER,"
+                 "chart_symbol TEXT,"
+                 "chart_period INTEGER,"
+                 "ea_program TEXT,"
+                 "terminal_build INTEGER,"
+                 "evidence_state INTEGER,"
+                 "evidence_failure_class TEXT,"
+                 "evidence_retcode INTEGER,"
+                 "evidence_reason TEXT,"
+                 "outcome TEXT NOT NULL,"
+                 "schema_version INTEGER NOT NULL,"
+                 "UNIQUE(claim_id, prior_attempt_id, retry_sequence_before)"
+                 ");";
+    ResetLastError();
+    if(!ExecuteSQL(sql6))
+      {
+       m_last_init_stage = "ExecutionLedger.CreateSchema";
+       m_last_init_operation = "ExecuteSQL(sql6:CREATE_RETRY_APPROVAL_EVENTS)";
+       m_last_init_error = GetLastError();
+       return false;
+      }
+
    // Check/set schema version
    string check_sql = "SELECT value FROM execution_schema_meta WHERE key='schema_version';";
     ResetLastError();
@@ -474,19 +677,19 @@ bool CExecutionLedger::CreateSchema()
     else
       {
        string ver = DatabaseColumnString(handle, 0);
-       if(ver == IntegerToString(m_schema_version))
-          has_version = true;
+       has_version = (StringLen(ver) > 0);
       }
     DatabaseFinalize(handle);
 
+   // Record schema version only when absent; MigrateSchema performs versioned upgrades (fail-closed on unsupported).
    if(!has_version)
      {
-      string set_ver = "INSERT OR REPLACE INTO execution_schema_meta (key, value) VALUES ('schema_version', '" + IntegerToString(m_schema_version) + "');";
+      string set_ver = "INSERT INTO execution_schema_meta (key, value) VALUES ('schema_version', '" + IntegerToString(m_schema_version) + "');";
     ResetLastError();
     if(!ExecuteSQL(set_ver))
       {
        m_last_init_stage = "ExecutionLedger.CreateSchema";
-       m_last_init_operation = "ExecuteSQL(set_schema_version)";
+       m_last_init_operation = "ExecuteSQL(set_schema_version_absent)";
        m_last_init_error = GetLastError();
        return false;
       }
@@ -497,10 +700,86 @@ bool CExecutionLedger::CreateSchema()
 
 //+------------------------------------------------------------------+
 //| Migrate Schema                                                    |
+//| E2.6: versioned, backward-compatible migration source only.        |
+//| Live DB migration execution is NOT authorized in this phase.      |
+//| Idempotent: CREATE TABLE IF NOT EXISTS and schema meta updates;   |
+//| fail-closed on unsupported/partial states.                        |
 //+------------------------------------------------------------------+
 bool CExecutionLedger::MigrateSchema()
   {
-   // For now, just validate schema version
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+      return false;
+   // Read current version (best-effort; absence handled by CreateSchema meta set).
+   string ver_sql = "SELECT value FROM execution_schema_meta WHERE key='schema_version';";
+   int vh = DatabasePrepare(m_db_handle, ver_sql);
+   if(vh == INVALID_HANDLE)
+     {
+      m_last_init_stage = "ExecutionLedger.MigrateSchema";
+      m_last_init_operation = "DatabasePrepare(schema_version)";
+      m_last_init_error = GetLastError();
+      return false;
+     }
+   int current = 0;
+   if(DatabaseRead(vh))
+     {
+      string v = DatabaseColumnString(vh, 0);
+      current = (int)StringToInteger(v);
+     }
+   DatabaseFinalize(vh);
+   // Fail closed on future/unsupported schema versions.
+   if(current > m_schema_version)
+     {
+      m_last_init_stage = "ExecutionLedger.MigrateSchema";
+      m_last_init_operation = "UnsupportedSchemaVersion";
+      m_last_init_error = 0;
+      return false;
+     }
+   // v1 -> v2: ensure retry_approval_events exists (additive, backward-compatible).
+   if(current < 2)
+     {
+      string sql6 = "CREATE TABLE IF NOT EXISTS retry_approval_events ("
+                   "action_id TEXT PRIMARY KEY,"
+                   "claim_id TEXT NOT NULL,"
+                   "strategy_group_key TEXT NOT NULL,"
+                   "logical_setup_key TEXT NOT NULL,"
+                   "prior_attempt_id TEXT NOT NULL,"
+                   "new_attempt_id TEXT NOT NULL UNIQUE,"
+                   "retry_sequence_before INTEGER NOT NULL,"
+                   "retry_sequence_after INTEGER NOT NULL,"
+                   "approval_timestamp INTEGER NOT NULL,"
+                   "action_source TEXT NOT NULL,"
+                   "auth_model TEXT NOT NULL,"
+                   "account_login TEXT,"
+                   "account_server TEXT,"
+                   "chart_id INTEGER,"
+                   "chart_symbol TEXT,"
+                   "chart_period INTEGER,"
+                   "ea_program TEXT,"
+                   "terminal_build INTEGER,"
+                   "evidence_state INTEGER,"
+                   "evidence_failure_class TEXT,"
+                   "evidence_retcode INTEGER,"
+                   "evidence_reason TEXT,"
+                   "outcome TEXT NOT NULL,"
+                   "schema_version INTEGER NOT NULL,"
+                   "UNIQUE(claim_id, prior_attempt_id, retry_sequence_before)"
+                   ");";
+      if(!ExecuteSQL(sql6))
+        {
+         m_last_init_stage = "ExecutionLedger.MigrateSchema";
+         m_last_init_operation = "ExecuteSQL(v1->v2:CREATE_RETRY_APPROVAL_EVENTS)";
+         m_last_init_error = GetLastError();
+         return false;
+        }
+      string set_ver = "INSERT OR REPLACE INTO execution_schema_meta (key, value) VALUES ('schema_version', '" + IntegerToString(m_schema_version) + "');";
+      if(!ExecuteSQL(set_ver))
+        {
+         m_last_init_stage = "ExecutionLedger.MigrateSchema";
+         m_last_init_operation = "ExecuteSQL(v1->v2:set_schema_version)";
+         m_last_init_error = GetLastError();
+         return false;
+        }
+     }
    return true;
   }
 
@@ -524,57 +803,29 @@ bool CExecutionLedger::CreateIntent(ExecutionAttemptRecord &record)
 
    if(record.attempt_id == "")
       record.attempt_id = GenerateAttemptId();
-
-   record.created_at = TimeCurrent();
-   record.state = EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED;
-   record.submission_allowed = false;
-   record.executed_volume = 0.0;
-   record.remaining_volume = record.requested_volume;
-   record.schema_version = m_schema_version;
-
+   if(!PrepareIntentRecord(record))
+      return false;
    if(!DatabaseTransactionBegin(m_db_handle))
       return false;
-
-   string sql = "INSERT INTO execution_attempts (attempt_id, setup_id, symbol, magic, intent, direction, "
-                "requested_volume, executed_volume, remaining_volume, entry_price, stop_loss, take_profit, "
-                "created_at, state, submission_allowed, schema_version) VALUES ('" +
-                EscapeSQL(record.attempt_id) + "','" +
-                EscapeSQL(record.setup_id) + "','" +
-                EscapeSQL(record.symbol) + "'," +
-                IntegerToString((long)record.magic) + "," +
-                IntegerToString((int)record.intent) + "," +
-                IntegerToString((int)record.direction) + "," +
-                DoubleToString(record.requested_volume, 8) + "," +
-                DoubleToString(record.executed_volume, 8) + "," +
-                DoubleToString(record.remaining_volume, 8) + "," +
-                DoubleToString(record.entry_price, 8) + "," +
-                DoubleToString(record.stop_loss, 8) + "," +
-                DoubleToString(record.take_profit, 8) + "," +
-                IntegerToString((long)record.created_at) + "," +
-                IntegerToString((int)record.state) + "," +
-                IntegerToString(0) + "," +
-                IntegerToString(record.schema_version) + ");";
-
-   if(!ExecuteSQL(sql))
+   if(!InsertIntentNoTx(record))
      {
       DatabaseTransactionRollback(m_db_handle);
       return false;
      }
-
-   if(!LogStateTransition(record.attempt_id, EXEC_STATE_NONE, EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED, "Intent created"))
-     {
-      DatabaseTransactionRollback(m_db_handle);
-      return false;
-     }
-
    if(!DatabaseTransactionCommit(m_db_handle))
       return false;
-
    return true;
   }
 
 //+------------------------------------------------------------------+
 //| Mark Submission Bound                                             |
+//| Binds a durable intent for a possible single submission attempt.  |
+//| The attempt remains INTENT_DURABLE_NOT_SUBMITTED (non-ambiguous,  |
+//| no broker call recorded). submission_allowed is required by      |
+//| CanSubmit. The ambiguous transition to                          |
+//| SUBMISSION_MAY_HAVE_OCCURRED must happen only via               |
+//| MarkSubmissionMayHaveOccurred immediately adjacent to the broker |
+//| invocation.                                                       |
 //+------------------------------------------------------------------+
 bool CExecutionLedger::MarkSubmissionBound(const string attempt_id, const string reason)
   {
@@ -588,13 +839,18 @@ bool CExecutionLedger::MarkSubmissionBound(const string attempt_id, const string
    if(rec.state != EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED)
       return false;
 
+   // Restart/idempotency safety: a bound intent must not be rebound silently.
+   if(rec.submission_allowed)
+      return false;
+
    if(!DatabaseTransactionBegin(m_db_handle))
       return false;
 
    datetime now = TimeCurrent();
    string sql = "UPDATE execution_attempts SET submission_bound_at = " + IntegerToString((long)now) +
                 ", submission_allowed = 1, last_reason = '" + EscapeSQL(reason) + "' WHERE attempt_id = '" +
-                EscapeSQL(attempt_id) + "' AND state = " + IntegerToString((int)EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED) + ";";
+                EscapeSQL(attempt_id) + "' AND state = " + IntegerToString((int)EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED) +
+                " AND submission_allowed = 0;";
 
    if(!ExecuteSQL(sql))
      {
@@ -602,7 +858,9 @@ bool CExecutionLedger::MarkSubmissionBound(const string attempt_id, const string
       return false;
      }
 
-   if(!LogStateTransition(attempt_id, EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED, EXEC_STATE_SUBMISSION_MAY_HAVE_OCCURRED, reason))
+   // State remains INTENT_DURABLE_NOT_SUBMITTED: intent is authorized/bound
+   // but broker invocation has not occurred.
+   if(!LogStateTransition(attempt_id, EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED, EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED, reason))
      {
       DatabaseTransactionRollback(m_db_handle);
       return false;
@@ -616,6 +874,9 @@ bool CExecutionLedger::MarkSubmissionBound(const string attempt_id, const string
 
 //+------------------------------------------------------------------+
 //| Can Submit                                                        |
+//| Authorizes at most the single pre-broker submission for a bound   |
+//| attempt. Ambiguous/terminal/reconciling states are never          |
+//| submittable (fail-closed, D-04/D-09/D-10/D-11).                  |
 //+------------------------------------------------------------------+
 bool CExecutionLedger::CanSubmit(const string attempt_id, string &reason)
   {
@@ -667,7 +928,56 @@ bool CExecutionLedger::CanSubmit(const string attempt_id, string &reason)
   }
 
 //+------------------------------------------------------------------+
+//| Mark Submission May Have Occurred                                 |
+//| Final durable transition immediately adjacent to broker           |
+//| invocation. After commit, the system must assume the broker call  |
+//| may have occurred and must never auto-resubmit.                  |
+//+------------------------------------------------------------------+
+bool CExecutionLedger::MarkSubmissionMayHaveOccurred(const string attempt_id, const string reason)
+  {
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+      return false;
+
+   ExecutionAttemptRecord rec;
+   if(!GetAttempt(attempt_id, rec))
+      return false;
+
+   // Only a bound, still-unsubmitted intent may enter the ambiguous window.
+   if(rec.state != EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED || !rec.submission_allowed)
+      return false;
+
+   if(!DatabaseTransactionBegin(m_db_handle))
+      return false;
+
+   datetime now = TimeCurrent();
+   string sql = "UPDATE execution_attempts SET submitted_at = " + IntegerToString((long)now) +
+                ", state = " + IntegerToString((int)EXEC_STATE_SUBMISSION_MAY_HAVE_OCCURRED) +
+                ", last_reason = '" + EscapeSQL(reason) + "' WHERE attempt_id = '" +
+                EscapeSQL(attempt_id) + "' AND state = " + IntegerToString((int)EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED) +
+                " AND submission_allowed = 1;";
+
+   if(!ExecuteSQL(sql))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+
+   if(!LogStateTransition(attempt_id, EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED, EXEC_STATE_SUBMISSION_MAY_HAVE_OCCURRED, reason))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+
+   if(!DatabaseTransactionCommit(m_db_handle))
+      return false;
+
+   return true;
+  }
+
+//+------------------------------------------------------------------+
 //| Record Submission                                                 |
+//| Legacy/diagnostic: does not advance durable state without broker  |
+//| evidence. Kept fail-closed; do not use to auto-authorize submit.  |
 //+------------------------------------------------------------------+
 bool CExecutionLedger::RecordSubmission(const string attempt_id)
   {
@@ -904,6 +1214,22 @@ bool CExecutionLedger::GetAttempt(const string attempt_id, ExecutionAttemptRecor
 
 //+------------------------------------------------------------------+
 //| Recover Unresolved                                                |
+//| RS-02: counts unresolved attempts (including orphan               |
+//| INTENT_DURABLE_NOT_SUBMITTED variants A/B) AND quarantines them   |
+//| safely. It never auto-resubmits.                                  |
+//|                                                                   |
+//| - Both variant A (submission_allowed=0) and variant B            |
+//|   (submission_allowed=1) are quarantined conservatively: broker   |
+//|   evidence/history access failure/possible match =>               |
+//|   RECONCILIATION_REQUIRED. Absence of queried broker history is   |
+//|   NOT proof of non-submission (history may be incomplete;         |
+//|   SQLite/MQL5 crash durability/commit ordering vs broker call is  |
+//|   not proven). We do NOT auto-ABORT on absence alone.            |
+//|   submission_allowed=1 is never post-restart submit authorization.|
+//|                                                                   |
+//| Durability unknown: SQLite/MQL5 journal/synchronous/commit        |
+//| semantics under crash are not proven here; recovery stays         |
+//| conservative.                                                      |
 //+------------------------------------------------------------------+
 int CExecutionLedger::RecoverUnresolved(int &out_count)
   {
@@ -913,6 +1239,33 @@ int CExecutionLedger::RecoverUnresolved(int &out_count)
       return 0;
      }
 
+   // First, quarantine/orphan-handle INTENT_DURABLE_NOT_SUBMITTED rows (no auto-resubmit).
+   string qsql = "SELECT attempt_id FROM execution_attempts WHERE state = " +
+                 IntegerToString((int)EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED) +
+                 " ORDER BY created_at ASC LIMIT 50;";
+   int qh = DatabasePrepare(m_db_handle, qsql);
+   if(qh != INVALID_HANDLE)
+     {
+      string orphan_ids[];
+      int oc = 0;
+      while(DatabaseRead(qh))
+        {
+         ArrayResize(orphan_ids, oc + 1);
+         orphan_ids[oc] = DatabaseColumnString(qh, 0);
+         oc++;
+        }
+      DatabaseFinalize(qh);
+      for(int i = 0; i < oc; i++)
+        {
+         // Reconcile/quarantine each; failures are visible via state/history and blocking queries.
+         ReconcileAttempt(orphan_ids[i]);
+        }
+     }
+
+   // Also run standard reconciliation pass for ambiguous/post-submit unresolved states.
+   ReconcileUnresolved(20);
+
+   // Count all unresolved/orphan states (RS-02 visibility)
    string sql = "SELECT COUNT(*) FROM execution_attempts WHERE state IN (" +
                 IntegerToString((int)EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED) + "," +
                 IntegerToString((int)EXEC_STATE_SUBMISSION_MAY_HAVE_OCCURRED) + "," +
@@ -937,7 +1290,98 @@ int CExecutionLedger::RecoverUnresolved(int &out_count)
   }
 
 //+------------------------------------------------------------------+
+//| RS-02: Quarantine/resolve INTENT_DURABLE_NOT_SUBMITTED           |
+//| Conservative: only ABORT when defensible non-submission evidence  |
+//| exists (no broker history access failure AND no matching          |
+//| order/deal for the attempt's own recorded broker tickets, AND     |
+//| no symbol+magic match within the attempt time window). Any        |
+//| history access failure, ambiguity, or possible match =>           |
+//| RECONCILIATION_REQUIRED. Never auto-resubmit.                     |
+//| submission_allowed=1 is NOT used as authorization; it records     |
+//| pre-broker binding only.                                          |
+//+------------------------------------------------------------------+
+bool CExecutionLedger::QuarantineOrphanIntent(const ExecutionAttemptRecord &rec)
+  {
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+      return false;
+   if(rec.state != EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED)
+      return false;
+
+   // Attempt to collect broker evidence. HistorySelect failure => ambiguous/fail-closed.
+   datetime from_time = rec.created_at - 3600;
+   if(from_time < 0) from_time = 0;
+   datetime to_time = TimeCurrent() + 3600;
+   if(!HistorySelect(from_time, to_time))
+     {
+      MarkReconciliationRequired(rec.attempt_id, "RS-02: orphan INTENT_DURABLE_NOT_SUBMITTED; HistorySelect failed - fail closed");
+      return false;
+     }
+
+   // Strong evidence: recorded broker tickets
+   if(rec.broker_order_ticket > 0 || rec.broker_deal_ticket > 0 || rec.broker_position_ticket > 0)
+     {
+      MarkReconciliationRequired(rec.attempt_id, "RS-02: orphan INTENT has broker ticket evidence - reconciliation required (no auto-resubmit)");
+      return false;
+     }
+
+   // Look for any matching deal/order by symbol+magic in attempt window (conservative).
+   int deals_total = HistoryDealsTotal();
+   for(int i = 0; i < deals_total; i++)
+     {
+      ulong deal_ticket = HistoryDealGetTicket(i);
+      if(deal_ticket == 0) continue;
+      string deal_symbol = HistoryDealGetString(deal_ticket, DEAL_SYMBOL);
+      if(deal_symbol != rec.symbol) continue;
+      long deal_magic = 0;
+      if(HistoryDealGetInteger(deal_ticket, DEAL_MAGIC, deal_magic))
+        {
+         if((ulong)deal_magic != rec.magic) continue;
+        }
+      datetime deal_time = (datetime)HistoryDealGetInteger(deal_ticket, DEAL_TIME);
+      // Conservative window: created_at-60 .. created_at+86400 (covers delayed reporting)
+      if(deal_time < rec.created_at - 60) continue;
+      if(deal_time > rec.created_at + 86400) continue;
+      // Possible match exists => do not claim non-submission.
+      MarkReconciliationRequired(rec.attempt_id, "RS-02: orphan INTENT has possible matching broker history - reconciliation required");
+      return false;
+     }
+
+   int orders_total = HistoryOrdersTotal();
+   for(int i = 0; i < orders_total; i++)
+     {
+      ulong order_ticket = HistoryOrderGetTicket(i);
+      if(order_ticket == 0) continue;
+      string ord_symbol = HistoryOrderGetString(order_ticket, ORDER_SYMBOL);
+      if(ord_symbol != rec.symbol) continue;
+      long ord_magic = 0;
+      if(HistoryOrderGetInteger(order_ticket, ORDER_MAGIC, ord_magic))
+        {
+         if((ulong)ord_magic != rec.magic) continue;
+        }
+      datetime ord_time = (datetime)HistoryOrderGetInteger(order_ticket, ORDER_TIME_SETUP);
+      if(ord_time < rec.created_at - 60) continue;
+      if(ord_time > rec.created_at + 86400) continue;
+      MarkReconciliationRequired(rec.attempt_id, "RS-02: orphan INTENT has possible matching order history - reconciliation required");
+      return false;
+     }
+
+   // No broker evidence found in queried history. This is NOT a universal proof of non-submission
+   // (history may be incomplete/unsynchronized; durability/ordering not proven). Keep conservative:
+   // variant B (submission_allowed=1) => reconciliation required (MarkSubmissionMayHaveOccurred may
+   // not have committed, but broker-call durability relative to our state is unknown).
+   // variant A (submission_allowed=0) => reconciliation required as well unless future evidence contract
+   // proves non-submission; we do not auto-ABORT on absence alone.
+   MarkReconciliationRequired(rec.attempt_id,
+      rec.submission_allowed ?
+         "RS-02 variant B: INTENT bound (submission_allowed=1) but ambiguous state not durably observed; no broker evidence in queried history - reconciliation required (no auto-resubmit)" :
+         "RS-02 variant A: INTENT not bound (submission_allowed=0) and no broker evidence in queried history - reconciliation required (durability/proof not established)");
+   return false;
+  }
+
+//+------------------------------------------------------------------+
 //| Reconcile Attempt                                                 |
+//| RS-02: includes INTENT_DURABLE_NOT_SUBMITTED quarantine.         |
+//| Never auto-resubmits. Ambiguity => RECONCILIATION_REQUIRED.       |
 //+------------------------------------------------------------------+
 bool CExecutionLedger::ReconcileAttempt(const string attempt_id)
   {
@@ -947,6 +1391,10 @@ bool CExecutionLedger::ReconcileAttempt(const string attempt_id)
    ExecutionAttemptRecord rec;
    if(!GetAttempt(attempt_id, rec))
       return false;
+
+   // RS-02: orphan/quarantine path for INTENT_DURABLE_NOT_SUBMITTED (variants A/B)
+   if(rec.state == EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED)
+      return QuarantineOrphanIntent(rec);
 
    // Only reconcile in specific states
    if(rec.state != EXEC_STATE_SUBMISSION_MAY_HAVE_OCCURRED &&
@@ -1055,12 +1503,12 @@ bool CExecutionLedger::ReconcileAttempt(const string attempt_id)
                  }
 
              }
-           string sql = "UPDATE execution_attempts SET broker_deal_ticket = " + 
+           string sql = "UPDATE execution_attempts SET broker_deal_ticket = " +
 IntegerToString((long)(found_deal>0?found_deal:rec.broker_deal_ticket)) +
                         ", broker_order_ticket = " + IntegerToString((long)found_order) +
                         ", broker_position_ticket = " + IntegerToString((long)pos_ticket_resolved) +
                         ", executed_volume = " + DoubleToString(total_volume, 8) +
-                        ", remaining_volume = " + DoubleToString(MathMax(0.0, rec.requested_volume - total_volume), 8) 
+                        ", remaining_volume = " + DoubleToString(MathMax(0.0, rec.requested_volume - total_volume), 8)
 +
                         ", broker_response_at = " + IntegerToString((long)now) +
                         ", observed_at = " + IntegerToString((long)now) +
@@ -1244,6 +1692,9 @@ IntegerToString((long)(found_deal>0?found_deal:rec.broker_deal_ticket)) +
 
 //+------------------------------------------------------------------+
 //| Reconcile Unresolved                                              |
+//| RS-02: includes INTENT_DURABLE_NOT_SUBMITTED orphans (fail-closed |
+//| quarantine via ReconcileAttempt/QuarantineOrphanIntent). Never    |
+//| auto-resubmits.                                                    |
 //+------------------------------------------------------------------+
 bool CExecutionLedger::ReconcileUnresolved(int max_attempts)
   {
@@ -1251,6 +1702,7 @@ bool CExecutionLedger::ReconcileUnresolved(int max_attempts)
       return false;
 
    string sql = "SELECT attempt_id FROM execution_attempts WHERE state IN (" +
+                IntegerToString((int)EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED) + "," +
                 IntegerToString((int)EXEC_STATE_SUBMITTED) + "," +
                 IntegerToString((int)EXEC_STATE_RECONCILIATION_REQUIRED) + "," +
                 IntegerToString((int)EXEC_STATE_PARTIAL_FILL) +
@@ -1278,6 +1730,10 @@ bool CExecutionLedger::ReconcileUnresolved(int max_attempts)
 
 //+------------------------------------------------------------------+
 //| Has Blocking Unresolved                                           |
+//| RS-02: INTENT_DURABLE_NOT_SUBMITTED is treated as unresolved/    |
+//| blocking (fail-closed). Its real SQLite/MQL5 crash durability    |
+//| relative to broker invocation is not proven, so it must never     |
+//| authorize auto-resubmit and must not be silently bypassed.        |
 //+------------------------------------------------------------------+
 bool CExecutionLedger::HasBlockingUnresolved(string &blocking_reason)
    {
@@ -1288,6 +1744,7 @@ bool CExecutionLedger::HasBlockingUnresolved(string &blocking_reason)
       }
 
     string sql = "SELECT COUNT(*) FROM execution_attempts WHERE state IN (" +
+                 IntegerToString((int)EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED) + "," +
                  IntegerToString((int)EXEC_STATE_SUBMISSION_MAY_HAVE_OCCURRED) + "," +
                  IntegerToString((int)EXEC_STATE_SUBMITTED) + "," +
                  IntegerToString((int)EXEC_STATE_RECONCILIATION_REQUIRED) + "," +
@@ -1317,6 +1774,7 @@ bool CExecutionLedger::HasBlockingUnresolved(string &blocking_reason)
 
 //+------------------------------------------------------------------+
 //| Has Unresolved For Symbol                                         |
+//| RS-02: includes INTENT_DURABLE_NOT_SUBMITTED (fail-closed).      |
 //+------------------------------------------------------------------+
 bool CExecutionLedger::HasUnresolvedForSymbol(const string symbol, bool include_ambiguous)
   {
@@ -1325,6 +1783,7 @@ bool CExecutionLedger::HasUnresolvedForSymbol(const string symbol, bool include_
 
    string sql = "SELECT COUNT(*) FROM execution_attempts WHERE symbol = '" + EscapeSQL(symbol) +
                 "' AND state IN (" +
+                IntegerToString((int)EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED) + "," +
                 IntegerToString((int)EXEC_STATE_SUBMISSION_MAY_HAVE_OCCURRED) + "," +
                 IntegerToString((int)EXEC_STATE_SUBMITTED);
 
@@ -1360,25 +1819,237 @@ bool CExecutionLedger::GetAttemptState(const string attempt_id, ENUM_EXEC_ATTEMP
    }
 
 //+------------------------------------------------------------------+
+//| RS01-CANON-01: restart-stable canonical identity (v2)            |
+//| Deterministic, length-prefixed fields. Excludes setup_id,        |
+//| attempt_id, counters, TimeCurrent, MathRand.                     |
+//+------------------------------------------------------------------+
+string CExecutionLedger::BuildStableCanonicalIdentity(const string strategy_group_key,
+                                                     const string symbol,
+                                                     const string setup_type,
+                                                     int direction,
+                                                     datetime signal_time,
+                                                     int setup_tf,
+                                                     int version)
+  {
+   string key = "CAN" + IntegerToString(version) + "|";
+   key += IntegerToString(StringLen(strategy_group_key)) + ":" + strategy_group_key + "|";
+   key += IntegerToString(StringLen(symbol)) + ":" + symbol + "|";
+   key += IntegerToString(StringLen(setup_type)) + ":" + setup_type + "|";
+   key += "dir:" + IntegerToString(direction) + "|";
+   key += "bar:" + IntegerToString((long)signal_time) + "|";
+   key += "tf:" + IntegerToString(setup_tf);
+   return key;
+  }
+
+//+------------------------------------------------------------------+
+//| RS01-CANON-01: parse legacy v1 stable components                 |
+//| Legacy v1: v1|group|symbol|direction|signal_time|setup_tf|setup_id
+//| setup_id (7th) is volatile and MUST NOT participate in comparison.|
+//+------------------------------------------------------------------+
+bool CExecutionLedger::ParseLegacyV1CanonicalStable(const string canonical_identity,
+                                                    string &out_group,
+                                                    string &out_symbol,
+                                                    string &out_direction,
+                                                    string &out_signal_time,
+                                                    string &out_setup_tf)
+  {
+   out_group=""; out_symbol=""; out_direction=""; out_signal_time=""; out_setup_tf="";
+   if(StringFind(canonical_identity, "v1|") != 0)
+      return false;
+   // Split on '|' and extract stable fields 1..5 (0=v1, 6=volatile setup_id)
+   string parts[];
+   int n = StringSplit(canonical_identity, '|', parts);
+   if(n < 6)
+      return false;
+   out_group       = parts[1];
+   out_symbol      = parts[2];
+   out_direction   = parts[3];
+   out_signal_time = parts[4];
+   out_setup_tf    = parts[5];
+   return (out_group != "" || out_symbol != "" || out_signal_time != "");
+  }
+
+//+------------------------------------------------------------------+
+//| RS01-CANON-01: compare logical identity with legacy v1 compat     |
+//| Returns true only when stable logical components match.            |
+//| Unknown/unsafe legacy formats => false (fail-closed collision).   |
+//| Genuine hash collision with different stable identity remains     |
+//| fail-closed because this returns false.                           |
+//+------------------------------------------------------------------+
+bool CExecutionLedger::CanonicalSameLogicalSetup(const string existing_canonical,
+                                                 const string new_canonical)
+  {
+   if(existing_canonical == "" || new_canonical == "")
+      return false;
+   if(existing_canonical == new_canonical)
+      return true;
+   // v2 stable format: exact match required (deterministic builder)
+   bool existing_v2 = (StringFind(existing_canonical, "CAN2|") == 0);
+   bool new_v2      = (StringFind(new_canonical, "CAN2|") == 0);
+   if(existing_v2 && new_v2)
+      return (existing_canonical == new_canonical);
+   // Legacy v1 compatibility: compare stable components only (ignore volatile setup_id)
+   if(!existing_v2 && StringFind(existing_canonical, "v1|") == 0 && new_v2)
+     {
+      // new v2 -> compare by rebuilding expected v2 from stable parse of legacy? Or parse legacy and
+      // compare each component against new v2 fields.
+      string g,s,d,b,tf;
+      if(!ParseLegacyV1CanonicalStable(existing_canonical,g,s,d,b,tf))
+         return false; // unsafe/unknown legacy => fail-closed
+      // Build expected stable identity from legacy components
+      string expected = BuildStableCanonicalIdentity(g,s,"DEFAULT_SETUP",(int)StringToInteger(d),(datetime)StringToInteger(b),(int)StringToInteger(tf),2);
+      return (expected == new_canonical);
+     }
+   if(existing_v2 && StringFind(new_canonical, "v1|") == 0)
+     {
+      string g,s,d,b,tf;
+      if(!ParseLegacyV1CanonicalStable(new_canonical,g,s,d,b,tf))
+         return false;
+      string expected = BuildStableCanonicalIdentity(g,s,"DEFAULT_SETUP",(int)StringToInteger(d),(datetime)StringToInteger(b),(int)StringToInteger(tf),2);
+      return (expected == existing_canonical);
+     }
+   // v1 vs v1: compare stable components only
+   if(StringFind(existing_canonical, "v1|") == 0 && StringFind(new_canonical, "v1|") == 0)
+     {
+      string g1,s1,d1,b1,tf1,g2,s2,d2,b2,tf2;
+      if(!ParseLegacyV1CanonicalStable(existing_canonical,g1,s1,d1,b1,tf1)) return false;
+      if(!ParseLegacyV1CanonicalStable(new_canonical,g2,s2,d2,b2,tf2)) return false;
+      return (g1==g2 && s1==s2 && d1==d2 && b1==b2 && tf1==tf2);
+     }
+   // Unknown format => fail-closed
+   return false;
+  }
+
+//+------------------------------------------------------------------+
+//| RS01-CANON-01: transactional upgrade of legacy canonical (safe)  |
+//| Only upgrades when expected existing still matches (optimistic).  |
+//| Failure => caller keeps fail-closed/duplicate behavior; no claim  |
+//| uniqueness weakened.                                              |
+//+------------------------------------------------------------------+
+bool CExecutionLedger::UpgradeClaimCanonicalIfSafe(const string claim_id,
+                                                   const string expected_existing,
+                                                   const string new_canonical)
+  {
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+      return false;
+   if(claim_id == "" || new_canonical == "" || expected_existing == "")
+      return false;
+   // Never "upgrade" away a genuine difference
+   if(!CanonicalSameLogicalSetup(expected_existing, new_canonical))
+      return false;
+   if(!DatabaseTransactionBegin(m_db_handle))
+      return false;
+   string sql = "UPDATE setup_claims SET canonical_identity='" + EscapeSQL(new_canonical) +
+                "', serialization_version=2, updated_at=" + IntegerToString((long)TimeCurrent()) +
+                " WHERE claim_id='" + EscapeSQL(claim_id) +
+                "' AND canonical_identity='" + EscapeSQL(expected_existing) + "';";
+   if(!ExecuteSQL(sql))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return false;
+     }
+   if(!DatabaseTransactionCommit(m_db_handle))
+      return false;
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| E2.6: tx helpers (no nested transactions)                         |
+//+------------------------------------------------------------------+
+bool CExecutionLedger::LogStateTransitionInTx(const string attempt_id, ENUM_EXEC_ATTEMPT_STATE old_state,
+                                              ENUM_EXEC_ATTEMPT_STATE new_state, const string reason,
+                                              uint retcode)
+  {
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+      return false;
+   datetime now = TimeCurrent();
+   string sql = "INSERT INTO execution_state_history (attempt_id, old_state, new_state, transition_at, reason, retcode) VALUES ('" +
+                EscapeSQL(attempt_id) + "'," +
+                IntegerToString((int)old_state) + "," +
+                IntegerToString((int)new_state) + "," +
+                IntegerToString((long)now) + ",'" +
+                EscapeSQL(reason) + "'," +
+                IntegerToString((long)retcode) + ");";
+   return ExecuteSQL(sql);
+  }
+
+bool CExecutionLedger::PrepareIntentRecord(ExecutionAttemptRecord &record) const
+  {
+   if(record.attempt_id == "")
+      return false;
+   record.created_at = TimeCurrent();
+   record.state = EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED;
+   record.submission_allowed = false;
+   record.executed_volume = 0.0;
+   record.remaining_volume = record.requested_volume;
+   record.schema_version = m_schema_version;
+   return true;
+  }
+
+bool CExecutionLedger::InsertIntentNoTx(const ExecutionAttemptRecord &record)
+  {
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+      return false;
+   string sql = "INSERT INTO execution_attempts (attempt_id, setup_id, symbol, magic, intent, direction, "
+                "requested_volume, executed_volume, remaining_volume, entry_price, stop_loss, take_profit, "
+                "created_at, state, submission_allowed, schema_version) VALUES ('" +
+                EscapeSQL(record.attempt_id) + "','" +
+                EscapeSQL(record.setup_id) + "','" +
+                EscapeSQL(record.symbol) + "'," +
+                IntegerToString((long)record.magic) + "," +
+                IntegerToString((int)record.intent) + "," +
+                IntegerToString((int)record.direction) + "," +
+                DoubleToString(record.requested_volume, 8) + "," +
+                DoubleToString(record.executed_volume, 8) + "," +
+                DoubleToString(record.remaining_volume, 8) + "," +
+                DoubleToString(record.entry_price, 8) + "," +
+                DoubleToString(record.stop_loss, 8) + "," +
+                DoubleToString(record.take_profit, 8) + "," +
+                IntegerToString((long)record.created_at) + "," +
+                IntegerToString((int)record.state) + "," +
+                IntegerToString(0) + "," +
+                IntegerToString(record.schema_version) + ");";
+   if(!ExecuteSQL(sql))
+      return false;
+   return LogStateTransitionInTx(record.attempt_id, EXEC_STATE_NONE, EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED, "Intent created");
+  }
+
+bool CExecutionLedger::CreateIntentInTx(ExecutionAttemptRecord &record, string &err)
+  {
+   err = "";
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+     { err="LEDGER_UNAVAILABLE"; return false; }
+   if(record.attempt_id == "")
+      record.attempt_id = GenerateAttemptId();
+   if(!PrepareIntentRecord(record))
+     { err="PREPARE_INTENT_FAILED"; return false; }
+   if(!InsertIntentNoTx(record))
+     { err="INSERT_INTENT_FAILED"; return false; }
+   return true;
+  }
+
+bool CExecutionLedger::AffectedRowsIsOne(bool &ok)
+  {
+   ok = false;
+   int h = DatabasePrepare(m_db_handle, "SELECT changes();");
+   if(h == INVALID_HANDLE)
+      return false;
+   int affected = 0;
+   if(DatabaseRead(h))
+      DatabaseColumnInteger(h, 0, affected);
+   DatabaseFinalize(h);
+   ok = (affected == 1);
+   return true;
+  }
+
+//+------------------------------------------------------------------+
 //| Log State Transition                                             |
 //+------------------------------------------------------------------+
 bool CExecutionLedger::LogStateTransition(const string attempt_id, ENUM_EXEC_ATTEMPT_STATE old_state,
                                           ENUM_EXEC_ATTEMPT_STATE new_state, const string reason,
                                           uint retcode)
    {
-    if(!m_db_available || m_db_handle == INVALID_HANDLE)
-       return false;
-
-    datetime now = TimeCurrent();
-    string sql = "INSERT INTO execution_state_history (attempt_id, old_state, new_state, transition_at, reason, retcode) VALUES ('" +
-                 EscapeSQL(attempt_id) + "'," +
-                 IntegerToString((int)old_state) + "," +
-                 IntegerToString((int)new_state) + "," +
-                 IntegerToString((long)now) + ",'" +
-                 EscapeSQL(reason) + "'," +
-                 IntegerToString((long)retcode) + ");";
-
-    return ExecuteSQL(sql);
+    return LogStateTransitionInTx(attempt_id, old_state, new_state, reason, retcode);
    }
 
 // E2.3: Setup Claim lifecycle implementations (minimal, fail-closed)
@@ -1393,26 +2064,33 @@ CExecutionLedger::ENUM_CLAIM_RESULT CExecutionLedger::CreateClaim(
       return CLAIM_ERROR;
    if(strategy_group_key == "" || logical_setup_key == "" || canonical_identity == "")
       return CLAIM_ERROR;
-   // Check existing claim
-   string check_sql = "SELECT claim_id, canonical_identity FROM setup_claims WHERE strategy_group_key='" +
-                      EscapeSQL(strategy_group_key) + "' AND logical_setup_key='" + EscapeSQL(logical_setup_key) + "';";
-   int handle = DatabasePrepare(m_db_handle, check_sql);
-   if(handle == INVALID_HANDLE)
-      return CLAIM_ERROR;
-   bool exists = false;
-   string existing_canonical = "";
-   if(DatabaseRead(handle))
-     {
-      exists = true;
-      DatabaseColumnText(handle, 1, existing_canonical);
-     }
-   DatabaseFinalize(handle);
-   if(exists)
-     {
-      if(existing_canonical != canonical_identity)
-         return CLAIM_IDENTITY_COLLISION;
-      return CLAIM_ALREADY_EXISTS;
-     }
+    // Check existing claim
+    string check_sql = "SELECT claim_id, canonical_identity FROM setup_claims WHERE strategy_group_key='" +
+                       EscapeSQL(strategy_group_key) + "' AND logical_setup_key='" + EscapeSQL(logical_setup_key) + "';";
+    int handle = DatabasePrepare(m_db_handle, check_sql);
+    if(handle == INVALID_HANDLE)
+       return CLAIM_ERROR;
+    bool exists = false;
+    string existing_id = "";
+    string existing_canonical = "";
+    if(DatabaseRead(handle))
+      {
+       exists = true;
+       existing_id = DatabaseColumnString(handle, 0);
+       existing_canonical = DatabaseColumnString(handle, 1);
+      }
+     DatabaseFinalize(handle);
+     if(exists)
+       {
+        // RS01-CANON-01: compare stable logical identity; accept legacy v1 (ignore volatile setup_id).
+        if(!CanonicalSameLogicalSetup(existing_canonical, canonical_identity))
+           return CLAIM_IDENTITY_COLLISION;
+        if(existing_canonical != canonical_identity)
+           UpgradeClaimCanonicalIfSafe(existing_id, existing_canonical, canonical_identity);
+        // Existing claim for same logical setup blocks a new submission attempt (fail-closed).
+        // Releasing/recycling is not performed here; it must follow approved claim/attempt semantics.
+        return CLAIM_ALREADY_EXISTS;
+       }
    // Persist initial Attempt first (separate transaction)
    if(initial_attempt.attempt_id == "")
       initial_attempt.attempt_id = GenerateAttemptId();
@@ -1443,105 +2121,487 @@ CExecutionLedger::ENUM_CLAIM_RESULT CExecutionLedger::CreateClaim(
    return CLAIM_CREATED;
   }
 
-bool CExecutionLedger::RetryAuthorize(const string claim_id, const string attempt_id, const string reason)
+//+------------------------------------------------------------------+
+//| E2.6: controlled retry helpers (source-only; live DB/MT5 runtime  |
+//| NOT authorized). No broker calls. No auto-retry.                  |
+//+------------------------------------------------------------------+
+string CExecutionLedger::BuildRetryActionId(const string claim_id,const string prior_attempt_id,int expected_retry_sequence)
   {
-   if(!m_db_available || m_db_handle == INVALID_HANDLE)
-      return false;
-   string check_sql = "SELECT claim_state, current_attempt_id FROM setup_claims WHERE claim_id='" + EscapeSQL(claim_id) + "';";
-   int handle = DatabasePrepare(m_db_handle, check_sql);
-   if(handle == INVALID_HANDLE)
-      return false;
-   int claim_state = -1;
-   string current_attempt = "";
+   return "RTRY|" + claim_id + "|" + prior_attempt_id + "|" + IntegerToString(expected_retry_sequence);
+  }
+
+bool CExecutionLedger::GetClaimById(const string claim_id,
+                                    const string strategy_group_key,
+                                    const string logical_setup_key,
+                                    int &claim_state,
+                                    string &current_attempt_id,
+                                    int &retry_sequence)
+  {
+   claim_state = -1; current_attempt_id = ""; retry_sequence = -1;
+   if(!m_db_available || m_db_handle == INVALID_HANDLE) return false;
+   if(claim_id == "" || strategy_group_key == "" || logical_setup_key == "") return false;
+   string sql = "SELECT claim_state,current_attempt_id,retry_sequence FROM setup_claims WHERE claim_id='" +
+                EscapeSQL(claim_id) + "' AND strategy_group_key='" + EscapeSQL(strategy_group_key) +
+                "' AND logical_setup_key='" + EscapeSQL(logical_setup_key) + "';";
+   int handle = DatabasePrepare(m_db_handle, sql);
+   if(handle == INVALID_HANDLE) return false;
+   bool found = false;
    if(DatabaseRead(handle))
      {
       DatabaseColumnInteger(handle, 0, claim_state);
-      DatabaseColumnText(handle, 1, current_attempt);
+      DatabaseColumnText(handle, 1, current_attempt_id);
+      DatabaseColumnInteger(handle, 2, retry_sequence);
+      found = true;
      }
    DatabaseFinalize(handle);
-   if(claim_state != (int)SETUP_CLAIM_ACTIVE)
-      return false;
-   if(current_attempt != attempt_id)
-      return false;
-   ENUM_EXEC_ATTEMPT_STATE st;
-   if(!GetAttemptState(attempt_id, st))
-      return false;
-   if(st != EXEC_STATE_FINAL_FAILURE)
-      return false;
-   // Evidence validation: proven terminal non-execution required
-   ExecutionAttemptRecord rec;
-   if(!GetAttempt(attempt_id, rec))
-      return false;
-   if(rec.failure_class == "" || rec.failure_class == "AMBIGUOUS" ||
-      rec.failure_class == "TIMEOUT" || rec.failure_class == "RECONCILIATION_REQUIRED")
-      return false;
-   if(rec.last_retcode == TRADE_RETCODE_TIMEOUT || rec.last_retcode == TRADE_RETCODE_CONNECTION)
-      return false;
-   if(!DatabaseTransactionBegin(m_db_handle))
-      return false;
-   string sql = "UPDATE setup_claims SET claim_state=" + IntegerToString((int)SETUP_CLAIM_RETRY_AUTHORIZED) +
-                ", updated_at=" + IntegerToString((long)TimeCurrent()) +
-                ", last_reason='" + EscapeSQL(reason) + "' " +
-                "WHERE claim_id='" + EscapeSQL(claim_id) + "' AND claim_state=" +
-                IntegerToString((int)SETUP_CLAIM_ACTIVE) + ";";
-   if(!ExecuteSQL(sql))
-     {
-      DatabaseTransactionRollback(m_db_handle);
-      return false;
-     }
-   if(!DatabaseTransactionCommit(m_db_handle))
-     {
-      DatabaseTransactionRollback(m_db_handle);
-      return false;
-     }
+   return found;
+  }
+
+bool CExecutionLedger::IsRetryEligibleFinalFailure(const ExecutionAttemptRecord &attempt,string &why_not)
+  {
+   why_not = "";
+   if(attempt.state != EXEC_STATE_FINAL_FAILURE)
+     { why_not="ATTEMPT_NOT_FINAL_FAILURE state="+IntegerToString((int)attempt.state); return false; }
+   string fc = attempt.failure_class;
+   if(fc=="" || fc=="AMBIGUOUS" || fc=="TIMEOUT" || fc=="CONNECTION" || fc=="RECONNECTION_REQUIRED" ||
+      fc=="AUTHORIZATION_DENIED" || fc=="UNKNOWN" || fc=="SUBMITTED" || fc=="PARTIAL_FILL" ||
+      fc=="ABORTED" || fc=="SUCCESS" || fc=="RECONCILIATION_REQUIRED" ||
+      StringFind(fc,"AMBIGUOUS")>=0 || StringFind(fc,"TIMEOUT")>=0 || StringFind(fc,"CONNECTION")>=0)
+     { why_not="FORBIDDEN_OR_UNKNOWN_FAILURE_CLASS["+fc+"]"; return false; }
+   if(attempt.last_retcode == TRADE_RETCODE_TIMEOUT || attempt.last_retcode == TRADE_RETCODE_CONNECTION ||
+      attempt.last_retcode == TRADE_RETCODE_INVALID_PRICE || attempt.last_retcode == TRADE_RETCODE_PRICE_CHANGED ||
+      attempt.last_retcode == TRADE_RETCODE_PRICE_OFF || attempt.last_retcode == TRADE_RETCODE_REQUOTE)
+     { why_not="AMBIGUOUS_RETCODE["+IntegerToString((int)attempt.last_retcode)+"]"; return false; }
+   if(attempt.broker_order_ticket > 0 || attempt.broker_deal_ticket > 0 || attempt.broker_position_ticket > 0)
+     { why_not="BROKER_EVIDENCE_PRESENT_REQUIRES_RECONCILIATION"; return false; }
+   if(attempt.executed_volume > 0.0)
+     { why_not="EXECUTED_VOLUME_PRESENT"; return false; }
+   if(fc != "FINAL_FAILURE")
+     { why_not="UNPROVEN_TERMINAL_NON_EXECUTION_CLASS["+fc+"]"; return false; }
    return true;
   }
 
-bool CExecutionLedger::RetryCreate(const string claim_id, const string new_attempt_id, ExecutionAttemptRecord &new_attempt)
+//+------------------------------------------------------------------+
+//| E2.6 P1-B: bounded read-only durable retry candidate discovery.   |
+//| ACTIVE claims only; exact binding; same evidence validator as     |
+//| ApproveAndCreateRetry; excludes claim-only/orphan/inconsistent/   |
+//| consumed/ambiguous. Deterministic order. No DB writes.            |
+//| Fail-closed on SQL/prepare/read/parse/DB errors.                  |
+//+------------------------------------------------------------------+
+int CExecutionLedger::GetRetryEligibleCandidates(RetryEligibleCandidate &out[], int max_candidates, string &error)
   {
+   ArrayResize(out, 0);
+   error = "";
    if(!m_db_available || m_db_handle == INVALID_HANDLE)
-      return false;
-   string check_sql = "SELECT claim_state, current_attempt_id, retry_sequence FROM setup_claims WHERE claim_id='" + EscapeSQL(claim_id) + "';";
-   int handle = DatabasePrepare(m_db_handle, check_sql);
-   if(handle == INVALID_HANDLE)
-      return false;
-   int claim_state = -1;
-   string current_attempt = "";
-   int retry_seq = 0;
-   if(DatabaseRead(handle))
+     { error = "LEDGER_UNAVAILABLE"; return -1; }
+   if(max_candidates < 1) max_candidates = 1;
+   if(max_candidates > 10) max_candidates = 10;
+   // Read-only: ACTIVE claims joined to current attempt. Bounded, deterministic.
+   string sql =
+      "SELECT sc.claim_id,sc.strategy_group_key,sc.logical_setup_key,sc.canonical_identity,sc.serialization_version,"
+      "sc.claim_state,sc.current_attempt_id,sc.retry_sequence,"
+      "ea.attempt_id,ea.symbol,ea.direction,ea.state,ea.failure_class,ea.last_retcode,"
+      "ea.requested_volume,ea.executed_volume,ea.remaining_volume,"
+      "ea.broker_order_ticket,ea.broker_deal_ticket,ea.broker_position_ticket,"
+      "(SELECT COUNT(*) FROM retry_approval_events rae WHERE rae.claim_id=sc.claim_id AND rae.prior_attempt_id=sc.current_attempt_id AND rae.retry_sequence_before=sc.retry_sequence) AS consumed_count "
+      "FROM setup_claims sc "
+      "INNER JOIN execution_attempts ea ON ea.attempt_id=sc.current_attempt_id "
+      "WHERE sc.claim_state=" + IntegerToString((int)SETUP_CLAIM_ACTIVE) +
+      " AND sc.current_attempt_id IS NOT NULL AND sc.current_attempt_id <> '' "
+      "ORDER BY sc.created_at ASC, sc.claim_id ASC, ea.attempt_id ASC "
+      "LIMIT " + IntegerToString(max_candidates * 4) + ";";
+   ResetLastError();
+   int h = DatabasePrepare(m_db_handle, sql);
+   if(h == INVALID_HANDLE)
+     { error = "CANDIDATE_QUERY_PREPARE_FAILED"; return -1; }
+   int returned = 0;
+   while(DatabaseRead(h) && returned < max_candidates)
      {
-      DatabaseColumnInteger(handle, 0, claim_state);
-      DatabaseColumnText(handle, 1, current_attempt);
-      DatabaseColumnInteger(handle, 2, retry_seq);
+      RetryEligibleCandidate c; ZeroMemory(c); c.valid = false;
+      c.claim_id             = DatabaseColumnString(h, 0);
+      c.strategy_group_key   = DatabaseColumnString(h, 1);
+      c.logical_setup_key    = DatabaseColumnString(h, 2);
+      c.canonical_identity   = DatabaseColumnString(h, 3);
+      c.serialization_version= (int)DatabaseColumnLong2(h, 4);
+      c.claim_state          = (int)DatabaseColumnLong2(h, 5);
+      c.prior_attempt_id     = DatabaseColumnString(h, 6);
+      c.retry_sequence       = (int)DatabaseColumnLong2(h, 7);
+      string ea_attempt_id   = DatabaseColumnString(h, 8);
+      c.symbol               = DatabaseColumnString(h, 9);
+      c.direction            = (int)DatabaseColumnLong2(h, 10);
+      c.attempt_state        = (int)DatabaseColumnLong2(h, 11);
+      c.failure_class        = DatabaseColumnString(h, 12);
+      c.retcode              = (uint)DatabaseColumnLong2(h, 13);
+      c.requested_volume     = DatabaseColumnDouble2(h, 14);
+      c.executed_volume      = DatabaseColumnDouble2(h, 15);
+      c.remaining_volume     = DatabaseColumnDouble2(h, 16);
+      c.broker_order_ticket  = (ulong)DatabaseColumnLong2(h, 17);
+      c.broker_deal_ticket   = (ulong)DatabaseColumnLong2(h, 18);
+      c.broker_position_ticket=(ulong)DatabaseColumnLong2(h, 19);
+      int consumed_count     = (int)DatabaseColumnLong2(h, 20);
+      if(c.claim_id == "" || c.strategy_group_key == "" || c.logical_setup_key == "" || c.prior_attempt_id == "" || ea_attempt_id == "")
+         continue;
+      if(c.prior_attempt_id != ea_attempt_id)
+         continue;
+      c.consumed_by_approval = (consumed_count > 0);
+      if(c.consumed_by_approval)
+         continue;
+      // Reuse SAME evidence validator as ApproveAndCreateRetry (single source of truth).
+      ExecutionAttemptRecord att;
+      if(!GetAttempt(c.prior_attempt_id, att))
+         continue; // fail-closed per row: no eligibility from partial/missing evidence
+      if(att.attempt_id != c.prior_attempt_id || att.state != (ENUM_EXEC_ATTEMPT_STATE)c.attempt_state)
+         continue;
+      string why = "";
+      if(!IsRetryEligibleFinalFailure(att, why))
+         continue;
+      c.requested_volume = att.requested_volume; c.executed_volume = att.executed_volume; c.remaining_volume = att.remaining_volume;
+      c.broker_order_ticket = att.broker_order_ticket; c.broker_deal_ticket = att.broker_deal_ticket; c.broker_position_ticket = att.broker_position_ticket;
+      c.failure_class = att.failure_class; c.retcode = att.last_retcode; c.attempt_state = (int)att.state;
+      c.evidence_summary = "FINAL_FAILURE class=" + c.failure_class + " ret=" + IntegerToString((int)c.retcode) +
+                           " req=" + DoubleToString(c.requested_volume,8) + " exec=" + DoubleToString(c.executed_volume,8) +
+                           " rem=" + DoubleToString(c.remaining_volume,8) + " ord=" + IntegerToString((long)c.broker_order_ticket) +
+                           " deal=" + IntegerToString((long)c.broker_deal_ticket) + " pos=" + IntegerToString((long)c.broker_position_ticket) +
+                           " no-broker-evidence";
+      c.eligibility_reason = "ELIGIBLE_FINAL_FAILURE_VERIFIED";
+      c.valid = true;
+      int idx = ArraySize(out); ArrayResize(out, idx + 1); out[idx] = c; returned++;
      }
-   DatabaseFinalize(handle);
-   if(claim_state != (int)SETUP_CLAIM_RETRY_AUTHORIZED)
-      return false;
-   // Create new durable Attempt Intent first
-   if(new_attempt.attempt_id == "")
-      new_attempt.attempt_id = GenerateAttemptId();
-   if(!CreateIntent(new_attempt))
-      return false;
-   // Consume retry authorization and update claim
+   DatabaseFinalize(h);
+   error = "";
+   return returned;
+  }
+
+bool CExecutionLedger::GetRetryApprovalEventOutcome(const string action_id,string &outcome,string &new_attempt_id)
+  {
+   outcome=""; new_attempt_id="";
+   if(!m_db_available || m_db_handle == INVALID_HANDLE || action_id=="") return false;
+   string sql = "SELECT outcome,new_attempt_id FROM retry_approval_events WHERE action_id='" + EscapeSQL(action_id) + "';";
+   int h = DatabasePrepare(m_db_handle, sql);
+   if(h == INVALID_HANDLE) return false;
+   bool found=false;
+   if(DatabaseRead(h)) { outcome = DatabaseColumnString(h,0); new_attempt_id = DatabaseColumnString(h,1); found=true; }
+   DatabaseFinalize(h);
+   return found;
+  }
+
+//+------------------------------------------------------------------+
+//| E2.6-R1: read-only interrupted durable retry handoff visibility. |
+//| Identifies approved retry intent (retry_approval_events joined   |
+//| to execution_attempts + setup_claims) that is not a submitted     |
+//| terminal success path and may need operator reconciliation after  |
+//| restart (transient handoff is NOT restored/submitted).           |
+//| Bounded, deterministic, fail-closed, NO mutations/broker calls.   |
+//+------------------------------------------------------------------+
+int CExecutionLedger::GetInterruptedRetryHandoffs(const string account_login,
+                                                  const string account_server,
+                                                  const string strategy_group_key,
+                                                  InterruptedRetryHandoff &out[],
+                                                  int max_rows,
+                                                  string &error)
+  {
+   ArrayResize(out, 0);
+   error = "";
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+     { error = "LEDGER_UNAVAILABLE"; return -1; }
+   if(account_login == "" || account_server == "" || strategy_group_key == "")
+     { error = "MISSING_CONTEXT_FILTER"; return -1; }
+   if(max_rows < 1) max_rows = 1;
+   if(max_rows > 10) max_rows = 10;
+   // Exact durable correlation: approval event -> new attempt -> claim. Filter by persisted account/group context.
+   // Exclude only durable terminal success already fully resolved from operator perspective? Keep submitted/completed
+   // visible? Requirement: distinguish submitted/may-have-occurred/reconciliation-required/unresolved/unreadable.
+   // We report rows where new attempt is not cleanly auto-ignorable: include INTENT_DURABLE_NOT_SUBMITTED,
+   // SUBMISSION_MAY_HAVE_OCCURRED, SUBMITTED, RECONCILIATION_REQUIRED, PARTIAL_FILL, ABORTED/FINAL_FAILURE as
+   // diagnostics; exclude COMPLETED to avoid stale noise unless claim still unresolved - keep bounded and explicit.
+   string sql =
+      "SELECT rae.action_id,rae.claim_id,rae.strategy_group_key,rae.logical_setup_key,rae.prior_attempt_id,rae.new_attempt_id,"
+      "rae.retry_sequence_before,rae.retry_sequence_after,rae.approval_timestamp,rae.account_login,rae.account_server,rae.outcome,"
+      "ea.state,ea.submitted_at,ea.broker_order_ticket,ea.broker_deal_ticket,ea.broker_position_ticket,ea.failure_class,"
+      "sc.claim_state,sc.current_attempt_id,sc.retry_sequence "
+      "FROM retry_approval_events rae "
+      "LEFT JOIN execution_attempts ea ON ea.attempt_id=rae.new_attempt_id "
+      "LEFT JOIN setup_claims sc ON sc.claim_id=rae.claim_id "
+      "WHERE rae.account_login='" + EscapeSQL(account_login) + "' "
+      "AND rae.account_server='" + EscapeSQL(account_server) + "' "
+      "AND rae.strategy_group_key='" + EscapeSQL(strategy_group_key) + "' "
+      "ORDER BY rae.approval_timestamp DESC, rae.action_id DESC "
+      "LIMIT " + IntegerToString(max_rows * 3) + ";";
+   ResetLastError();
+   int h = DatabasePrepare(m_db_handle, sql);
+   if(h == INVALID_HANDLE)
+     { error = "INTERRUPTED_QUERY_PREPARE_FAILED"; return -1; }
+   int returned = 0;
+   while(DatabaseRead(h) && returned < max_rows)
+     {
+      InterruptedRetryHandoff r; ZeroMemory(r); r.valid=false; r.new_attempt_state=-1;
+      r.action_id               = DatabaseColumnString(h, 0);
+      r.claim_id                = DatabaseColumnString(h, 1);
+      r.strategy_group_key      = DatabaseColumnString(h, 2);
+      r.logical_setup_key       = DatabaseColumnString(h, 3);
+      r.prior_attempt_id        = DatabaseColumnString(h, 4);
+      r.new_attempt_id          = DatabaseColumnString(h, 5);
+      r.retry_sequence_before   = (int)DatabaseColumnLong2(h, 6);
+      r.retry_sequence_after    = (int)DatabaseColumnLong2(h, 7);
+      r.approval_timestamp      = (datetime)DatabaseColumnLong2(h, 8);
+      r.account_login           = DatabaseColumnString(h, 9);
+      r.account_server          = DatabaseColumnString(h, 10);
+      string outcome            = DatabaseColumnString(h, 11);
+      bool ea_null = false; // DatabaseColumn* on LEFT JOIN null: treat as unreadable/missing
+      // Heuristic: if new_attempt_id exists but join gave empty attempt_id-equivalent state fields, verify via GetAttempt.
+      r.approval_event_exists = (r.action_id != "" && outcome != "");
+      if(!r.approval_event_exists)
+         continue;
+      // Exact binding sanity
+      if(r.claim_id=="" || r.strategy_group_key=="" || r.logical_setup_key=="" || r.prior_attempt_id=="" || r.new_attempt_id=="")
+         continue;
+      ExecutionAttemptRecord att; ZeroMemory(att);
+      r.new_attempt_readable = GetAttempt(r.new_attempt_id, att);
+      if(!r.new_attempt_readable)
+        {
+         r.new_attempt_state = -1;
+         r.status_code = "INTERRUPTED_ATTEMPT_UNREADABLE";
+         r.detail = "Durable approval exists but new attempt unreadable/missing; fail-closed, operator reconciliation required. No auto-submit.";
+        }
+      else
+        {
+         r.new_attempt_state = (int)att.state;
+         r.submitted_recorded = (att.submitted_at > 0 || att.state == EXEC_STATE_SUBMITTED || att.state == EXEC_STATE_COMPLETED || att.broker_order_ticket>0 || att.broker_deal_ticket>0);
+         r.submission_may_have_occurred = (att.state == EXEC_STATE_SUBMISSION_MAY_HAVE_OCCURRED || att.submitted_at > 0);
+         r.reconciliation_required = (att.state == EXEC_STATE_RECONCILIATION_REQUIRED || att.state == EXEC_STATE_PARTIAL_FILL);
+         if(att.state == EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED)
+           {
+            r.status_code = "INTERRUPTED_INTENT_DURABLE_NOT_SUBMITTED";
+            r.detail = "Approved retry intent durably recorded; transient handoff not resumed after restart/interruption. NOT submitted by this status. No auto-submit/restore.";
+           }
+         else if(att.state == EXEC_STATE_SUBMISSION_MAY_HAVE_OCCURRED)
+           {
+            r.status_code = "INTERRUPTED_SUBMISSION_MAY_HAVE_OCCURRED";
+            r.detail = "Submission may have occurred (ambiguous). Reconciliation required. No retry/auto-submit.";
+           }
+         else if(att.state == EXEC_STATE_RECONCILIATION_REQUIRED)
+           {
+            r.status_code = "INTERRUPTED_RECONCILIATION_REQUIRED";
+            r.detail = "Attempt requires reconciliation. No retry/auto-submit.";
+           }
+         else if(att.state == EXEC_STATE_SUBMITTED || att.state == EXEC_STATE_PARTIAL_FILL)
+           {
+            r.status_code = "INTERRUPTED_SUBMITTED_OR_PARTIAL";
+            r.detail = "Durable broker-submission/partial evidence exists; reconcile before any further action. No auto-submit.";
+           }
+         else if(att.state == EXEC_STATE_COMPLETED)
+           {
+            r.status_code = "INTERRUPTED_ALREADY_COMPLETED";
+            r.detail = "Attempt completed; visibility only.";
+           }
+         else
+           {
+            r.status_code = "INTERRUPTED_UNRESOLVED_OR_TERMINAL";
+            r.detail = "Attempt in state " + IntegerToString((int)att.state) + "; operator review required. No auto-submit.";
+           }
+        }
+      // claim consistency (read-only)
+      string cur_att=""; int cstate=-1, cseq=-1;
+      if(GetClaimById(r.claim_id, r.strategy_group_key, r.logical_setup_key, cstate, cur_att, cseq))
+        {
+         if(cur_att != "" && cur_att != r.new_attempt_id)
+            r.detail += " | claim.current_attempt differs (may have advanced); read-only visibility.";
+        }
+      else
+        {
+         r.detail += " | claim unreadable; fail-closed visibility.";
+        }
+      r.valid = true;
+      int idx = ArraySize(out); ArrayResize(out, idx + 1); out[idx] = r; returned++;
+     }
+   DatabaseFinalize(h);
+   error = "";
+   return returned;
+  }
+
+CExecutionLedger::ENUM_RETRY_APPROVE_RESULT CExecutionLedger::ApproveAndCreateRetry(
+    const string claim_id,
+    const string strategy_group_key,
+    const string logical_setup_key,
+    const string prior_attempt_id,
+    int expected_retry_sequence,
+    const RetryLocalContext &ctx,
+    const string evidence_reason,
+    ExecutionAttemptRecord &new_attempt,
+    string &out_action_id,
+    string &out_detail)
+  {
+   out_action_id = ""; out_detail = "";
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+     { out_detail="LEDGER_UNAVAILABLE"; return RETRY_APPROVE_DB_ERROR; }
+   if(claim_id=="" || strategy_group_key=="" || logical_setup_key=="" || prior_attempt_id=="")
+     { out_detail="MISSING_CANDIDATE_IDENTITY"; return RETRY_APPROVE_CANDIDATE_INVALID; }
+   if(expected_retry_sequence < 0)
+     { out_detail="INVALID_RETRY_SEQUENCE"; return RETRY_APPROVE_CANDIDATE_INVALID; }
+   if(ctx.action_source != "LOCAL_CHART_OBJECT_CLICK")
+     { out_detail="INVALID_ACTION_SOURCE"; return RETRY_APPROVE_NOT_AUTHORIZED; }
+   if(ctx.auth_model == "")
+      ((RetryLocalContext&)ctx).auth_model = "LOCAL_TERMINAL_SESSION_CONTEXT_ONLY";
+
+   string action_id = BuildRetryActionId(claim_id, prior_attempt_id, expected_retry_sequence);
+   out_action_id = action_id;
+
+   // Commit-unknown idempotency read-back (read-only).
+   {
+    string existing_outcome="", existing_new="";
+    if(GetRetryApprovalEventOutcome(action_id, existing_outcome, existing_new) && existing_outcome != "")
+      {
+       string vsql = "SELECT claim_id,prior_attempt_id,retry_sequence_before,new_attempt_id,strategy_group_key,logical_setup_key "
+                     "FROM retry_approval_events WHERE action_id='" + EscapeSQL(action_id) + "';";
+       int vh = DatabasePrepare(m_db_handle, vsql);
+       if(vh == INVALID_HANDLE) { out_detail="ACTION_READBACK_PREPARE_FAILED"; return RETRY_APPROVE_COMMIT_OUTCOME_UNKNOWN; }
+       bool match=false;
+       if(DatabaseRead(vh))
+         {
+          string e_claim=DatabaseColumnString(vh,0), e_prior=DatabaseColumnString(vh,1);
+          int e_seq=(int)DatabaseColumnLong2(vh,2);
+          string e_new=DatabaseColumnString(vh,3), e_g=DatabaseColumnString(vh,4), e_lsk=DatabaseColumnString(vh,5);
+          match = (e_claim==claim_id && e_prior==prior_attempt_id && e_seq==expected_retry_sequence && e_g==strategy_group_key && e_lsk==logical_setup_key);
+          if(match) existing_new = e_new;
+         }
+       DatabaseFinalize(vh);
+       if(!match) { out_detail="ACTION_ID_COLLISION_INCONSISTENT_FIELDS"; return RETRY_APPROVE_CANDIDATE_INVALID; }
+       if(existing_new != "")
+         {
+          ExecutionAttemptRecord committed_att;
+          int cstate=-1; string ccur=""; int cseq=-1;
+          bool att_ok = GetAttempt(existing_new, committed_att);
+          bool claim_ok = GetClaimById(claim_id,strategy_group_key,logical_setup_key,cstate,ccur,cseq);
+          if(att_ok && claim_ok && ccur==existing_new && cseq==expected_retry_sequence+1 && committed_att.state==EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED)
+            { new_attempt = committed_att; out_detail="ALREADY_COMMITTED action_id="+action_id+" new_attempt="+existing_new; return RETRY_APPROVE_ALREADY_CONSUMED; }
+         }
+       out_detail="ACTION_EXISTS_BUT_COMMIT_OUTCOME_UNVERIFIED action_id="+action_id;
+       return RETRY_APPROVE_COMMIT_OUTCOME_UNKNOWN;
+      }
+   }
+
    if(!DatabaseTransactionBegin(m_db_handle))
-      return false;
-   string sql = "UPDATE setup_claims SET claim_state=" + IntegerToString((int)SETUP_CLAIM_ACTIVE) +
-                ", current_attempt_id='" + EscapeSQL(new_attempt.attempt_id) + "'," +
-                " retry_sequence=" + IntegerToString(retry_seq + 1) + "," +
-                " updated_at=" + IntegerToString((long)TimeCurrent()) + " " +
-                "WHERE claim_id='" + EscapeSQL(claim_id) + "' AND claim_state=" +
-                IntegerToString((int)SETUP_CLAIM_RETRY_AUTHORIZED) + ";";
-   if(!ExecuteSQL(sql))
-     {
-      DatabaseTransactionRollback(m_db_handle);
-      return false;
-     }
+     { out_detail="BEGIN_TX_FAILED"; return RETRY_APPROVE_DB_ERROR; }
+
+   // Reload exact claim and attempt inside tx.
+   string check_sql = "SELECT claim_state,current_attempt_id,retry_sequence,strategy_group_key,logical_setup_key "
+                      "FROM setup_claims WHERE claim_id='" + EscapeSQL(claim_id) +
+                      "' AND strategy_group_key='" + EscapeSQL(strategy_group_key) +
+                      "' AND logical_setup_key='" + EscapeSQL(logical_setup_key) + "';";
+   int ch = DatabasePrepare(m_db_handle, check_sql);
+   if(ch == INVALID_HANDLE) { DatabaseTransactionRollback(m_db_handle); out_detail="CLAIM_PREPARE_FAILED"; return RETRY_APPROVE_DB_ERROR; }
+   int claim_state=-1, retry_seq=-1; string current_attempt="", db_g="", db_lsk=""; bool claim_found=false;
+   if(DatabaseRead(ch)) { DatabaseColumnInteger(ch,0,claim_state); DatabaseColumnText(ch,1,current_attempt); DatabaseColumnInteger(ch,2,retry_seq); DatabaseColumnText(ch,3,db_g); DatabaseColumnText(ch,4,db_lsk); claim_found=true; }
+   DatabaseFinalize(ch);
+   if(!claim_found) { DatabaseTransactionRollback(m_db_handle); out_detail="CLAIM_NOT_FOUND"; return RETRY_APPROVE_CANDIDATE_INVALID; }
+   if(claim_state != (int)SETUP_CLAIM_ACTIVE) { DatabaseTransactionRollback(m_db_handle); out_detail="CLAIM_NOT_ACTIVE"; return RETRY_APPROVE_CANDIDATE_INVALID; }
+   if(current_attempt != prior_attempt_id) { DatabaseTransactionRollback(m_db_handle); out_detail="CURRENT_ATTEMPT_CHANGED"; return RETRY_APPROVE_CANDIDATE_INVALID; }
+   if(retry_seq != expected_retry_sequence) { DatabaseTransactionRollback(m_db_handle); out_detail="RETRY_SEQUENCE_CHANGED"; return RETRY_APPROVE_CANDIDATE_INVALID; }
+   if(db_g != strategy_group_key || db_lsk != logical_setup_key) { DatabaseTransactionRollback(m_db_handle); out_detail="CLAIM_BINDING_MISMATCH"; return RETRY_APPROVE_CANDIDATE_INVALID; }
+
+   ExecutionAttemptRecord prior;
+   if(!GetAttempt(prior_attempt_id, prior)) { DatabaseTransactionRollback(m_db_handle); out_detail="PRIOR_ATTEMPT_NOT_FOUND"; return RETRY_APPROVE_CANDIDATE_INVALID; }
+   string why_not="";
+   if(!IsRetryEligibleFinalFailure(prior, why_not)) { DatabaseTransactionRollback(m_db_handle); out_detail="EVIDENCE_GATE_FAILED:"+why_not; return RETRY_APPROVE_CANDIDATE_INVALID; }
+
+   // Inspect existing approval event inside tx.
+   {
+    string esql = "SELECT claim_id,prior_attempt_id,retry_sequence_before,new_attempt_id FROM retry_approval_events WHERE action_id='" + EscapeSQL(action_id) + "';";
+    int eh = DatabasePrepare(m_db_handle, esql);
+    if(eh == INVALID_HANDLE) { DatabaseTransactionRollback(m_db_handle); out_detail="APPROVAL_LOOKUP_FAILED"; return RETRY_APPROVE_DB_ERROR; }
+    if(DatabaseRead(eh))
+      {
+       string e_claim=DatabaseColumnString(eh,0), e_prior=DatabaseColumnString(eh,1), e_new=DatabaseColumnString(eh,3);
+       int e_seq=(int)DatabaseColumnLong2(eh,2); DatabaseFinalize(eh);
+       bool same = (e_claim==claim_id && e_prior==prior_attempt_id && e_seq==expected_retry_sequence);
+       DatabaseTransactionRollback(m_db_handle);
+       if(!same) { out_detail="ACTION_ID_INCONSISTENT_EXISTING"; return RETRY_APPROVE_CANDIDATE_INVALID; }
+       out_detail="ALREADY_CONSUMED_IN_TX action_id="+action_id+" new_attempt="+e_new;
+       return RETRY_APPROVE_ALREADY_CONSUMED;
+      }
+    DatabaseFinalize(eh);
+   }
+
+   // Create distinct new attempt intent in same tx (no broker call).
+   if(new_attempt.attempt_id == "") new_attempt.attempt_id = GenerateAttemptId();
+   if(new_attempt.attempt_id == prior_attempt_id) { DatabaseTransactionRollback(m_db_handle); out_detail="NEW_ATTEMPT_NOT_DISTINCT"; return RETRY_APPROVE_CANDIDATE_INVALID; }
+   if(new_attempt.setup_id == "") new_attempt.setup_id = prior.setup_id;
+   if(new_attempt.symbol == "") new_attempt.symbol = prior.symbol;
+   if(new_attempt.magic == 0) new_attempt.magic = prior.magic;
+   string txerr="";
+   if(!CreateIntentInTx(new_attempt, txerr)) { DatabaseTransactionRollback(m_db_handle); out_detail="CREATE_INTENT_IN_TX_FAILED:"+txerr; return RETRY_APPROVE_DB_ERROR; }
+
+   // Conditional claim advance with affected==1.
+   string upd = "UPDATE setup_claims SET claim_state=" + IntegerToString((int)SETUP_CLAIM_ACTIVE) +
+                ", current_attempt_id='" + EscapeSQL(new_attempt.attempt_id) + "'" +
+                ", retry_sequence=" + IntegerToString(retry_seq + 1) +
+                ", updated_at=" + IntegerToString((long)TimeCurrent()) +
+                ", last_reason='E2.6_RETRY_APPROVED_ATOMIC action=" + EscapeSQL(action_id) +
+                " prior=" + EscapeSQL(prior_attempt_id) + " new=" + EscapeSQL(new_attempt.attempt_id) + "' " +
+                "WHERE claim_id='" + EscapeSQL(claim_id) +
+                "' AND claim_state=" + IntegerToString((int)SETUP_CLAIM_ACTIVE) +
+                " AND current_attempt_id='" + EscapeSQL(prior_attempt_id) +
+                "' AND retry_sequence=" + IntegerToString(retry_seq) +
+                " AND strategy_group_key='" + EscapeSQL(strategy_group_key) +
+                "' AND logical_setup_key='" + EscapeSQL(logical_setup_key) + "';";
+   if(!ExecuteSQL(upd)) { DatabaseTransactionRollback(m_db_handle); out_detail="CLAIM_UPDATE_FAILED"; return RETRY_APPROVE_DB_ERROR; }
+   bool ok=false;
+   if(!AffectedRowsIsOne(ok) || !ok) { DatabaseTransactionRollback(m_db_handle); out_detail="CLAIM_UPDATE_AFFECTED_ROWS!=1"; return RETRY_APPROVE_CANDIDATE_INVALID; }
+
+   // Durable single-use approval event (audit/idempotency), same tx.
+   datetime ts = (ctx.local_action_time>0 ? ctx.local_action_time : TimeCurrent());
+   string ev_reason = evidence_reason; if(StringLen(ev_reason)>240) ev_reason = StringSubstr(ev_reason,0,240);
+   string b_reason = ctx.bounded_reason; if(StringLen(b_reason)>120) b_reason = StringSubstr(b_reason,0,120);
+   string ev_sql = "INSERT INTO retry_approval_events (action_id,claim_id,strategy_group_key,logical_setup_key,prior_attempt_id,new_attempt_id,"
+                    "retry_sequence_before,retry_sequence_after,approval_timestamp,action_source,auth_model,account_login,account_server,"
+                    "chart_id,chart_symbol,chart_period,ea_program,terminal_build,evidence_state,evidence_failure_class,evidence_retcode,"
+                    "evidence_reason,outcome,schema_version) VALUES ('" +
+                    EscapeSQL(action_id) + "','" + EscapeSQL(claim_id) + "','" + EscapeSQL(strategy_group_key) + "','" +
+                    EscapeSQL(logical_setup_key) + "','" + EscapeSQL(prior_attempt_id) + "','" + EscapeSQL(new_attempt.attempt_id) + "'," +
+                    IntegerToString(retry_seq) + "," + IntegerToString(retry_seq+1) + "," + IntegerToString((long)ts) + ",'" +
+                    EscapeSQL(ctx.action_source) + "','" + EscapeSQL(ctx.auth_model) + "','" + EscapeSQL(ctx.account_login) + "','" +
+                    EscapeSQL(ctx.account_server) + "'," + IntegerToString((long)ctx.chart_id) + ",'" + EscapeSQL(ctx.chart_symbol) + "'," +
+                    IntegerToString(ctx.chart_period) + ",'" + EscapeSQL(ctx.ea_program) + "'," + IntegerToString(ctx.terminal_build) + "," +
+                    IntegerToString((int)prior.state) + ",'" + EscapeSQL(prior.failure_class) + "'," + IntegerToString((int)prior.last_retcode) + ",'" +
+                    EscapeSQL(ev_reason) + ";ui=" + EscapeSQL(b_reason) + "','COMMITTED_NOT_SUBMITTED'," + IntegerToString(m_schema_version) + ");";
+   if(!ExecuteSQL(ev_sql)) { DatabaseTransactionRollback(m_db_handle); out_detail="INSERT_APPROVAL_EVENT_FAILED"; return RETRY_APPROVE_DB_ERROR; }
+
+   if(!LogStateTransitionInTx(prior_attempt_id, EXEC_STATE_FINAL_FAILURE, EXEC_STATE_FINAL_FAILURE,
+                              "E2.6_RETRY_APPROVED action="+action_id+" new="+new_attempt.attempt_id+" src="+ctx.action_source, prior.last_retcode))
+     { DatabaseTransactionRollback(m_db_handle); out_detail="HISTORY_PRIOR_FAILED"; return RETRY_APPROVE_DB_ERROR; }
+
    if(!DatabaseTransactionCommit(m_db_handle))
-     {
-      DatabaseTransactionRollback(m_db_handle);
-      return false;
-     }
-   return true;
+     { DatabaseTransactionRollback(m_db_handle); out_detail="COMMIT_FAILED_OR_UNCERTAIN"; return RETRY_APPROVE_COMMIT_OUTCOME_UNKNOWN; }
+   out_detail="COMMITTED action_id="+action_id+" new_attempt="+new_attempt.attempt_id+"; broker not called; revalidate before existing submission protocol";
+   return RETRY_APPROVE_COMMITTED;
+  }
+
+//+------------------------------------------------------------------+
+//| Deprecated split wrappers: fail-closed (no stranded RETRY_AUTH).  |
+//+------------------------------------------------------------------+
+bool CExecutionLedger::RetryAuthorize(const string claim_id,
+                                     const string strategy_group_key,
+                                     const string logical_setup_key,
+                                     const string attempt_id,
+                                     int expected_retry_sequence,
+                                     const string operator_approval_ref,
+                                     const string reason)
+  {
+   (void)claim_id; (void)strategy_group_key; (void)logical_setup_key; (void)attempt_id;
+   (void)expected_retry_sequence; (void)operator_approval_ref; (void)reason;
+   return false;
+  }
+
+bool CExecutionLedger::RetryCreate(const string claim_id,
+                                  const string strategy_group_key,
+                                  const string logical_setup_key,
+                                  const string expected_prior_attempt_id,
+                                  int expected_retry_sequence_after_authorize,
+                                  ExecutionAttemptRecord &new_attempt)
+  {
+   (void)claim_id; (void)strategy_group_key; (void)logical_setup_key; (void)expected_prior_attempt_id;
+   (void)expected_retry_sequence_after_authorize; (void)new_attempt;
+   return false;
   }
 
 bool CExecutionLedger::ResolveClaim(const string claim_id, const string attempt_id,
@@ -1600,6 +2660,255 @@ bool CExecutionLedger::ResolveClaim(const string claim_id, const string attempt_
       return false;
      }
    return true;
+  }
+
+//+------------------------------------------------------------------+
+//| RS-01: GetSetupClaim                                              |
+//+------------------------------------------------------------------+
+bool CExecutionLedger::GetSetupClaim(const string strategy_group_key,
+                                    const string logical_setup_key,
+                                    string &claim_id,
+                                    int &claim_state,
+                                    string &current_attempt_id)
+  {
+   claim_id = "";
+   claim_state = -1;
+   current_attempt_id = "";
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+      return false;
+   if(strategy_group_key == "" || logical_setup_key == "")
+      return false;
+   string sql = "SELECT claim_id, claim_state, current_attempt_id FROM setup_claims WHERE strategy_group_key='" +
+                EscapeSQL(strategy_group_key) + "' AND logical_setup_key='" + EscapeSQL(logical_setup_key) + "';";
+   int handle = DatabasePrepare(m_db_handle, sql);
+   if(handle == INVALID_HANDLE)
+      return false;
+   bool found = false;
+   if(DatabaseRead(handle))
+     {
+      claim_id = DatabaseColumnString(handle, 0);
+      claim_state = (int)DatabaseColumnLong2(handle, 1);
+      current_attempt_id = DatabaseColumnString(handle, 2);
+      found = true;
+     }
+   DatabaseFinalize(handle);
+   return found;
+  }
+
+//+------------------------------------------------------------------+
+//| RS-01: CreateSetupClaim                                           |
+//| Acquires durable logical-setup claim bound to attempt_id WITHOUT  |
+//| creating an execution intent. The caller must create the intent   |
+//| separately only on CLAIM_CREATED. Fail-closed on any error,       |
+//| duplicate, identity collision, or DB unavailability.              |
+//|                                                                   |
+//| Claim-only crash state (claim exists, no intent row):            |
+//| - Same logical setup cannot acquire a second claim (UNIQUE +     |
+//|   duplicate check) => no second CreateIntent/broker submission.   |
+//| - Recovery must quarantine/report via attempt/claim visibility;   |
+//|   it must not auto-create intent or resubmit.                     |
+//|                                                                   |
+//| Not atomic with CreateIntent using current APIs (separate         |
+//| transactions). This is the smallest safe correction without       |
+//| unsafe nested-transaction refactor or schema rewrite.             |
+//+------------------------------------------------------------------+
+CExecutionLedger::ENUM_CLAIM_RESULT CExecutionLedger::CreateSetupClaim(
+    const string strategy_group_key,
+    const string logical_setup_key,
+    const string canonical_identity,
+    int serialization_version,
+    const string attempt_id)
+  {
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+      return CLAIM_ERROR;
+   if(strategy_group_key == "" || logical_setup_key == "" || canonical_identity == "" || attempt_id == "")
+      return CLAIM_ERROR;
+   // Check existing claim (durable duplicate prevention across restarts)
+   string existing_id = "", existing_attempt = "";
+   int existing_state = -1;
+   // Read canonical_identity too
+   string check_sql = "SELECT claim_id, canonical_identity, claim_state, current_attempt_id FROM setup_claims WHERE strategy_group_key='" +
+                      EscapeSQL(strategy_group_key) + "' AND logical_setup_key='" + EscapeSQL(logical_setup_key) + "';";
+   int handle = DatabasePrepare(m_db_handle, check_sql);
+   if(handle == INVALID_HANDLE)
+      return CLAIM_ERROR;
+   bool exists = false;
+   string existing_canonical = "";
+   if(DatabaseRead(handle))
+     {
+      exists = true;
+      existing_id = DatabaseColumnString(handle, 0);
+      existing_canonical = DatabaseColumnString(handle, 1);
+      existing_state = (int)DatabaseColumnLong2(handle, 2);
+      existing_attempt = DatabaseColumnString(handle, 3);
+     }
+    DatabaseFinalize(handle);
+    if(exists)
+      {
+       // RS01-CANON-01: stable logical identity comparison; accept legacy v1 (ignore volatile setup_id).
+       // Unknown/unsafe formats and genuine stable-component differences fail closed as collision.
+       if(!CanonicalSameLogicalSetup(existing_canonical, canonical_identity))
+          return CLAIM_IDENTITY_COLLISION;
+       // Best-effort safe upgrade of legacy representation (transactional, optimistic). Failure does
+       // not weaken uniqueness, does not recycle LSK, and does not permit a second claim.
+       if(existing_canonical != canonical_identity)
+          UpgradeClaimCanonicalIfSafe(existing_id, existing_canonical, canonical_identity);
+       // Existing claim for same logical setup blocks a new submission attempt (fail-closed).
+       // Releasing/recycling is not performed here; it must follow approved claim/attempt semantics.
+       return CLAIM_ALREADY_EXISTS;
+      }
+   // Insert claim (ACTIVE) bound to this attempt_id. Attempt intent is created by caller on success.
+   if(!DatabaseTransactionBegin(m_db_handle))
+      return CLAIM_ERROR;
+   string claim_id = "CLAIM_" + IntegerToString((long)TimeCurrent()) + "_" + IntegerToString(MathRand());
+   datetime now = TimeCurrent();
+   string insert_claim = "INSERT INTO setup_claims (claim_id, strategy_group_key, logical_setup_key, canonical_identity, "
+                         "serialization_version, claim_state, current_attempt_id, retry_sequence, created_at, updated_at, last_reason) "
+                         "VALUES ('" + EscapeSQL(claim_id) + "','" + EscapeSQL(strategy_group_key) + "','" +
+                         EscapeSQL(logical_setup_key) + "','" + EscapeSQL(canonical_identity) + "'," +
+                         IntegerToString(serialization_version) + "," + IntegerToString((int)SETUP_CLAIM_ACTIVE) + ",'" +
+                         EscapeSQL(attempt_id) + "',0," + IntegerToString((long)now) + "," +
+                         IntegerToString((long)now) + ",'CREATED_NO_INTENT');";
+   if(!ExecuteSQL(insert_claim))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return CLAIM_ERROR;
+     }
+   if(!DatabaseTransactionCommit(m_db_handle))
+     {
+      DatabaseTransactionRollback(m_db_handle);
+      return CLAIM_ERROR;
+     }
+   return CLAIM_CREATED;
+  }
+
+//+------------------------------------------------------------------+
+//| RS-01 atomicity hardening: claim + initial intent in ONE tx.      |
+//| On any failure, neither durable claim nor intent is committed.    |
+//| No nested transactions. Uses existing tx-safe helpers.            |
+//| Existing claim-only records remain visible/blocked (fail-closed).  |
+//+------------------------------------------------------------------+
+CExecutionLedger::ENUM_CLAIM_RESULT CExecutionLedger::CreateSetupClaimAndIntent(
+    const string strategy_group_key,
+    const string logical_setup_key,
+    const string canonical_identity,
+    int serialization_version,
+    ExecutionAttemptRecord &attempt,
+    string &error_reason)
+  {
+   error_reason = "";
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+     { error_reason="LEDGER_UNAVAILABLE"; return CLAIM_ERROR; }
+   if(strategy_group_key == "" || logical_setup_key == "" || canonical_identity == "")
+     { error_reason="MISSING_IDENTITY"; return CLAIM_ERROR; }
+   if(attempt.attempt_id == "")
+      attempt.attempt_id = GenerateAttemptId();
+   // Check existing claim (read-only precheck; final authority is tx + UNIQUE constraint behavior)
+   string existing_id = "", existing_canonical = "";
+   string check_sql = "SELECT claim_id, canonical_identity FROM setup_claims WHERE strategy_group_key='" +
+                      EscapeSQL(strategy_group_key) + "' AND logical_setup_key='" + EscapeSQL(logical_setup_key) + "';";
+   int handle = DatabasePrepare(m_db_handle, check_sql);
+   if(handle == INVALID_HANDLE) { error_reason="CLAIM_PRECHECK_PREPARE_FAILED"; return CLAIM_ERROR; }
+   bool exists = false;
+   if(DatabaseRead(handle))
+     { exists=true; existing_id=DatabaseColumnString(handle,0); existing_canonical=DatabaseColumnString(handle,1); }
+   DatabaseFinalize(handle);
+   if(exists)
+     {
+      if(!CanonicalSameLogicalSetup(existing_canonical, canonical_identity))
+         { error_reason="IDENTITY_COLLISION"; return CLAIM_IDENTITY_COLLISION; }
+      if(existing_canonical != canonical_identity)
+         UpgradeClaimCanonicalIfSafe(existing_id, existing_canonical, canonical_identity);
+      error_reason="CLAIM_ALREADY_EXISTS";
+      return CLAIM_ALREADY_EXISTS;
+     }
+   if(!DatabaseTransactionBegin(m_db_handle))
+     { error_reason="BEGIN_TX_FAILED"; return CLAIM_ERROR; }
+   // Insert claim bound to this attempt_id
+   string claim_id = "CLAIM_" + IntegerToString((long)TimeCurrent()) + "_" + IntegerToString(MathRand());
+   datetime now = TimeCurrent();
+   string insert_claim = "INSERT INTO setup_claims (claim_id, strategy_group_key, logical_setup_key, canonical_identity, "
+                         "serialization_version, claim_state, current_attempt_id, retry_sequence, created_at, updated_at, last_reason) "
+                         "VALUES ('" + EscapeSQL(claim_id) + "','" + EscapeSQL(strategy_group_key) + "','" +
+                         EscapeSQL(logical_setup_key) + "','" + EscapeSQL(canonical_identity) + "'," +
+                         IntegerToString(serialization_version) + "," + IntegerToString((int)SETUP_CLAIM_ACTIVE) + ",'" +
+                         EscapeSQL(attempt.attempt_id) + "',0," + IntegerToString((long)now) + "," +
+                         IntegerToString((long)now) + ",'CREATED_ATOMIC_WITH_INTENT');";
+   if(!ExecuteSQL(insert_claim))
+     { DatabaseTransactionRollback(m_db_handle); error_reason="INSERT_CLAIM_FAILED"; return CLAIM_ERROR; }
+   bool ok=false;
+   if(!AffectedRowsIsOne(ok) || !ok)
+     { DatabaseTransactionRollback(m_db_handle); error_reason="CLAIM_AFFECTED_ROWS!=1"; return CLAIM_ERROR; }
+   // Insert initial intent in SAME tx (no nested tx)
+   string txerr="";
+   // Ensure identity fields are present for audit/consistency
+   if(attempt.strategy_group_key == "") attempt.strategy_group_key = strategy_group_key;
+   if(attempt.logical_setup_key == "") attempt.logical_setup_key = logical_setup_key;
+   if(attempt.canonical_identity == "") attempt.canonical_identity = canonical_identity;
+   if(attempt.serialization_version == 0) attempt.serialization_version = serialization_version;
+   if(!CreateIntentInTx(attempt, txerr))
+     { DatabaseTransactionRollback(m_db_handle); error_reason="CREATE_INTENT_IN_TX_FAILED:"+txerr; return CLAIM_ERROR; }
+   if(!DatabaseTransactionCommit(m_db_handle))
+     { DatabaseTransactionRollback(m_db_handle); error_reason="COMMIT_FAILED_OR_UNCERTAIN"; return CLAIM_ERROR; }
+   return CLAIM_CREATED;
+  }
+
+//+------------------------------------------------------------------+
+//| RS01-CLAIMORPHAN-01: read-only claim observability               |
+//| Inspects setup_claims and distinguishes claim-only (no matching   |
+//| execution_attempt for current_attempt_id) from claim-with-intent. |
+//| Returns row count inspected (>=0), -1 on query/DB failure         |
+//| (fail-closed diagnostic). NEVER releases, resolves, recycles, or  |
+//| creates attempts. No credentials/tokens exposed.                  |
+//+------------------------------------------------------------------+
+int CExecutionLedger::InspectSetupClaims(string &out_report, int &out_orphan_count, int max_rows)
+  {
+   out_report = "";
+   out_orphan_count = 0;
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+      return -1;
+   if(max_rows < 1) max_rows = 1;
+   if(max_rows > 50) max_rows = 50;
+   // Read-only: list recent/active claims (ACTIVE first) with enough fields for operator triage.
+   string sql = "SELECT claim_id,strategy_group_key,logical_setup_key,canonical_identity,serialization_version,claim_state,current_attempt_id,created_at,last_reason "
+                "FROM setup_claims WHERE claim_state=" + IntegerToString((int)SETUP_CLAIM_ACTIVE) +
+                " ORDER BY created_at DESC LIMIT " + IntegerToString(max_rows) + ";";
+   int handle = DatabasePrepare(m_db_handle, sql);
+   if(handle == INVALID_HANDLE)
+      return -1;
+   int count = 0;
+   while(DatabaseRead(handle) && count < max_rows)
+     {
+      string claim_id = DatabaseColumnString(handle, 0);
+      string group    = DatabaseColumnString(handle, 1);
+      string lsk      = DatabaseColumnString(handle, 2);
+      string canon    = DatabaseColumnString(handle, 3);
+      int    ver      = (int)DatabaseColumnLong2(handle, 4);
+      int    state    = (int)DatabaseColumnLong2(handle, 5);
+      string cur_att  = DatabaseColumnString(handle, 6);
+      long   created  = DatabaseColumnLong2(handle, 7);
+      string reason   = DatabaseColumnString(handle, 8);
+      bool   has_attempt = false;
+      if(cur_att != "")
+        {
+         ExecutionAttemptRecord rec;
+         has_attempt = GetAttempt(cur_att, rec);
+        }
+      string canon_tag = (StringFind(canon, "v1|") == 0 ? "legacy_v1" : (StringFind(canon, "CAN2|") == 0 ? "v2" : "unknown"));
+      string kind = has_attempt ? "CLAIM_WITH_ATTEMPT" : "CLAIM_ONLY_ORPHAN";
+      if(!has_attempt) out_orphan_count++;
+      // Bounded, non-sensitive detail (no owner tokens/credentials). Truncate canonical display.
+      string canon_short = canon;
+      if(StringLen(canon_short) > 64) canon_short = StringSubstr(canon_short, 0, 64) + "...";
+      if(count > 0) out_report += " | ";
+      out_report += kind + "[id=" + claim_id + ",g=" + group + ",lsk=" + lsk + ",v=" + IntegerToString(ver) +
+                    ",canon=" + canon_tag + ",state=" + IntegerToString(state) + ",att=" + cur_att +
+                    ",has_attempt=" + (has_attempt?"1":"0") + ",created=" + IntegerToString((int)created) +
+                    ",reason=" + reason + "]";
+      count++;
+     }
+   DatabaseFinalize(handle);
+   return count;
   }
 
 // E2.4: Gateway Authority implementations (fail-closed)

@@ -1749,6 +1749,16 @@ public:
        m_last_signal_consumed=true;
       }
 
+   // E2.6 P1-C support: save/restore duplicate-suppression state for read-only binding probes.
+   // Probe must not mutate normal duplicate suppression; caller restores in same scope.
+   void              SaveDuplicateState(datetime &out_time, ENUM_SIGNAL_DIRECTION &out_dir, bool &out_consumed) const
+      { out_time=m_last_signal_time; out_dir=m_last_signal_direction; out_consumed=m_last_signal_consumed; }
+   void              RestoreDuplicateState(datetime in_time, ENUM_SIGNAL_DIRECTION in_dir, bool in_consumed)
+      { m_last_signal_time=in_time; m_last_signal_direction=in_dir; m_last_signal_consumed=in_consumed; }
+   // Stable binding key helper (same inputs as Evaluate/ComputeLogicalSetupKey).
+   string            BuildBindingKey(datetime setup_bar_time, ENUM_SIGNAL_DIRECTION direction) const
+      { return "LSK_BIND|" + IntegerToString((long)setup_bar_time) + "|" + IntegerToString((int)direction) + "|" + IntegerToString((int)m_setup_tf); }
+
    bool              IsPlanConsumed(const TradePlan& plan) const
      {
       return plan.consumed;

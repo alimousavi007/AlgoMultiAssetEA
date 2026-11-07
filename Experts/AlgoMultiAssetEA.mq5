@@ -33,7 +33,7 @@
 // Inputs — Reorganized into logical groups
 //==================================================================
 input group "01. General & Trading Mode"
-input(name="Trading Style")                ENUM_TRADING_STYLE 
+input(name="Trading Style")                ENUM_TRADING_STYLE
 InpTradingStyle=STYLE_DAY_TRADING;
 input(name="Strategy Group Key")            string InpStrategyGroupKey="ALGO_MULTI_ASSET_EA_DEFAULT";
 input(name="Execution Mode")               ENUM_TRADING_MODE  InpMode=MODE_SIGNAL_ONLY;
@@ -709,8 +709,6 @@ CSymbolRuntime g_runtime[256];
 #define SNAPREG_NOTIFY 1005
 #define SNAPREG_ACK    1006
 long   g_snapshot_sequence = 0;
-#define SNAPREG_NOTIFY 1005
-#define SNAPREG_ACK    1006
 enum ENUM_COORDINATOR_MODE { COORD_MODE_UNINITIALIZED, COORD_MODE_COORDINATOR, COORD_MODE_CHART_CONTEXT, COORD_MODE_UNAVAILABLE };
 ENUM_COORDINATOR_MODE g_coordinator_mode = COORD_MODE_UNINITIALIZED;
 string g_owner_instance_token = "";
@@ -1120,7 +1118,7 @@ if(struct_res != EVIDENCE_SUFFICIENT_NO_INVALIDATION)
       return;
      }
 
-    ExecutionRequest request;
+     ExecutionRequest request;
     request.intent =
        normalized_plan.direction==SIGNAL_LONG ?
        ORDER_INTENT_OPEN_LONG :
@@ -1137,6 +1135,51 @@ if(struct_res != EVIDENCE_SUFFICIENT_NO_INVALIDATION)
     request.comment="AlgoMultiAssetEA_Hybrid";
     request.signal_id=normalized_plan.setup_id;
     request.attempt_id = normalized_plan.setup_id + "_" + IntegerToString(TimeCurrent()) + "_" + IntegerToString((int)MathRand());
+
+    // RS-01/E2.6: acquire durable claim + initial intent in ONE transaction (no claim-without-intent window).
+    // On any failure, neither durable claim nor intent is committed. Legacy claim-only records remain fail-closed.
+    if(normalized_plan.logical_setup_key == "" || g_strategy_group_key == "")
+      {
+       g_logger.Event(LOG_ERROR, "EXECUTION", "SETUP_CLAIM_BLOCKED", request.symbol, "", "", request.signal_id,
+                      "REJECT", "CLAIM_IDENTITY", "Missing logical_setup_key or strategy_group_key - fail closed (no intent, no broker)");
+       runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+       return;
+      }
+    ExecutionAttemptRecord attempt_rec;
+    ZeroMemory(attempt_rec);
+    attempt_rec.attempt_id = request.attempt_id;
+    attempt_rec.setup_id = normalized_plan.setup_id;
+    attempt_rec.symbol = request.symbol;
+    attempt_rec.magic = request.magic;
+    attempt_rec.intent = request.intent;
+    attempt_rec.direction = request.direction;
+    attempt_rec.requested_volume = request.volume;
+    attempt_rec.entry_price = request.price;
+    attempt_rec.stop_loss = request.stop_loss;
+    attempt_rec.take_profit = request.take_profit;
+    // E2.6/RS identity fields for atomic claim+intent (restart-stable; not setup_id/attempt_id)
+    attempt_rec.strategy_group_key = g_strategy_group_key;
+    attempt_rec.logical_setup_key = normalized_plan.logical_setup_key;
+    attempt_rec.serialization_version = 2;
+    attempt_rec.canonical_identity = CExecutionLedger::BuildStableCanonicalIdentity(
+        g_strategy_group_key, normalized_plan.symbol, "DEFAULT_SETUP",
+        (int)normalized_plan.direction, normalized_plan.signal_time, (int)runtime.setup_tf, 2);
+    {
+     // RS01-CANON-01: stable canonical identity (v2). Legacy v1 claims recognized by ledger compatibility.
+     string claim_intent_err = "";
+     CExecutionLedger::ENUM_CLAIM_RESULT claim_res = g_execution_ledger.CreateSetupClaimAndIntent(
+         g_strategy_group_key, normalized_plan.logical_setup_key, attempt_rec.canonical_identity, 2, attempt_rec, claim_intent_err);
+     if(claim_res != CExecutionLedger::CLAIM_CREATED)
+       {
+        string cmsg = (claim_res == CExecutionLedger::CLAIM_ALREADY_EXISTS) ? "Durable claim already exists for logical setup (restart-safe duplicate prevention)" :
+                      (claim_res == CExecutionLedger::CLAIM_IDENTITY_COLLISION) ? "Claim identity collision for logical setup key (stable components differ or unsafe legacy)" :
+                      "Atomic claim+intent acquisition failed (DB/error) - fail closed, no partial commit";
+        g_logger.Event((claim_res == CExecutionLedger::CLAIM_ERROR ? LOG_ERROR : LOG_WARNING), "EXECUTION", "SETUP_CLAIM_BLOCKED", request.symbol, "", "", request.signal_id,
+                       "REJECT", "CLAIM_BLOCKED", cmsg + " lsk=" + normalized_plan.logical_setup_key + " err=" + claim_intent_err);
+        runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+        return;
+       }
+    }
 
     // Check ledger for blocking unresolved attempts
     string ledger_block = "";
@@ -1162,35 +1205,17 @@ if(struct_res != EVIDENCE_SUFFICIENT_NO_INVALIDATION)
        return;
       }
 
-    // Create intent in ledger
-    ExecutionAttemptRecord attempt_rec;
-    attempt_rec.attempt_id = request.attempt_id;
-    attempt_rec.setup_id = normalized_plan.setup_id;
-    attempt_rec.symbol = request.symbol;
-    attempt_rec.magic = request.magic;
-    attempt_rec.intent = request.intent;
-    attempt_rec.direction = request.direction;
-    attempt_rec.requested_volume = request.volume;
-    attempt_rec.entry_price = request.price;
-    attempt_rec.stop_loss = request.stop_loss;
-    attempt_rec.take_profit = request.take_profit;
-
-     if(!g_execution_ledger.CreateIntent(attempt_rec))
-       {
-        g_logger.Event(
-           LOG_ERROR, "EXECUTION", "INTENT_CREATE_FAILED",
-           request.symbol, "", "",
-           request.signal_id,
-           "FAIL", "LEDGER_ERROR", "Failed to create intent in ledger");
-        runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
-        return;
-       }
-
       // E2.6: Execution authorization boundary (must run before submission-bound state)
       if(g_coordinator_mode != COORD_MODE_COORDINATOR)
         {
          g_logger.Event(LOG_ERROR, "EXECUTION", "AUTHORIZATION_DENIED", request.symbol, "", "", request.signal_id, "FAIL", "AUTHORITY", "Not Coordinator - execution denied");
-         g_execution_ledger.ResolveAttempt(request.attempt_id, EXEC_STATE_ABORTED, "Authorization denied: not coordinator");
+         // F-E26-002: handle ResolveAttempt failure; do not claim durable ABORTED on ledger failure.
+         if(!g_execution_ledger.ResolveAttempt(request.attempt_id, EXEC_STATE_ABORTED, "Authorization denied: not coordinator"))
+           {
+            g_logger.Event(LOG_ERROR, "EXECUTION", "RESOLVE_ATTEMPT_FAILED", request.symbol, "", "", request.signal_id, "FAIL", "LEDGER_ERROR", "ResolveAttempt(ABORTED) failed after coordinator denial - fail closed, no submit");
+            string block_reason="";
+            g_execution_ledger.HasBlockingUnresolved(block_reason);
+           }
          runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
          return;
         }
@@ -1200,13 +1225,21 @@ if(struct_res != EVIDENCE_SUFFICIENT_NO_INVALIDATION)
        if(!g_execution_ledger.ValidateAuthority(authority_key, g_owner_instance_token, g_authority_epoch))
          {
           g_logger.Event(LOG_ERROR, "EXECUTION", "AUTHORIZATION_DENIED", request.symbol, "", "", request.signal_id, "FAIL", "AUTHORITY", "Authority validation failed - execution denied");
-          g_execution_ledger.ResolveAttempt(request.attempt_id, EXEC_STATE_ABORTED, "Authorization denied: authority validation failed");
+          // F-E26-002
+          if(!g_execution_ledger.ResolveAttempt(request.attempt_id, EXEC_STATE_ABORTED, "Authorization denied: authority validation failed"))
+            {
+             g_logger.Event(LOG_ERROR, "EXECUTION", "RESOLVE_ATTEMPT_FAILED", request.symbol, "", "", request.signal_id, "FAIL", "LEDGER_ERROR", "ResolveAttempt(ABORTED) failed after authority denial - fail closed, no submit");
+             string block_reason="";
+             g_execution_ledger.HasBlockingUnresolved(block_reason);
+            }
           runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
           return;
          }
       }
 
-     // Mark submission bound (after all validations passed)
+     // F-E26-001: bind durable intent (still non-ambiguous, no broker call), then CanSubmit, then enter
+     // SUBMISSION_MAY_HAVE_OCCURRED immediately adjacent to the broker invocation. No unrelated work
+     // between MarkSubmissionMayHaveOccurred and Execute.
      if(!g_execution_ledger.MarkSubmissionBound(request.attempt_id, "Pre-submit validation passed"))
        {
         g_logger.Event(
@@ -1214,66 +1247,132 @@ if(struct_res != EVIDENCE_SUFFICIENT_NO_INVALIDATION)
            request.symbol, "", "",
            request.signal_id,
            "FAIL", "LEDGER_ERROR", "Failed to mark submission bound");
+        // Intent remains durable non-submitted (or ledger unavailable); fail closed.
+        if(!g_execution_ledger.ResolveAttempt(request.attempt_id, EXEC_STATE_ABORTED, "Submission binding failed - non-submission"))
+          {
+           g_logger.Event(LOG_ERROR, "EXECUTION", "RESOLVE_ATTEMPT_FAILED", request.symbol, "", "", request.signal_id, "FAIL", "LEDGER_ERROR", "ResolveAttempt(ABORTED) failed after binding failure - fail closed, no submit");
+           string block_reason="";
+           g_execution_ledger.HasBlockingUnresolved(block_reason);
+          }
         runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
         return;
        }
      string submit_reason = "";
-    if(!g_execution_ledger.CanSubmit(request.attempt_id, submit_reason))
-      {
-       g_logger.Event(
-          LOG_ERROR, "EXECUTION", "SUBMIT_NOT_ALLOWED",
-          request.symbol, "", "",
-          request.signal_id,
-          "FAIL", "LEDGER_ERROR", submit_reason);
-       runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
-       return;
-      }
+     if(!g_execution_ledger.CanSubmit(request.attempt_id, submit_reason))
+       {
+        g_logger.Event(
+           LOG_ERROR, "EXECUTION", "SUBMIT_NOT_ALLOWED",
+           request.symbol, "", "",
+           request.signal_id,
+           "FAIL", "LEDGER_ERROR", submit_reason);
+        // Bound intent was never sent to broker in this flow; resolve as terminal non-submission.
+        if(!g_execution_ledger.ResolveAttempt(request.attempt_id, EXEC_STATE_ABORTED, "Submit not allowed: " + submit_reason))
+          {
+           g_logger.Event(LOG_ERROR, "EXECUTION", "RESOLVE_ATTEMPT_FAILED", request.symbol, "", "", request.signal_id, "FAIL", "LEDGER_ERROR", "ResolveAttempt(ABORTED) failed after submit gate - fail closed, no submit");
+           string block_reason="";
+           g_execution_ledger.HasBlockingUnresolved(block_reason);
+          }
+        runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+        return;
+       }
 
-    g_logger.Event(
-       LOG_INFO, "EXECUTION", "EXECUTION_SUBMITTED",
-       request.symbol, "", "",
-       request.signal_id,
-       "SUBMIT", "EXECUTION_READY", "Order execution request ready",
-       0, 0,
-       request.volume,
-       request.stop_loss,
-       request.take_profit);
+     g_logger.Event(
+        LOG_INFO, "EXECUTION", "EXECUTION_SUBMITTED",
+        request.symbol, "", "",
+        request.signal_id,
+        "SUBMIT", "EXECUTION_READY", "Order execution request ready",
+        0, 0,
+        request.volume,
+        request.stop_loss,
+        request.take_profit);
 
-    ExecutionResult result;
-    bool execution_ok = g_executor.Execute(request, result);
-     g_logger.Trade(result);
+     // Final durable transition immediately before broker API. If this fails, do not call broker.
+     if(!g_execution_ledger.MarkSubmissionMayHaveOccurred(request.attempt_id, "Broker invocation boundary - submission may have occurred"))
+       {
+        g_logger.Event(LOG_ERROR, "EXECUTION", "SUBMISSION_MARK_FAILED", request.symbol, "", "", request.signal_id, "FAIL", "LEDGER_ERROR", "Could not durably mark submission-may-have-occurred; broker call aborted (fail closed)");
+        // State is still bound non-submitted; resolve terminally without broker call.
+        if(!g_execution_ledger.ResolveAttempt(request.attempt_id, EXEC_STATE_ABORTED, "Pre-broker ambiguity mark failed - no broker invocation"))
+          {
+           g_logger.Event(LOG_ERROR, "EXECUTION", "RESOLVE_ATTEMPT_FAILED", request.symbol, "", "", request.signal_id, "FAIL", "LEDGER_ERROR", "ResolveAttempt(ABORTED) failed after submission-mark failure");
+           string block_reason="";
+           g_execution_ledger.HasBlockingUnresolved(block_reason);
+          }
+        runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+        return;
+       }
 
-    {
-       ENUM_EXEC_ATTEMPT_STATE st = EXEC_STATE_NONE;
-       if(g_execution_ledger.GetAttemptState(request.attempt_id, st))
-         {
-          if(st == EXEC_STATE_SUBMISSION_MAY_HAVE_OCCURRED)
-             g_execution_ledger.MarkReconciliationRequired(request.attempt_id, "Submission state observed after API attempt - reconciliation required");
-          else if(st == EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED)
-             {
-              // Attempt was never bound for submission in this flow; do not auto-submit
+     ExecutionResult result;
+     bool execution_ok = g_executor.Execute(request, result);
+      g_logger.Trade(result);
+
+     // F-E26-003: confirmed pre-broker authorization denial by executor (no broker API invoked)
+     // is a terminal non-submission outcome, not ambiguous submission/reconciliation.
+     if(!result.success && result.failure_class == "AUTHORIZATION_DENIED" && !result.reconciliation_required)
+       {
+        if(!g_execution_ledger.ResolveAttempt(request.attempt_id, EXEC_STATE_ABORTED, "Executor authorization denied - confirmed no broker invocation"))
+          {
+           g_logger.Event(LOG_ERROR, "EXECUTION", "RESOLVE_ATTEMPT_FAILED", request.symbol, "", "", request.signal_id, "FAIL", "LEDGER_ERROR", "ResolveAttempt(ABORTED) failed for confirmed non-submission denial; marking reconciliation required");
+           g_execution_ledger.MarkReconciliationRequired(request.attempt_id, "ResolveAttempt failed after confirmed executor auth denial - requires manual reconciliation");
+          }
+        runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+        return;
+       }
+
+     // Record result in ledger after API call/observation (authoritative state transition)
+     bool result_recorded = g_execution_ledger.RecordResult(request.attempt_id, result, "Executor result");
+     if(!result_recorded)
+       {
+        g_logger.Event(LOG_ERROR, "EXECUTION", "RECORD_RESULT_FAILED", request.symbol, "", "", request.signal_id, "FAIL", "LEDGER_ERROR",
+                       "RecordResult failed after broker invocation/result observation; forcing reconciliation (no retry, no FINAL_FAILURE fabrication)");
+        // Never fabricate FINAL_FAILURE. Broker may have been invoked; force safe reconciliation path.
+        bool recon_ok = g_execution_ledger.MarkReconciliationRequired(request.attempt_id, "RecordResult write failed after execution result - reconciliation required (no retry)");
+        if(!recon_ok)
+          {
+           ENUM_EXEC_ATTEMPT_STATE st = EXEC_STATE_NONE;
+           bool st_ok = g_execution_ledger.GetAttemptState(request.attempt_id, st);
+           bool blocked = false; string block_reason="";
+           if(st_ok)
+              blocked = (st==EXEC_STATE_SUBMISSION_MAY_HAVE_OCCURRED || st==EXEC_STATE_RECONCILIATION_REQUIRED || st==EXEC_STATE_PARTIAL_FILL || st==EXEC_STATE_SUBMITTED || st==EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED);
+           else
+              blocked = g_execution_ledger.HasBlockingUnresolved(block_reason);
+           g_logger.Event(LOG_ERROR, "EXECUTION", "RECONCILIATION_MARK_FAILED_AFTER_RECORD_RESULT", request.symbol, "", "", request.attempt_id, "FAIL", "LEDGER_ERROR",
+                          "MarkReconciliationRequired failed after RecordResult failure; state_readable="+(st_ok?"1":"0")+" state="+IntegerToString((int)st)+" blocking="+(blocked?"1":"0")+" reason="+block_reason+" (no retry, no FINAL_FAILURE)");
+          }
+       }
+
+     {
+        ENUM_EXEC_ATTEMPT_STATE st = EXEC_STATE_NONE;
+        if(g_execution_ledger.GetAttemptState(request.attempt_id, st))
+          {
+           // Only flag reconciliation if the post-RecordResult state is still ambiguous/unsubmitted.
+           // (Avoids spurious RECONCILIATION_REQUIRED when result was terminally recorded.)
+           if(st == EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED)
               g_execution_ledger.MarkReconciliationRequired(request.attempt_id, "Attempt not bound before execution - reconciliation required");
+           else if(st == EXEC_STATE_SUBMISSION_MAY_HAVE_OCCURRED)
+              g_execution_ledger.MarkReconciliationRequired(request.attempt_id, "Submission state still ambiguous after recorded result - reconciliation required");
+          }
+        else if(!result_recorded)
+          {
+           // Ledger state unreadable after failed write: critical diagnostic; do not retry.
+           g_logger.Event(LOG_ERROR, "EXECUTION", "LEDGER_STATE_UNREADABLE", request.symbol, "", "", request.signal_id, "FAIL", "LEDGER_ERROR",
+                          "Attempt state unreadable after RecordResult failure - ledger trust degraded; further execution remains fail-closed by blocking-unresolved checks");
+          }
+     }
+
+ // An executor call consumes this setup even when it fails. Automatic
+ // retries need an explicit retry policy; do not resubmit the same setup
+ // on the next entry bar after an ambiguous broker/transport result.
+    runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+
+     if(!execution_ok || !result.success)
+         {
+          // If result is ambiguous, ensure reconciliation required
+          if(result.reconciliation_required || result.retcode == TRADE_RETCODE_TIMEOUT || result.retcode == TRADE_RETCODE_CONNECTION)
+             {
+              g_execution_ledger.MarkReconciliationRequired(request.attempt_id, "Ambiguous result after submit");
              }
+          return;
          }
-    }
-
-    // Record result in ledger after API call/observation
-    g_execution_ledger.RecordResult(request.attempt_id, result, "Executor result");
-
-// An executor call consumes this setup even when it fails. Automatic
-// retries need an explicit retry policy; do not resubmit the same setup
-// on the next entry bar after an ambiguous broker/transport result.
-   runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
-
-    if(!execution_ok || !result.success)
-        {
-         // If result is ambiguous, ensure reconciliation required
-         if(result.reconciliation_required || result.retcode == TRADE_RETCODE_TIMEOUT || result.retcode == TRADE_RETCODE_CONNECTION)
-            {
-             g_execution_ledger.MarkReconciliationRequired(request.attempt_id, "Ambiguous result after submit");
-            }
-         return;
-        }
     if(!g_state.UpdateAfterTrade(result))
        g_logger.Event(
           LOG_ERROR, "STATE", "STATE_RECONSTRUCT_FAILED",
@@ -1867,9 +1966,21 @@ ENUM_SYSTEM_INIT_STATUS InitializeSystemWhenReady()
          }
        // Attempt reconciliation for unresolved
        g_execution_ledger.ReconcileUnresolved(20);
+       }
+      // RS01-CLAIMORPHAN-01: bounded read-only claim observability (no auto-release/retry).
+      {
+       string claim_diag=""; int orphan_claims=0;
+       int claim_rows = g_execution_ledger.InspectSetupClaims(claim_diag, orphan_claims, 20);
+       if(claim_rows < 0)
+          g_logger.Event(LOG_WARNING, "SYSTEM", "CLAIM_DIAG_FAILED", _Symbol, "", "", "", "WARNING", "CLAIM_DIAG", "Claim inspection query failed - fail closed (no auto-release)");
+       else if(orphan_claims > 0)
+          g_logger.Event(LOG_WARNING, "SYSTEM", "CLAIM_ORPHAN_DETECTED", _Symbol, "", "", "", "WARNING", "CLAIM_DIAG",
+                         "orphan_claims=" + IntegerToString(orphan_claims) + " rows=" + IntegerToString(claim_rows) + " detail=" + claim_diag);
+       else if(claim_rows > 0)
+          g_logger.Event(LOG_INFO, "SYSTEM", "CLAIM_DIAG", _Symbol, "", "", "", "OK", "CLAIM_DIAG", "active_claims_checked=" + IntegerToString(claim_rows));
       }
 
-   g_position_manager.SetBreakEven(
+    g_position_manager.SetBreakEven(
       InpBreakEven,
       InpBreakEvenTriggerR,
       InpBreakEvenOffsetPoints);
@@ -2232,12 +2343,28 @@ void OnTimer()
            g_pending_nonce = "";
           }
        }
-       static datetime last_reconcile = 0;
-       if(TimeCurrent() - last_reconcile > 60)
-         {
-        g_execution_ledger.ReconcileUnresolved(5);
-        last_reconcile = TimeCurrent();
-         }
+        static datetime last_reconcile = 0;
+        if(TimeCurrent() - last_reconcile > 60)
+          {
+          g_execution_ledger.ReconcileUnresolved(5);
+         last_reconcile = TimeCurrent();
+          }
+        // E2.6: process explicit chart-confirmed retry handoff only in timer path (transient; no auto-retry on restart).
+        // Handoff remains fail-closed before broker submission until full fresh-plan/LSK+gate revalidation binding is implemented.
+        ProcessRetryPendingHandoff();
+        // RS01-CLAIMORPHAN-01: bounded periodic claim-only observability (read-only, no auto-release).
+        static datetime last_claim_diag = 0;
+        if(TimeCurrent() - last_claim_diag > 300)
+          {
+           string claim_diag=""; int orphan_claims=0;
+           int claim_rows = g_execution_ledger.InspectSetupClaims(claim_diag, orphan_claims, 10);
+           if(claim_rows < 0)
+              g_logger.Event(LOG_WARNING, "SYSTEM", "CLAIM_DIAG_FAILED", _Symbol, "", "", "", "WARNING", "CLAIM_DIAG", "Claim inspection query failed - fail closed");
+           else if(orphan_claims > 0)
+              g_logger.Event(LOG_WARNING, "SYSTEM", "CLAIM_ORPHAN_DETECTED", _Symbol, "", "", "", "WARNING", "CLAIM_DIAG",
+                             "orphan_claims=" + IntegerToString(orphan_claims) + " rows=" + IntegerToString(claim_rows) + " detail=" + claim_diag);
+           last_claim_diag = TimeCurrent();
+          }
 
     bool risk_state_ready=RefreshTradingState();
 
@@ -2307,13 +2434,834 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
    }
 
 //==================================================================
-// OnDeinit
+// E2.6: Local chart approval (minimal, EA-owned). No broker calls.
+// Trust: LOCAL_TERMINAL_SESSION_CONTEXT_ONLY. No personal identity/auth.
+// Review/Confirm are explicit; Cancel has no ledger side effect.
+// Pending review is transient (in-memory) => no auto-retry on restart.
 //==================================================================
+#define E2E6_RETRY_OBJ_PREFIX "AlgoE2E6Retry_"
+enum ENUM_E2E6_RETRY_UI_STATE { E2E6_UI_HIDDEN=0, E2E6_UI_REVIEW, E2E6_UI_CONFIRM_READY, E2E6_UI_BLOCKED, E2E6_UI_COMMITTED, E2E6_UI_INTERRUPTED_VIEW };
+struct RetryReviewCandidate
+  {
+   bool   valid;
+   // immutable durable identity/binding snapshot (reloaded from ledger at Review and Confirm)
+   string claim_id;
+   string strategy_group_key;
+   string logical_setup_key;
+   string canonical_identity;
+   int    serialization_version;
+   string symbol;
+   int    direction;
+   string prior_attempt_id;
+   int    retry_sequence;
+   int    claim_state;
+   int    attempt_state;
+   string failure_class;
+   uint   retcode;
+   double requested_volume;
+   double executed_volume;
+   double remaining_volume;
+   ulong  broker_order_ticket;
+   ulong  broker_deal_ticket;
+   ulong  broker_position_ticket;
+   string evidence_reason;
+   string why_ineligible;
+   // local chart/session context snapshot (must remain unchanged at Confirm)
+   long   account_login;
+   string account_server;
+   long   chart_id;
+   string chart_symbol;
+   int    chart_period;
+   string config_fingerprint;
+   datetime reviewed_at;
+  };
+struct RetryPendingHandoff
+  {
+   bool   active;
+   string action_id;
+   string claim_id;
+   string strategy_group_key;
+   string logical_setup_key;
+   string prior_attempt_id;
+   string new_attempt_id;
+   int    expected_retry_sequence;
+   long   account_login;
+   string account_server;
+   string config_fingerprint;
+   datetime created_at;
+  };
+ENUM_E2E6_RETRY_UI_STATE g_retry_ui_state = E2E6_UI_HIDDEN;
+RetryReviewCandidate     g_retry_review;
+CExecutionLedger::RetryEligibleCandidate g_retry_candidates[];
+int                      g_retry_candidate_count = 0;
+int                      g_retry_candidate_index = -1;
+RetryPendingHandoff      g_retry_handoff;
+string g_retry_ui_status = "";
+string g_retry_ui_detail = "";
+string g_retry_btn_review  = E2E6_RETRY_OBJ_PREFIX + "REVIEW";
+string g_retry_btn_next    = E2E6_RETRY_OBJ_PREFIX + "NEXT";
+string g_retry_btn_confirm = E2E6_RETRY_OBJ_PREFIX + "CONFIRM";
+string g_retry_btn_cancel  = E2E6_RETRY_OBJ_PREFIX + "CANCEL";
+string g_retry_lbl_status  = E2E6_RETRY_OBJ_PREFIX + "STATUS";
+string g_retry_lbl_detail  = E2E6_RETRY_OBJ_PREFIX + "DETAIL";
+string g_retry_btn_inspect = E2E6_RETRY_OBJ_PREFIX + "INSPECT";
+CExecutionLedger::InterruptedRetryHandoff g_retry_interrupted[];
+int g_retry_interrupted_count = 0;
+
+void RetryUIClearCandidateList()
+  {
+   ArrayResize(g_retry_candidates,0);
+   g_retry_candidate_count=0;
+   g_retry_candidate_index=-1;
+  }
+
+void RetryUIInvalidate(const string reason="")
+  {
+   if(g_retry_ui_state == E2E6_UI_COMMITTED && g_retry_handoff.active)
+     { g_retry_ui_status = "COMMITTED_NOT_SUBMITTED_PENDING_REVALIDATION"; }
+   else
+     { g_retry_ui_state = E2E6_UI_HIDDEN; ZeroMemory(g_retry_review); g_retry_review.valid=false; RetryUIClearCandidateList(); }
+   if(reason!="") g_retry_ui_detail = reason;
+  }
+
+bool RetryUIEnsureButton(const string name,const string text,const int x,const int y,const int w,const int h,const color bg,const color fg)
+  {
+   long chart = ChartID();
+   if(ObjectFind(chart,name) < 0)
+     {
+      if(!ObjectCreate(chart,name,OBJ_BUTTON,0,0,0))
+         return false;
+     }
+   ObjectSetInteger(chart,name,OBJPROP_CORNER,CORNER_LEFT_LOWER);
+   ObjectSetInteger(chart,name,OBJPROP_XDISTANCE,x);
+   ObjectSetInteger(chart,name,OBJPROP_YDISTANCE,y);
+   ObjectSetInteger(chart,name,OBJPROP_XSIZE,w);
+   ObjectSetInteger(chart,name,OBJPROP_YSIZE,h);
+   ObjectSetString(chart,name,OBJPROP_TEXT,text);
+   ObjectSetString(chart,name,OBJPROP_FONT,"Arial");
+   ObjectSetInteger(chart,name,OBJPROP_FONTSIZE,8);
+   ObjectSetInteger(chart,name,OBJPROP_BGCOLOR,bg);
+   ObjectSetInteger(chart,name,OBJPROP_COLOR,fg);
+   ObjectSetInteger(chart,name,OBJPROP_BORDER_COLOR,clrDimGray);
+   ObjectSetInteger(chart,name,OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(chart,name,OBJPROP_HIDDEN,false);
+   ObjectSetInteger(chart,name,OBJPROP_ZORDER,30);
+   ObjectSetInteger(chart,name,OBJPROP_STATE,false);
+   return true;
+  }
+
+bool RetryUIEnsureLabel(const string name,const string text,const int x,const int y,const color fg)
+  {
+   long chart = ChartID();
+   if(ObjectFind(chart,name) < 0)
+     {
+      if(!ObjectCreate(chart,name,OBJ_LABEL,0,0,0))
+         return false;
+     }
+   ObjectSetInteger(chart,name,OBJPROP_CORNER,CORNER_LEFT_LOWER);
+   ObjectSetInteger(chart,name,OBJPROP_XDISTANCE,x);
+   ObjectSetInteger(chart,name,OBJPROP_YDISTANCE,y);
+   ObjectSetString(chart,name,OBJPROP_TEXT,text);
+   ObjectSetString(chart,name,OBJPROP_FONT,"Consolas");
+   ObjectSetInteger(chart,name,OBJPROP_FONTSIZE,8);
+   ObjectSetInteger(chart,name,OBJPROP_COLOR,fg);
+   ObjectSetInteger(chart,name,OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(chart,name,OBJPROP_HIDDEN,false);
+   ObjectSetInteger(chart,name,OBJPROP_ZORDER,30);
+   return true;
+  }
+
+void RetryUIDeleteObject(const string name)
+  {
+   long chart = ChartID();
+   if(ObjectFind(chart,name) >= 0)
+      ObjectDelete(chart,name);
+  }
+
+void RetryUIClear()
+  {
+   RetryUIDeleteObject(g_retry_btn_review);
+   RetryUIDeleteObject(g_retry_btn_next);
+   RetryUIDeleteObject(g_retry_btn_confirm);
+   RetryUIDeleteObject(g_retry_btn_cancel);
+   RetryUIDeleteObject(g_retry_btn_inspect);
+   RetryUIDeleteObject(g_retry_lbl_status);
+   RetryUIDeleteObject(g_retry_lbl_detail);
+   ArrayResize(g_retry_interrupted,0); g_retry_interrupted_count=0;
+  }
+
+bool RetryUIChartContextCurrent(const RetryReviewCandidate &c)
+  {
+   if(!c.valid) return false;
+   if(c.chart_id != ChartID()) return false;
+   if(c.account_login != AccountInfoInteger(ACCOUNT_LOGIN)) return false;
+   if(c.account_server != AccountInfoString(ACCOUNT_SERVER)) return false;
+   if(c.chart_symbol != ChartSymbol(0)) return false;
+   if(c.chart_period != (int)Period()) return false;
+   if(c.config_fingerprint != g_config_fingerprint) return false;
+   return true;
+  }
+
+bool RetryUIFillReviewFromLedgerCandidate(const CExecutionLedger::RetryEligibleCandidate &src, RetryReviewCandidate &out, string &diag)
+  {
+   diag=""; ZeroMemory(out); out.valid=false;
+   if(!src.valid) { diag="CANDIDATE_INVALID"; return false; }
+   out.claim_id=src.claim_id; out.strategy_group_key=src.strategy_group_key; out.logical_setup_key=src.logical_setup_key;
+   out.canonical_identity=src.canonical_identity; out.serialization_version=src.serialization_version;
+   out.symbol=src.symbol; out.direction=src.direction; out.prior_attempt_id=src.prior_attempt_id; out.retry_sequence=src.retry_sequence;
+   out.claim_state=src.claim_state; out.attempt_state=src.attempt_state; out.failure_class=src.failure_class; out.retcode=src.retcode;
+   out.requested_volume=src.requested_volume; out.executed_volume=src.executed_volume; out.remaining_volume=src.remaining_volume;
+   out.broker_order_ticket=src.broker_order_ticket; out.broker_deal_ticket=src.broker_deal_ticket; out.broker_position_ticket=src.broker_position_ticket;
+   out.evidence_reason=src.evidence_summary;
+   out.account_login=AccountInfoInteger(ACCOUNT_LOGIN); out.account_server=AccountInfoString(ACCOUNT_SERVER);
+   out.chart_id=ChartID(); out.chart_symbol=ChartSymbol(0); out.chart_period=(int)Period();
+   out.config_fingerprint=g_config_fingerprint; out.reviewed_at=TimeCurrent();
+   out.valid=true;
+   return RetryUIChartContextCurrent(out) ? true : (diag="CHART_CONTEXT_INVALID", out.valid=false, false);
+  }
+
+bool RetryUILoadCandidateList(string &diag)
+  {
+   diag=""; RetryUIClearCandidateList(); ZeroMemory(g_retry_review); g_retry_review.valid=false;
+   if(!g_execution_ledger.IsAvailable()) { diag="LEDGER_UNAVAILABLE"; return false; }
+   if(g_coordinator_mode != COORD_MODE_COORDINATOR) { diag="NOT_COORDINATOR"; return false; }
+   string err="";
+   int n = g_execution_ledger.GetRetryEligibleCandidates(g_retry_candidates, 10, err); // read-only, bounded, deterministic
+   if(n < 0) { diag = (err=="" ? "CANDIDATE_DISCOVERY_FAILED" : err); RetryUIClearCandidateList(); return false; }
+   g_retry_candidate_count = n;
+   if(n <= 0) { diag="NO_ELIGIBLE_CANDIDATES"; g_retry_candidate_index=-1; return false; }
+   g_retry_candidate_index = 0;
+   return true;
+  }
+
+bool RetryUISameCandidateSnapshot(const RetryReviewCandidate &a, const RetryReviewCandidate &b)
+  {
+   if(!a.valid || !b.valid) return false;
+   return (a.claim_id==b.claim_id && a.strategy_group_key==b.strategy_group_key && a.logical_setup_key==b.logical_setup_key &&
+           a.canonical_identity==b.canonical_identity && a.serialization_version==b.serialization_version &&
+           a.symbol==b.symbol && a.direction==b.direction && a.prior_attempt_id==b.prior_attempt_id && a.retry_sequence==b.retry_sequence &&
+           a.claim_state==b.claim_state && a.attempt_state==b.attempt_state && a.failure_class==b.failure_class && a.retcode==b.retcode &&
+           MathAbs(a.requested_volume-b.requested_volume)<=0.00000001 && MathAbs(a.executed_volume-b.executed_volume)<=0.00000001 &&
+           MathAbs(a.remaining_volume-b.remaining_volume)<=0.00000001 && a.broker_order_ticket==b.broker_order_ticket &&
+           a.broker_deal_ticket==b.broker_deal_ticket && a.broker_position_ticket==b.broker_position_ticket &&
+           a.account_login==b.account_login && a.account_server==b.account_server && a.chart_id==b.chart_id &&
+           a.chart_symbol==b.chart_symbol && a.chart_period==b.chart_period && a.config_fingerprint==b.config_fingerprint);
+  }
+
+bool RetryUIRefreshCandidate(RetryReviewCandidate &c, string &diag)
+  {
+   diag="";
+   if(!c.valid) { diag="NO_CANDIDATE"; return false; }
+   if(!RetryUIChartContextCurrent(c)) { diag="CHART_CONTEXT_CHANGED"; return false; }
+   if(!g_execution_ledger.IsAvailable()) { diag="LEDGER_UNAVAILABLE"; return false; }
+   // Read-only reload from durable ledger: find exact selected candidate in bounded eligible set.
+   CExecutionLedger::RetryEligibleCandidate list[]; ArrayResize(list,0); string err="";
+   int n = g_execution_ledger.GetRetryEligibleCandidates(list, 10, err);
+   if(n < 0) { diag = (err=="" ? "CANDIDATE_RELOAD_FAILED" : err); return false; }
+   for(int i=0;i<n;i++)
+     {
+      CExecutionLedger::RetryEligibleCandidate &x=list[i];
+      if(!x.valid) continue;
+      if(x.claim_id==c.claim_id && x.strategy_group_key==c.strategy_group_key && x.logical_setup_key==c.logical_setup_key &&
+         x.prior_attempt_id==c.prior_attempt_id && x.retry_sequence==c.retry_sequence)
+        {
+         RetryReviewCandidate fresh;
+         if(!RetryUIFillReviewFromLedgerCandidate(x, fresh, diag)) { c.why_ineligible=diag; return false; }
+         // preserve local context snapshot fields for comparison; fill helper sets current context.
+         fresh.account_login=c.account_login; fresh.account_server=c.account_server; fresh.chart_id=c.chart_id;
+         fresh.chart_symbol=c.chart_symbol; fresh.chart_period=c.chart_period; fresh.config_fingerprint=c.config_fingerprint;
+         if(!RetryUIChartContextCurrent(fresh)) { diag="CHART_CONTEXT_CHANGED"; return false; }
+         c = fresh; c.evidence_reason = x.evidence_summary; return true;
+        }
+     }
+   diag="CANDIDATE_NO_LONGER_ELIGIBLE_OR_CHANGED";
+   c.why_ineligible=diag;
+   return false;
+  }
+
+void RetryUIRender()
+  {
+   if(!InpDashboard) { RetryUIClear(); return; }
+   // EA-owned local controls only. Minimal bounded selection (Next cycles list). No broker calls.
+   int x=16, y_base=140, bw=62, bh=20, gap=6;
+   RetryUIEnsureLabel(g_retry_lbl_status, "E2.6 RETRY: " + g_retry_ui_status, x, y_base + bh*3 + gap*3 + 18, clrGold);
+   string detail = g_retry_ui_detail;
+   if(g_retry_review.valid)
+     {
+      detail = "cand[" + IntegerToString(g_retry_candidate_index+1) + "/" + IntegerToString(g_retry_candidate_count) + "] " +
+               g_retry_review.symbol + " dir=" + IntegerToString(g_retry_review.direction) +
+               " claim=" + g_retry_review.claim_id + " prior=" + g_retry_review.prior_attempt_id +
+               " seq=" + IntegerToString(g_retry_review.retry_sequence) + " class=" + g_retry_review.failure_class +
+               " ret=" + IntegerToString((int)g_retry_review.retcode) +
+               " ord=" + IntegerToString((long)g_retry_review.broker_order_ticket) +
+               " deal=" + IntegerToString((long)g_retry_review.broker_deal_ticket) +
+               " pos=" + IntegerToString((long)g_retry_review.broker_position_ticket) +
+               " ev=" + g_retry_review.evidence_reason + " | " + detail;
+     }
+   if(StringLen(detail)>160) detail = StringSubstr(detail,0,157)+"...";
+   RetryUIEnsureLabel(g_retry_lbl_detail, detail, x, y_base + bh*3 + gap*3 + 4, clrSilver);
+   RetryUIEnsureButton(g_retry_btn_review,  "Review",  x,                 y_base + bh + gap, bw, bh, clrDarkSlateGray, clrWhite);
+   RetryUIEnsureButton(g_retry_btn_next,    "Next",    x + bw + gap,      y_base + bh + gap, bw, bh, (g_retry_candidate_count>1?clrSteelBlue:clrDimGray), clrWhite);
+   bool can_confirm = (g_retry_ui_state == E2E6_UI_CONFIRM_READY && g_retry_review.valid);
+   RetryUIEnsureButton(g_retry_btn_confirm, "Confirm", x + (bw+gap)*2,   y_base + bh + gap, bw, bh, can_confirm?clrDarkGreen:clrDimGray, clrWhite);
+   RetryUIEnsureButton(g_retry_btn_cancel,  "Cancel",  x + (bw+gap)*3,   y_base + bh + gap, bw, bh, clrMaroon, clrWhite);
+   RetryUIEnsureButton(g_retry_btn_inspect, "Inspect", x,                 y_base,             bw, bh, clrTeal, clrWhite);
+   ChartRedraw(ChartID());
+  }
+
+void RetryUIEnsureObjects()
+  {
+   if(g_retry_ui_status=="") g_retry_ui_status="IDLE_NO_AUTO_RETRY";
+   RetryUIRender();
+  }
+
+void RetryUISelectCurrentCandidate(bool advance)
+  {
+   string diag="";
+   if(g_retry_candidate_count<=0 || ArraySize(g_retry_candidates)<=0)
+     { RetryUIInvalidate("NO_ELIGIBLE_CANDIDATES"); g_retry_ui_state=E2E6_UI_BLOCKED; g_retry_ui_status="REVIEW_NO_CANDIDATES"; g_retry_ui_detail=(diag==""?"No eligible durable FINAL_FAILURE candidate.":diag); RetryUIRender(); return; }
+   if(advance)
+      g_retry_candidate_index = (g_retry_candidate_index + 1) % g_retry_candidate_count;
+   if(g_retry_candidate_index < 0 || g_retry_candidate_index >= g_retry_candidate_count)
+      g_retry_candidate_index = 0;
+   RetryReviewCandidate sel;
+   if(!RetryUIFillReviewFromLedgerCandidate(g_retry_candidates[g_retry_candidate_index], sel, diag))
+     { RetryUIInvalidate(diag); g_retry_ui_state=E2E6_UI_BLOCKED; g_retry_ui_status="REVIEW_CANDIDATE_INVALID"; g_retry_ui_detail=diag; RetryUIRender(); return; }
+   // Reload selected exact candidate from durable ledger before confirmation-ready state.
+   if(!RetryUIRefreshCandidate(sel, diag))
+     { RetryUIInvalidate(diag); g_retry_ui_state=E2E6_UI_BLOCKED; g_retry_ui_status="REVIEW_RELOAD_FAILED"; g_retry_ui_detail=diag; RetryUIRender(); return; }
+   g_retry_review = sel;
+   g_retry_ui_state = E2E6_UI_CONFIRM_READY;
+   g_retry_ui_status = "REVIEW_READY_EXPLICIT_CONFIRM_REQUIRED";
+   g_retry_ui_detail = "Durable candidate loaded from ledger; verify all safety fields before Confirm. No broker call.";
+   RetryUIRender();
+  }
+
+void RetryUIHandleReviewClick()
+  {
+   if(g_retry_handoff.active)
+     { g_retry_ui_status="REVIEW_BLOCKED_HANDOFF_ACTIVE"; g_retry_ui_detail="Transient committed handoff active (fail-closed, no auto-submit)."; RetryUIRender(); return; }
+   RetryUIInvalidate("REVIEW_REQUESTED");
+   g_retry_ui_state = E2E6_UI_BLOCKED;
+   g_retry_ui_status = "REVIEW_LOADING";
+   string diag="";
+   if(!RetryUILoadCandidateList(diag))
+     {
+      g_retry_ui_status = "REVIEW_BLOCKED";
+      g_retry_ui_detail = "Candidate discovery fail-closed: " + diag + ". No DB/broker mutation.";
+      RetryUIRender();
+      return;
+     }
+   RetryUISelectCurrentCandidate(false);
+  }
+
+void RetryUIHandleCancelClick()
+  {
+   // Cancel must have no ledger side effect.
+   ZeroMemory(g_retry_review); g_retry_review.valid=false; RetryUIClearCandidateList();
+   if(g_retry_handoff.active)
+      g_retry_ui_detail = "Cancel UI only; committed-not-submitted handoff remains fail-closed (no auto-submit).";
+   else
+      g_retry_ui_detail = "Cancelled - no ledger side effect.";
+   g_retry_ui_state = E2E6_UI_HIDDEN;
+   g_retry_ui_status = "CANCELLED_NO_DB_MUTATION";
+   RetryUIRender();
+  }
+
+bool RetryUIBuildLocalContext(CExecutionLedger::RetryLocalContext &ctx)
+  {
+   ZeroMemory(ctx);
+   ctx.action_source = "LOCAL_CHART_OBJECT_CLICK";
+   ctx.auth_model = "LOCAL_TERMINAL_SESSION_CONTEXT_ONLY";
+   ctx.account_login = IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
+   ctx.account_server = AccountInfoString(ACCOUNT_SERVER);
+   ctx.chart_id = ChartID();
+   ctx.chart_symbol = ChartSymbol(0);
+   ctx.chart_period = (int)Period();
+   ctx.ea_program = MQLInfoString(MQL_PROGRAM_NAME);
+   ctx.terminal_build = (int)TerminalInfoInteger(TERMINAL_BUILD);
+   ctx.local_action_time = TimeCurrent();
+   ctx.bounded_reason = "LOCAL_CHART_CONFIRM";
+   return true;
+  }
+
+void RetryUIHandleConfirmClick()
+  {
+   // Double-click/repeated event protection and exact reviewed candidate required.
+   if(g_retry_ui_state != E2E6_UI_CONFIRM_READY || !g_retry_review.valid)
+     {
+      g_retry_ui_status = "CONFIRM_REJECTED";
+      g_retry_ui_detail = "No valid reviewed candidate; confirmation has no effect.";
+      RetryUIRender();
+      return;
+     }
+   RetryReviewCandidate reviewed_snapshot = g_retry_review; // immutable review snapshot
+   if(!RetryUIChartContextCurrent(reviewed_snapshot))
+     {
+      RetryUIInvalidate("CONTEXT_CHANGED_BEFORE_CONFIRM");
+      g_retry_ui_status = "INVALIDATED_CONTEXT_CHANGED";
+      RetryUIRender();
+      return;
+     }
+   string diag="";
+   if(!RetryUIRefreshCandidate(g_retry_review, diag))
+     {
+      RetryUIInvalidate(diag);
+      g_retry_ui_status = "INVALIDATED_BEFORE_CONFIRM";
+      g_retry_ui_detail = diag;
+      RetryUIRender();
+      return;
+     }
+   // Confirm reload must compare complete immutable snapshot; no arbitrary caller IDs accepted.
+   if(!RetryUISameCandidateSnapshot(reviewed_snapshot, g_retry_review))
+     {
+      RetryUIInvalidate("SNAPSHOT_CHANGED_AFTER_REVIEW");
+      g_retry_ui_state = E2E6_UI_BLOCKED;
+      g_retry_ui_status = "CONFIRM_BLOCKED_SNAPSHOT_CHANGED";
+      g_retry_ui_detail = "Durable candidate/evidence/context changed since Review; re-review required. No DB mutation.";
+      RetryUIRender();
+      return;
+     }
+   if(reviewed_snapshot.claim_id=="" || reviewed_snapshot.strategy_group_key=="" || reviewed_snapshot.logical_setup_key=="" || reviewed_snapshot.prior_attempt_id=="")
+     {
+      RetryUIInvalidate("MISSING_IMMUTABLE_IDS");
+      g_retry_ui_status = "CONFIRM_BLOCKED_INVALID_IDS";
+      RetryUIRender();
+      return;
+     }
+   if(g_coordinator_mode != COORD_MODE_COORDINATOR)
+     {
+      g_retry_ui_status = "CONFIRM_BLOCKED_NOT_COORDINATOR"; RetryUIRender(); return;
+     }
+   string auth_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
+   if(!g_execution_ledger.ValidateAuthority(auth_key, g_owner_instance_token, g_authority_epoch))
+     {
+      g_retry_ui_status = "CONFIRM_BLOCKED_AUTHORITY"; g_retry_ui_detail="Fresh durable authority validation failed."; RetryUIRender(); return;
+     }
+   g_executor.SyncAuthority(g_authority_epoch, true);
+
+   CExecutionLedger::RetryLocalContext ctx;
+   RetryUIBuildLocalContext(ctx);
+   ExecutionAttemptRecord new_attempt; ZeroMemory(new_attempt);
+   string action_id="", detail="";
+   CExecutionLedger::ENUM_RETRY_APPROVE_RESULT res = g_execution_ledger.ApproveAndCreateRetry(
+      g_retry_review.claim_id, g_retry_review.strategy_group_key, g_retry_review.logical_setup_key,
+      g_retry_review.prior_attempt_id, g_retry_review.retry_sequence,
+      ctx, g_retry_review.evidence_reason, new_attempt, action_id, detail);
+   // No broker call from UI path.
+   if(res == CExecutionLedger::RETRY_APPROVE_COMMITTED || res == CExecutionLedger::RETRY_APPROVE_ALREADY_CONSUMED)
+     {
+      ZeroMemory(g_retry_handoff); g_retry_handoff.active=true;
+      g_retry_handoff.action_id = action_id;
+      g_retry_handoff.claim_id = g_retry_review.claim_id;
+      g_retry_handoff.strategy_group_key = g_retry_review.strategy_group_key;
+      g_retry_handoff.logical_setup_key = g_retry_review.logical_setup_key;
+      g_retry_handoff.prior_attempt_id = g_retry_review.prior_attempt_id;
+      g_retry_handoff.new_attempt_id = new_attempt.attempt_id;
+      g_retry_handoff.expected_retry_sequence = g_retry_review.retry_sequence;
+      g_retry_handoff.account_login = AccountInfoInteger(ACCOUNT_LOGIN);
+      g_retry_handoff.account_server = AccountInfoString(ACCOUNT_SERVER);
+      g_retry_handoff.config_fingerprint = g_config_fingerprint;
+      g_retry_handoff.created_at = TimeCurrent();
+      g_retry_ui_state = E2E6_UI_COMMITTED;
+      g_retry_ui_status = (res==CExecutionLedger::RETRY_APPROVE_ALREADY_CONSUMED) ? "ALREADY_CONSUMED_READBACK_OK" : "COMMITTED_NOT_SUBMITTED";
+      g_retry_ui_detail = detail + " | pending revalidation in timer; no broker call from UI; no auto-retry on restart.";
+      ZeroMemory(g_retry_review); g_retry_review.valid=false;
+     }
+   else if(res == CExecutionLedger::RETRY_APPROVE_COMMIT_OUTCOME_UNKNOWN)
+     {
+      g_retry_ui_state = E2E6_UI_BLOCKED;
+      g_retry_ui_status = "COMMIT_OUTCOME_UNKNOWN";
+      g_retry_ui_detail = detail + " | action_id="+action_id+" read-back required; same op blocked.";
+     }
+   else
+     {
+      RetryUIInvalidate(detail);
+      g_retry_ui_status = "APPROVAL_REJECTED_FAIL_CLOSED";
+      g_retry_ui_detail = detail;
+     }
+   RetryUIRender();
+  }
+
+void RetryUIHandleNextClick()
+  {
+   if(g_retry_handoff.active)
+     { g_retry_ui_status="NEXT_BLOCKED_HANDOFF_ACTIVE"; RetryUIRender(); return; }
+   if(g_retry_candidate_count <= 0)
+     { RetryUIHandleReviewClick(); return; }
+   // Re-load list and reselect next deterministically (bounded). No DB writes.
+   int prev = g_retry_candidate_index; string diag="";
+   if(!RetryUILoadCandidateList(diag))
+     { RetryUIInvalidate(diag); g_retry_ui_state=E2E6_UI_BLOCKED; g_retry_ui_status="NEXT_DISCOVERY_FAILED"; g_retry_ui_detail=diag; RetryUIRender(); return; }
+   g_retry_candidate_index = (prev + 1) % g_retry_candidate_count;
+   RetryUISelectCurrentCandidate(false);
+  }
+
+
+void RetryUILoadInterruptedList(bool render)
+  {
+   ArrayResize(g_retry_interrupted,0); g_retry_interrupted_count=0;
+   if(!g_execution_ledger.IsAvailable())
+     {
+      g_retry_ui_state = E2E6_UI_BLOCKED;
+      g_retry_ui_status = "LEDGER_UNAVAILABLE_EXECUTION_BLOCKED";
+      g_retry_ui_detail = "Cannot inspect durable retry handoffs: ledger unavailable (fail-closed). No auto-submit.";
+      if(render) RetryUIRender();
+      return;
+     }
+   string err="", login=IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN)), server=AccountInfoString(ACCOUNT_SERVER);
+   int n = g_execution_ledger.GetInterruptedRetryHandoffs(login, server, g_strategy_group_key, g_retry_interrupted, 5, err);
+   if(n < 0)
+     {
+      g_retry_ui_state = E2E6_UI_BLOCKED;
+      g_retry_ui_status = "INTERRUPTED_QUERY_FAILED_FAIL_CLOSED";
+      g_retry_ui_detail = (err==""?"Interrupted retry query failed":err) + " - no auto-submit/restore.";
+      if(render) RetryUIRender();
+      return;
+     }
+   g_retry_interrupted_count = n;
+   if(n <= 0)
+     {
+      if(g_retry_ui_state == E2E6_UI_INTERRUPTED_VIEW)
+        { g_retry_ui_state = E2E6_UI_HIDDEN; g_retry_ui_status="NO_INTERRUPTED_RETRY_FOUND"; g_retry_ui_detail="Read-only inspection: no durable interrupted retry handoff records in current account/group context."; }
+      if(render) RetryUIRender();
+      return;
+     }
+   // Read-only visibility only. Never restore handoff, never submit, never create approval/retry.
+   g_retry_ui_state = E2E6_UI_INTERRUPTED_VIEW;
+   ZeroMemory(g_retry_review); g_retry_review.valid=false; RetryUIClearCandidateList();
+   g_retry_ui_status = "INTERRUPTED_DURABLE_RETRY_" + g_retry_interrupted[0].status_code;
+   g_retry_ui_detail = "claim=" + g_retry_interrupted[0].claim_id + " prior=" + g_retry_interrupted[0].prior_attempt_id + " new=" + g_retry_interrupted[0].new_attempt_id +
+                       " seq=" + IntegerToString(g_retry_interrupted[0].retry_sequence_before) + "->" + IntegerToString(g_retry_interrupted[0].retry_sequence_after) +
+                       " state=" + IntegerToString(g_retry_interrupted[0].new_attempt_state) +
+                       " approval=" + (g_retry_interrupted[0].approval_event_exists?"1":"0") +
+                       " submitted=" + (g_retry_interrupted[0].submitted_recorded?"1":"0") +
+                       " may_have=" + (g_retry_interrupted[0].submission_may_have_occurred?"1":"0") +
+                       " recon=" + (g_retry_interrupted[0].reconciliation_required?"1":"0") +
+                       " | " + g_retry_interrupted[0].detail + " [rows="+IntegerToString(n)+" read-only,no restore,no auto-submit]";
+   if(render) RetryUIRender();
+  }
+
+void RetryUIHandleInspectInterruptedClick()
+  {
+   // Read-only inspect/refresh. No handoff recreation, no approval reuse, no retry creation,
+   // no attempt/claim state change, no claim release, no broker executor, no bypass.
+   RetryUILoadInterruptedList(true);
+  }
+
+void RetryUIOnObjectClick(const string sparam)
+  {
+   if(StringFind(sparam, E2E6_RETRY_OBJ_PREFIX) != 0)
+      return; // not our object
+   // Only EA-owned exact prefix objects accepted; reset button state.
+   if(ObjectFind(ChartID(),sparam) < 0)
+      return;
+   ObjectSetInteger(ChartID(),sparam,OBJPROP_STATE,false);
+   if(sparam == g_retry_btn_review)       RetryUIHandleReviewClick();
+   else if(sparam == g_retry_btn_next)    RetryUIHandleNextClick();
+   else if(sparam == g_retry_btn_confirm) RetryUIHandleConfirmClick();
+   else if(sparam == g_retry_btn_cancel)  RetryUIHandleCancelClick();
+   else if(sparam == g_retry_btn_inspect) RetryUIHandleInspectInterruptedClick();
+   // ignore other owned objects
+  }
+
+int RetryUIFindRuntimeForSymbol(const string symbol)
+  {
+   if(symbol=="") return -1;
+   for(int i=0;i<ArraySize(g_runtime);i++)
+      if(g_runtime[i].valid && g_runtime[i].symbol==symbol) return i;
+   return -1;
+  }
+
+bool RetryUIBuildAttemptRecordFromFreshPlan(const string attempt_id,
+                                            const string setup_id,
+                                            const string symbol,
+                                            ulong magic,
+                                            const TradePlan &plan,
+                                            const RiskDecision &risk,
+                                            ExecutionAttemptRecord &out)
+  {
+   ZeroMemory(out);
+   out.attempt_id = attempt_id; out.setup_id = setup_id; out.symbol = symbol; out.magic = magic;
+   out.intent = (plan.direction==SIGNAL_LONG ? ORDER_INTENT_OPEN_LONG : ORDER_INTENT_OPEN_SHORT);
+   out.direction = plan.direction; out.requested_volume = risk.calculated_volume;
+   out.entry_price = plan.entry; out.stop_loss = plan.stop; out.take_profit = plan.target;
+   out.state = EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED; out.submission_allowed=false;
+   return (attempt_id!="" && setup_id!="" && symbol!="" && plan.valid);
+  }
+
+bool RetryUIBuildLegacySignal(const TradePlan &plan, const HybridDecision &decision, StrategySignal &legacy_signal)
+  {
+   ZeroMemory(legacy_signal);
+   if(!plan.valid) return false;
+   legacy_signal.valid=true; legacy_signal.direction=plan.direction; legacy_signal.strategy=STRATEGY_TREND_PULLBACK;
+   legacy_signal.symbol=plan.symbol; legacy_signal.timeframe=PERIOD_CURRENT; legacy_signal.regime=(ENUM_REGIME_TYPE)decision.regime;
+   legacy_signal.score=(plan.direction==SIGNAL_LONG)?decision.long_score:decision.short_score;
+   legacy_signal.confidence=1.0; legacy_signal.entry=plan.entry; legacy_signal.stop=plan.stop; legacy_signal.target=plan.target;
+   legacy_signal.timestamp=plan.signal_time; legacy_signal.signal_id=plan.setup_id; legacy_signal.reason=decision.main_reason;
+   return true;
+  }
+
+bool RetryUIRevalidateFreshPlan(CSymbolRuntime &runtime,
+                                const ExecutionAttemptRecord &new_att,
+                                const string expected_group_key,
+                                const string expected_lsk,
+                                const string expected_config_fingerprint,
+                                TradePlan &out_plan,
+                                StrategySignal &out_legacy,
+                                RiskDecision &out_risk,
+                                string &reason)
+  {
+   reason="";
+   if(!runtime.valid || runtime.symbol!=new_att.symbol) { reason="RUNTIME_SYMBOL_MISMATCH"; return false; }
+   if(expected_group_key=="" || expected_lsk=="" || expected_group_key!=g_strategy_group_key) { reason="GROUP_KEY_MISMATCH"; return false; }
+   if(expected_config_fingerprint!=g_config_fingerprint) { reason="CONFIG_FINGERPRINT_CHANGED"; return false; }
+   if(!IsSessionFilterAllowed(TimeCurrent())) { reason="SESSION_FILTER_BLOCKED"; return false; }
+
+   MarketSnapshot context_market, structure_market, setup_market, entry_market;
+   FeatureSet context_features, structure_features, setup_features, entry_features;
+   ResetLastError();
+   if(!runtime.market_context.GetSnapshot(runtime.symbol,runtime.context_tf,context_market) || !context_market.valid) { reason="FRESH_CONTEXT_SNAPSHOT_FAILED"; return false; }
+   if(!runtime.market_structure.GetSnapshot(runtime.symbol,runtime.structure_tf,structure_market) || !structure_market.valid) { reason="FRESH_STRUCTURE_SNAPSHOT_FAILED"; return false; }
+   if(!runtime.market_setup.GetSnapshot(runtime.symbol,runtime.setup_tf,setup_market) || !setup_market.valid) { reason="FRESH_SETUP_SNAPSHOT_FAILED"; return false; }
+   if(!runtime.market_entry.GetSnapshot(runtime.symbol,runtime.entry_tf,entry_market) || !entry_market.valid) { reason="FRESH_ENTRY_SNAPSHOT_FAILED"; return false; }
+   if(!runtime.feature_context.Calculate(context_market,context_features)) { reason="FRESH_CONTEXT_FEATURES_FAILED"; return false; }
+   if(!runtime.feature_structure.Calculate(structure_market,structure_features)) { reason="FRESH_STRUCTURE_FEATURES_FAILED"; return false; }
+   if(!runtime.feature_setup.Calculate(setup_market,setup_features)) { reason="FRESH_SETUP_FEATURES_FAILED"; return false; }
+   if(!runtime.feature_entry.Calculate(entry_market,entry_features)) { reason="FRESH_ENTRY_FEATURES_FAILED"; return false; }
+
+   PortfolioState portfolio_state;
+   if(!RefreshTradingState() || !g_state.GetPortfolioState(portfolio_state)) { reason="RISK_STATE_UNAVAILABLE"; return false; }
+   if(portfolio_state.trading_locked) { reason="RISK_LOCK_ACTIVE"; return false; }
+
+   bool ok=false;
+   FeatureContext ctx = runtime.hybrid_engine.BuildFeatureContext(context_market,structure_market,setup_market,entry_market,
+                          context_features,structure_features,setup_features,entry_features,portfolio_state,ok);
+   if(!ok || !ctx.valid) { reason="CONTEXT_BUILD_FAILED:"+ctx.reason; return false; }
+
+   // Read-only binding probe: preserve engine duplicate-suppression state (Evaluate mutates it on candidate plans).
+   datetime dup_t=0; ENUM_SIGNAL_DIRECTION dup_d=SIGNAL_NONE; bool dup_c=false;
+   runtime.hybrid_engine.SaveDuplicateState(dup_t,dup_d,dup_c);
+   HybridDecision decision = runtime.hybrid_engine.Evaluate(runtime.symbol, ctx, context_market, ok);
+   runtime.hybrid_engine.RestoreDuplicateState(dup_t,dup_d,dup_c);
+   if(!ok || !decision.valid) { reason="FRESH_EVALUATION_FAILED:"+decision.main_reason; return false; }
+   if(decision.status != DECISION_BUY_CANDIDATE && decision.status != DECISION_SELL_CANDIDATE) { reason="FRESH_PLAN_NOT_CANDIDATE:"+decision.main_reason; return false; }
+   if(!decision.plan.valid) { reason="FRESH_PLAN_INVALID"; return false; }
+
+   TradePlan plan = decision.plan;
+   // Exact logical-setup binding against durable claim + originating closed bar.
+   string expected_binding = runtime.hybrid_engine.BuildBindingKey(setup_market.closed_bar_time, plan.direction);
+   string fresh_lsk = runtime.hybrid_engine.ComputeLogicalSetupKey(setup_market.closed_bar_time, plan.direction, runtime.setup_tf);
+   string fresh_can = CExecutionLedger::BuildStableCanonicalIdentity(g_strategy_group_key, runtime.symbol, "DEFAULT_SETUP",
+                        (int)plan.direction, setup_market.closed_bar_time, (int)runtime.setup_tf, 2);
+   // Claim canonical comparison uses stable components via ledger helper after DB lookup below.
+   if(fresh_lsk != expected_lsk) { reason="LOGICAL_SETUP_KEY_MISMATCH fresh="+fresh_lsk+" expected="+expected_lsk; return false; }
+   // Verify claim still exists and current attempt unchanged; canonical stable identity must match.
+   string claim_id="", current_attempt=""; int claim_state=-1;
+   if(!g_execution_ledger.GetSetupClaim(expected_group_key, expected_lsk, claim_id, claim_state, current_attempt)) { reason="CLAIM_LOOKUP_FAILED"; return false; }
+   // GetSetupClaim does not return canonical; reuse bounded discovery read-back by exact ids not available here. Use GetClaimById for binding and rely on same LSK/group.
+   int cs=-1, rs=-1; string ca="";
+   if(!g_execution_ledger.GetClaimById(g_retry_handoff.claim_id, expected_group_key, expected_lsk, cs, ca, rs)) { reason="CLAIM_BY_ID_LOOKUP_FAILED"; return false; }
+   if(ca != g_retry_handoff.new_attempt_id) { reason="CLAIM_CURRENT_ATTEMPT_CHANGED"; return false; }
+   if(rs != g_retry_handoff.expected_retry_sequence + 1) { reason="CLAIM_RETRY_SEQUENCE_CHANGED"; return false; }
+   if(cs != (int)SETUP_CLAIM_ACTIVE) { reason="CLAIM_NOT_ACTIVE"; return false; }
+
+   if(plan.symbol!=runtime.symbol || plan.style!=runtime.style || plan.direction==SIGNAL_NONE || plan.setup_id=="" || plan.signal_time<=0 || plan.entry<=0.0 || plan.stop<=0.0 || plan.target<=0.0)
+     { reason="FRESH_PLAN_CONSISTENCY_FAILED"; return false; }
+   if(plan.signal_time != setup_market.closed_bar_time) { reason="SIGNAL_TIME_NOT_ORIGINATING_CLOSED_BAR"; return false; }
+   if(expected_binding=="" || fresh_lsk=="") { reason="BINDING_KEY_EMPTY"; return false; }
+
+   if(runtime.hybrid_engine.IsPlanExpired(plan, TimeCurrent())) { reason="FRESH_PLAN_EXPIRED"; return false; }
+   double struct_price=plan.entry;
+   ENUM_STRUCTURAL_EVIDENCE_RESULT struct_res = runtime.hybrid_engine.EvaluateStructuralEvidence(plan, struct_price);
+   if(struct_res != EVIDENCE_SUFFICIENT_NO_INVALIDATION) { reason="STRUCTURAL_EVIDENCE_BLOCK:"+EnumToString(struct_res); return false; }
+   if(!runtime.hybrid_engine.IsSetupFresh(plan.signal_time)) { reason="FRESH_SETUP_STALE"; return false; }
+
+   TradePlan normalized_plan = plan; string norm_reason="";
+   if(!NormalizeTradePlanStops(normalized_plan, norm_reason)) { reason="STOP_NORMALIZE_FAILED:"+norm_reason; return false; }
+   MqlTick tick; if(!SymbolInfoTick(runtime.symbol,tick)) { reason="TICK_UNAVAILABLE"; return false; }
+   double current_price = (normalized_plan.direction==SIGNAL_LONG ? tick.ask : tick.bid);
+   double max_entry_dist = GetEntryDistanceTolerance(runtime.style, runtime.hybrid_engine.GetPoint());
+   if(MathAbs(normalized_plan.entry-current_price) > max_entry_dist) { reason="ENTRY_TOO_FAR"; return false; }
+
+   // Preserve normal Risk/Portfolio/News gate chain (shared logic path) without duplicating alternate policy.
+   StrategySignal legacy_signal;
+   if(!RetryUIBuildLegacySignal(normalized_plan, decision, legacy_signal)) { reason="LEGACY_SIGNAL_BUILD_FAILED"; return false; }
+   RiskDecision risk;
+   if(!g_risk_engine.Evaluate(legacy_signal, risk)) { reason="RISK_ENGINE_REJECT:"+EnumToString(risk.rejection_reason); return false; }
+   if(!g_portfolio_risk.CanOpen(legacy_signal, risk)) { reason="PORTFOLIO_RISK_REJECT:"+g_portfolio_risk.LastRejectionReason(); return false; }
+   // News gate is inside HybridEngine CheckHardGates for Evaluate; decision reached candidate => entry news clear.
+   // We still fail closed if engine marked news block in decision status (defensive).
+   if(decision.status == DECISION_NEWS_BLOCKED) { reason="NEWS_ENTRY_BLOCKED"; return false; }
+
+   if(risk.calculated_volume <= 0.0) { reason="RISK_VOLUME_INVALID"; return false; }
+   // Ensure fresh plan is not consumed marker in probe result.
+   normalized_plan.consumed=false;
+   out_plan = normalized_plan; out_legacy = legacy_signal; out_risk = risk;
+   reason = "FRESH_REVALIDATION_OK binding="+expected_binding+" lsk="+fresh_lsk+" can="+fresh_can;
+   return true;
+  }
+
+void ProcessRetryPendingHandoff()
+  {
+   // Transient handoff only; crash/restart loses it => no auto-retry.
+   if(!g_retry_handoff.active) return;
+   // Never broker-submit from chart event; run in timer path only.
+   if(g_coordinator_mode != COORD_MODE_COORDINATOR) { g_retry_ui_status="HANDOFF_BLOCKED_NOT_COORDINATOR"; return; }
+   if(g_retry_handoff.account_login != AccountInfoInteger(ACCOUNT_LOGIN) ||
+      g_retry_handoff.account_server != AccountInfoString(ACCOUNT_SERVER) ||
+      g_retry_handoff.config_fingerprint != g_config_fingerprint)
+     { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_INVALIDATED_CONTEXT"; g_retry_ui_detail="Context changed; transient handoff cleared; no submit."; return; }
+   string auth_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
+   if(!g_execution_ledger.ValidateAuthority(auth_key, g_owner_instance_token, g_authority_epoch))
+     { g_retry_ui_status="HANDOFF_BLOCKED_AUTHORITY"; return; }
+   g_executor.SyncAuthority(g_authority_epoch, true);
+
+   // Read-back durable outcome by deterministic action id.
+   string outcome="", rb_new="";
+   if(!g_execution_ledger.GetRetryApprovalEventOutcome(g_retry_handoff.action_id, outcome, rb_new) || outcome=="")
+     { g_retry_ui_status="HANDOFF_COMMIT_UNKNOWN_BLOCKED"; g_retry_ui_detail="Cannot verify approval event; blocked fail-closed."; return; }
+   if(rb_new != "" && g_retry_handoff.new_attempt_id == "") g_retry_handoff.new_attempt_id = rb_new;
+   if(rb_new != "" && rb_new != g_retry_handoff.new_attempt_id)
+     { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_IDENTITY_MISMATCH"; return; }
+
+   int claim_state=-1, retry_seq=-1; string current_attempt="";
+   if(!g_execution_ledger.GetClaimById(g_retry_handoff.claim_id,g_retry_handoff.strategy_group_key,g_retry_handoff.logical_setup_key,claim_state,current_attempt,retry_seq))
+     { g_retry_ui_status="HANDOFF_CLAIM_RELOAD_FAILED"; return; }
+   if(current_attempt != g_retry_handoff.new_attempt_id || retry_seq != g_retry_handoff.expected_retry_sequence + 1)
+     { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_CLAIM_ADVANCED_OR_CHANGED"; g_retry_ui_detail="Claim no longer points to committed new attempt; no submit."; return; }
+   ExecutionAttemptRecord new_att;
+   if(!g_execution_ledger.GetAttempt(g_retry_handoff.new_attempt_id, new_att))
+     { g_retry_ui_status="HANDOFF_ATTEMPT_RELOAD_FAILED"; return; }
+   if(new_att.state != EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED)
+     { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_ATTEMPT_NOT_SUBMITTABLE"; g_retry_ui_detail="Attempt state="+IntegerToString((int)new_att.state); return; }
+   string submit_reason="";
+   if(!g_execution_ledger.CanSubmit(g_retry_handoff.new_attempt_id, submit_reason))
+     { g_retry_ui_status="HANDOFF_CANNOT_SUBMIT"; g_retry_ui_detail=submit_reason; return; }
+
+   // P1-C: fresh runtime evaluation + exact binding + full pre-submit revalidation, then existing submission protocol.
+   int rt_idx = RetryUIFindRuntimeForSymbol(new_att.symbol);
+   if(rt_idx < 0) { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_RUNTIME_NOT_FOUND"; g_retry_ui_detail="No valid runtime for approved symbol; committed intent remains non-submitted/quarantined by operator workflow (no auto-retry)."; return; }
+   TradePlan fresh_plan; StrategySignal fresh_signal; RiskDecision fresh_risk; string reval_reason="";
+   if(!RetryUIRevalidateFreshPlan(g_runtime[rt_idx], new_att, g_retry_handoff.strategy_group_key, g_retry_handoff.logical_setup_key, g_retry_handoff.config_fingerprint,
+                                  fresh_plan, fresh_signal, fresh_risk, reval_reason))
+     {
+      // One-shot handoff consumed on this explicit-confirm session attempt; do NOT auto-retry/reuse confirmation.
+      // Committed new intent remains durable/non-submitted; not marked FINAL_FAILURE (no terminal failure evidence).
+      g_retry_handoff.active=false;
+      g_retry_ui_status = "HANDOFF_REVALIDATION_FAILED_FAIL_CLOSED";
+      g_retry_ui_detail = "Fresh revalidation/binding failed: " + reval_reason + ". Intent committed durable, NOT submitted, NOT auto-retried; operator reconciliation required if blocked.";
+      g_logger.Event(LOG_WARNING,"EXECUTION","RETRY_HANDOFF_REVALIDATION_FAILED", new_att.symbol,"",g_retry_handoff.logical_setup_key,g_retry_handoff.new_attempt_id,"BLOCKED","FRESH_REVALIDATION",reval_reason + " action="+g_retry_handoff.action_id);
+      // Fail-closed visibility only: mark reconciliation required for this committed-not-submitted attempt (no broker call, no claim release).
+      g_execution_ledger.MarkReconciliationRequired(g_retry_handoff.new_attempt_id, "E2.6 retry handoff revalidation failed (fail-closed, no submit, no auto-retry): " + reval_reason);
+      return;
+     }
+
+   // Final context checks immediately before submission protocol (stale-after-validation => reject).
+   if(g_coordinator_mode != COORD_MODE_COORDINATOR) { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_FINAL_COORDINATOR_LOST"; return; }
+   if(g_retry_handoff.account_login != AccountInfoInteger(ACCOUNT_LOGIN) || g_retry_handoff.account_server != AccountInfoString(ACCOUNT_SERVER) || g_retry_handoff.config_fingerprint != g_config_fingerprint)
+     { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_FINAL_CONTEXT_CHANGED"; g_execution_ledger.MarkReconciliationRequired(g_retry_handoff.new_attempt_id,"Final context changed before submit"); return; }
+   if(!g_execution_ledger.ValidateAuthority(auth_key, g_owner_instance_token, g_authority_epoch))
+     { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_FINAL_AUTHORITY_FAILED"; g_execution_ledger.MarkReconciliationRequired(g_retry_handoff.new_attempt_id,"Final authority validation failed before submit"); return; }
+   g_executor.SyncAuthority(g_authority_epoch, true);
+   if(g_execution_ledger.HasBlockingUnresolved(g_retry_ui_detail) || g_execution_ledger.HasUnresolvedForSymbol(new_att.symbol, true))
+     { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_FINAL_UNRESOLVED_BLOCK"; g_execution_ledger.MarkReconciliationRequired(g_retry_handoff.new_attempt_id,"Unresolved/ledger block before submit"); return; }
+   // Re-read attempt immediately before bind/submit.
+   if(!g_execution_ledger.GetAttempt(g_retry_handoff.new_attempt_id, new_att) || new_att.state != EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED)
+     { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_FINAL_ATTEMPT_CHANGED"; return; }
+   string final_submit_reason="";
+   if(!g_execution_ledger.CanSubmit(g_retry_handoff.new_attempt_id, final_submit_reason))
+     { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_FINAL_CANNOT_SUBMIT"; g_retry_ui_detail=final_submit_reason; g_execution_ledger.MarkReconciliationRequired(g_retry_handoff.new_attempt_id,"CanSubmit failed before submit: "+final_submit_reason); return; }
+
+   // Build fresh ExecutionRequest bound to new attempt ID (not old plan/request).
+   ExecutionRequest request;
+   request.intent = (fresh_plan.direction==SIGNAL_LONG ? ORDER_INTENT_OPEN_LONG : ORDER_INTENT_OPEN_SHORT);
+   request.symbol = g_runtime[rt_idx].symbol;
+   request.direction = fresh_plan.direction;
+   request.strategy = STRATEGY_TREND_PULLBACK;
+   request.volume = fresh_risk.calculated_volume;
+   request.price = fresh_plan.entry;
+   request.stop_loss = fresh_plan.stop;
+   request.take_profit = fresh_plan.target;
+   request.position_ticket = 0;
+   request.magic = MagicForStyle(g_runtime[rt_idx].style);
+   request.comment = "E26_RETRY|" + g_retry_handoff.action_id;
+   request.signal_id = fresh_plan.setup_id;
+   request.attempt_id = g_retry_handoff.new_attempt_id;
+
+   if(!g_execution_ledger.MarkSubmissionBound(request.attempt_id, "E2.6 retry pre-submit revalidation passed action="+g_retry_handoff.action_id))
+     { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_BIND_FAILED"; g_execution_ledger.MarkReconciliationRequired(request.attempt_id,"MarkSubmissionBound failed (no broker call)"); return; }
+   if(!g_execution_ledger.CanSubmit(request.attempt_id, final_submit_reason))
+     { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_SUBMIT_GATE_FAILED"; g_execution_ledger.MarkReconciliationRequired(request.attempt_id,"CanSubmit failed after bind: "+final_submit_reason); return; }
+   if(!g_execution_ledger.MarkSubmissionMayHaveOccurred(request.attempt_id, "E2.6 retry broker boundary action="+g_retry_handoff.action_id))
+     { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_MAY_HAVE_OCCURRED_FAILED"; g_execution_ledger.MarkReconciliationRequired(request.attempt_id,"MarkSubmissionMayHaveOccurred failed; broker call aborted"); return; }
+
+   ExecutionResult result; ZeroMemory(result);
+   bool execution_ok = g_executor.Execute(request, result); // broker call only via executor (timer path)
+   g_logger.Trade(result);
+   if(!result.success && result.failure_class == "AUTHORIZATION_DENIED" && !result.reconciliation_required)
+     {
+      if(!g_execution_ledger.ResolveAttempt(request.attempt_id, EXEC_STATE_ABORTED, "E2.6 retry executor auth denied - confirmed no broker invocation"))
+         g_execution_ledger.MarkReconciliationRequired(request.attempt_id, "ResolveAttempt failed after confirmed executor auth denial");
+      g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_SUBMIT_AUTH_DENIED"; return;
+     }
+   bool result_recorded = g_execution_ledger.RecordResult(request.attempt_id, result, "E2.6 retry executor result action="+g_retry_handoff.action_id);
+   if(!result_recorded)
+     {
+      g_logger.Event(LOG_ERROR, "EXECUTION", "RETRY_RECORD_RESULT_FAILED", request.symbol, "", g_retry_handoff.logical_setup_key, request.attempt_id, "FAIL", "LEDGER_ERROR",
+                     "RecordResult failed after retry broker/result observation; forcing reconciliation (no retry, no FINAL_FAILURE fabrication)");
+      bool recon_ok = g_execution_ledger.MarkReconciliationRequired(request.attempt_id, "E2.6 retry RecordResult write failed - reconciliation required (no retry)");
+      if(!recon_ok)
+        {
+         ENUM_EXEC_ATTEMPT_STATE st = EXEC_STATE_NONE;
+         bool st_ok = g_execution_ledger.GetAttemptState(request.attempt_id, st);
+         bool blocked = false; string block_reason="";
+         if(st_ok)
+            blocked = (st==EXEC_STATE_SUBMISSION_MAY_HAVE_OCCURRED || st==EXEC_STATE_RECONCILIATION_REQUIRED || st==EXEC_STATE_PARTIAL_FILL || st==EXEC_STATE_SUBMITTED || st==EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED);
+         else
+            blocked = g_execution_ledger.HasBlockingUnresolved(block_reason);
+         g_logger.Event(LOG_ERROR, "EXECUTION", "RETRY_RECONCILIATION_MARK_FAILED_AFTER_RECORD_RESULT", request.symbol, "", g_retry_handoff.logical_setup_key, request.attempt_id, "FAIL", "LEDGER_ERROR",
+                        "MarkReconciliationRequired failed after retry RecordResult failure; claim="+g_retry_handoff.claim_id+" state_readable="+(st_ok?"1":"0")+" state="+IntegerToString((int)st)+" blocking="+(blocked?"1":"0")+" reason="+block_reason+" (no retry, no FINAL_FAILURE)");
+        }
+     }
+   {
+    ENUM_EXEC_ATTEMPT_STATE st=EXEC_STATE_NONE;
+    if(g_execution_ledger.GetAttemptState(request.attempt_id, st))
+      {
+       if(st==EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED)
+          g_execution_ledger.MarkReconciliationRequired(request.attempt_id,"Retry attempt not bound before execution");
+       else if(st==EXEC_STATE_SUBMISSION_MAY_HAVE_OCCURRED)
+          g_execution_ledger.MarkReconciliationRequired(request.attempt_id,"Retry submission still ambiguous after recorded result");
+      }
+    else if(!result_recorded)
+      {
+       g_logger.Event(LOG_ERROR, "EXECUTION", "RETRY_LEDGER_STATE_UNREADABLE", request.symbol, "", g_retry_handoff.logical_setup_key, request.attempt_id, "FAIL", "LEDGER_ERROR",
+                      "Attempt state unreadable after retry RecordResult failure - ledger trust degraded; fail-closed by blocking checks");
+      }
+   }
+   // Consume only this fresh plan's local engine duplicate-suppression marker for the same runtime context.
+   // Do not consume stale historical plan; this is the fresh plan produced by revalidation.
+   g_runtime[rt_idx].hybrid_engine.MarkPlanConsumed(fresh_plan);
+   g_retry_handoff.active=false;
+   g_retry_ui_status = (execution_ok && result.success) ? "HANDOFF_SUBMITTED" : "HANDOFF_SUBMIT_RECORDED_FAIL_OR_AMBIG";
+   g_retry_ui_detail = reval_reason + " submit_ok=" + (execution_ok?"1":"0") + " ret=" + IntegerToString((int)result.retcode) + " recon=" + (result.reconciliation_required?"1":"0");
+   g_logger.Event(execution_ok?LOG_INFO:LOG_WARNING,"EXECUTION","RETRY_HANDOFF_SUBMIT", request.symbol,"",g_retry_handoff.logical_setup_key,request.attempt_id,execution_ok?"SUBMIT":"FAIL_OR_AMBIG","E2.6_RETRY",g_retry_ui_detail);
+  }
+
 void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
   {
+   // E2.6: invalidate local retry review on geometry/context-affecting events (no ledger/broker mutation).
+   RetryUIInvalidate("CHART_GEOMETRY_CHANGED");
    if(id == CHARTEVENT_CHART_CHANGE)
+     {)
      {
       g_dashboard.HandleChartGeometryChange();
+      RetryUIEnsureObjects();
+     }
+   // E2.6: local MT5 chart approval (OBJ_BUTTON). No broker calls. Only EA-owned objects.
+   else if(id == CHARTEVENT_OBJECT_CLICK)
+     {
+      RetryUIOnObjectClick(sparam);
      }
    // E2.3-RD: Chart Context Registration protocol
    string auth_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
@@ -2466,40 +3414,70 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
       long snap_seq = (long)StringToInteger(parts[3]);
       if(coord_epoch != g_pending_coord_epoch)
          return;
-      // Acknowledge
+      // Acknowledge: K|ver|chart_id|snap_seq (bounded; coordinator may consume; no broker/DB mutation)
       string ack = "K|" + IntegerToString(CHARTREG_PROTOCOL_VERSION) + "|" + IntegerToString((long)ChartID()) + "|" + IntegerToString(snap_seq);
       if(StringLen(ack) <= 63)
         {
          if(!EventChartCustom(g_pending_coord_chart, SNAPREG_ACK, (long)ChartID(), 0.0, ack))
            {
-            // enqueue failed
+            // enqueue failed (best-effort; no retry)
            }
         }
-     }
-     {
-      if(g_coordinator_mode != COORD_MODE_COORDINATOR)
-         return;
-      string parts[];
-      int n = StringSplit(sparam, '|', parts);
-      if(n < 5)
-         return;
-      if((int)StringToInteger(parts[1]) != CHARTREG_PROTOCOL_VERSION)
-         return;
-      if(parts[2] != auth_key)
-         return;
-      long req_chart = (long)StringToInteger(parts[3]);
-      string req_token = parts[4];
-      for(int i = 0; i < g_subscriber_count; i++)
-        {
-         if(g_subscribers[i].chart_id == req_chart && g_subscribers[i].owner_token == req_token)
-           {
-            for(int j = i; j < g_subscriber_count - 1; j++)
-               g_subscribers[j] = g_subscribers[j+1];
-            g_subscriber_count--;
-            break;
-           }
-        }
-     }
+      }
+    else if(id == CHARTEVENT_CUSTOM + SNAPREG_ACK)
+      {
+       // Coordinator receives bounded snapshot ACK. Read-only validation only; no DB/broker mutation.
+       if(g_coordinator_mode != COORD_MODE_COORDINATOR)
+          return;
+       string parts[];
+       int n = StringSplit(sparam, '|', parts);
+       if(n < 4)
+          return;
+       if((int)StringToInteger(parts[1]) != CHARTREG_PROTOCOL_VERSION)
+          return;
+       long ack_chart = (long)StringToInteger(parts[2]);
+       long ack_seq = (long)StringToInteger(parts[3]);
+       if(ack_chart <= 0 || ack_seq < 0)
+          return;
+       // Validate sender is a known subscriber (or at minimum known chart token not required in payload).
+       bool known = false;
+       for(int i = 0; i < g_subscriber_count; i++)
+         {
+          if(g_subscribers[i].chart_id == ack_chart && g_subscribers[i].registered)
+            { known = true; break; }
+         }
+       // Unknown sender ignored (fail-safe). Known ACK is accepted as protocol evidence only.
+       (void)ack_seq; (void)known;
+      }
+    else if(id == CHARTEVENT_CUSTOM + CHARTREG_UNREGISTER)
+      {
+       // E2.3-RD: coordinator removes subscriber. Producer/consumer share version+auth contract.
+       if(g_coordinator_mode != COORD_MODE_COORDINATOR)
+          return;
+       string parts[];
+       int n = StringSplit(sparam, '|', parts);
+       if(n < 5)
+          return;
+       if((int)StringToInteger(parts[1]) != CHARTREG_PROTOCOL_VERSION)
+          return;
+       if(parts[2] != auth_key)
+          return;
+       long req_chart = (long)StringToInteger(parts[3]);
+       string req_token = parts[4];
+       if(req_chart <= 0 || req_token == "")
+          return;
+       // Remove only matching registered subscriber (chart+token). Invalid/stale sender cannot remove others.
+       for(int i = 0; i < g_subscriber_count; i++)
+         {
+          if(g_subscribers[i].chart_id == req_chart && g_subscribers[i].owner_token == req_token)
+            {
+             for(int j = i; j < g_subscriber_count - 1; j++)
+                g_subscribers[j] = g_subscribers[j+1];
+             g_subscriber_count--;
+             break;
+            }
+         }
+      }
    }
 
 void OnDeinit(const int reason)
@@ -2521,20 +3499,24 @@ void OnDeinit(const int reason)
      }
    else if(g_coordinator_mode == COORD_MODE_CHART_CONTEXT)
      {
-      // Best-effort unregister to all charts
+      // Best-effort unregister to all charts (idempotent). Contract: UNREG|ver|auth_key|req_chart|token
+      string auth_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
       long chart = ChartFirst();
       while(chart >= 0)
         {
          if(chart != ChartID())
            {
-            string unreg = "UNREG|" + IntegerToString((long)ChartID()) + "|" + g_owner_instance_token;
-            EventChartCustom(chart, CHARTREG_UNREGISTER, (long)ChartID(), 0.0, unreg);
+            string unreg = "UNREG|" + IntegerToString(CHARTREG_PROTOCOL_VERSION) + "|" + auth_key + "|" +
+                           IntegerToString((long)ChartID()) + "|" + g_owner_instance_token;
+            if(StringLen(unreg) <= 63)
+               EventChartCustom(chart, CHARTREG_UNREGISTER, (long)ChartID(), 0.0, unreg);
            }
          chart = ChartNext(chart);
         }
      }
 
    EventKillTimer();
+   RetryUIClear();
    g_dashboard.Clear();
    g_logger.Shutdown();
    g_system_ready=false;
