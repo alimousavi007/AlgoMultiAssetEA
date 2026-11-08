@@ -50,7 +50,20 @@ enum ENUM_GATEWAY_AUTHORITY_STATE
 //| reconstructed by GetAttempt(); empty/default values must never be |
 //| treated as valid persisted setup identity. Use an explicit        |
 //| fail-closed claim-resolution path for identity-dependent logic.   |
+//|                                                                   |
+//| F-002 schema v3 (source foundation, compile-unverified): durable  |
+//| per-Attempt risk reservation fields. 1 reservation per Attempt,   |
+//| initial reservation intended atomic with durable Intent. Legacy   |
+//| rows use explicit LEGACY_UNVERIFIED semantics (DB NULL/unknown);  |
+//| callers must fail closed on unknown/unverified reservation.       |
 //+------------------------------------------------------------------+
+#define EXEC_RISK_RESERVE_MODEL_V1        1
+#define EXEC_RISK_RESERVE_STATE_UNKNOWN   0
+#define EXEC_RISK_RESERVE_STATE_LEGACY_UNVERIFIED 1
+#define EXEC_RISK_RESERVE_STATE_ACTIVE    2
+#define EXEC_RISK_RESERVE_STATE_RELEASED  3
+#define EXEC_RISK_RESERVE_STATE_INVALID   4
+
 struct ExecutionAttemptRecord
   {
    string                attempt_id;
@@ -85,6 +98,18 @@ struct ExecutionAttemptRecord
    bool                  submission_allowed;
    string                last_reason;
    int                   schema_version;
+   // F-002 durable per-Attempt risk reservation (schema v3). NULL/unknown in legacy DB rows => LEGACY_UNVERIFIED, never 0.
+   double                risk_reserve_initial_amount;    // immutable initial reservation, account currency
+   double                risk_reserve_remaining_amount;  // remaining reservation, account currency
+   string                risk_reserve_currency;          // ACCOUNT_CURRENCY at reservation time
+   double                risk_reserve_equity_snapshot;   // equity snapshot at reservation time
+   double                risk_reserve_percent_snapshot;  // actual initial / equity_snapshot * 100
+   int                   risk_reserve_model_version;     // distinct from schema/attempt/Option B versions
+   int                   risk_reserve_state;             // EXEC_RISK_RESERVE_STATE_*
+   int                   risk_reserve_revision;          // CAS/monotonic
+   datetime              risk_reserve_updated_at;
+   string                risk_reserve_release_reason;    // nullable
+   bool                  risk_reserve_known;             // runtime/source guard: false => legacy/unverified/unknown (fail closed)
   };
 
 //+------------------------------------------------------------------+
@@ -113,6 +138,16 @@ private:
     bool               InsertIntentNoTx(const ExecutionAttemptRecord &record);
     bool               CreateIntentInTx(ExecutionAttemptRecord &record, string &err);
     bool               AffectedRowsIsOne(bool &ok);
+    // F-002 schema v3 migration helpers (additive, fail-closed on drift/unknown future; best-effort duplicate-column tolerant).
+    bool               TableHasColumn(const string table_name, const string column_name, bool &has_column);
+    bool               MigrateV2ToV3AddColumnBestEffort(const string table_name, const string column_name, const string column_type);
+    bool               VerifyExecutionAttemptsV3Columns();
+    // F-002 durable per-Attempt risk reservation primitives (source foundation).
+    void               InitRiskReservationUnknown(ExecutionAttemptRecord &record) const;
+    void               InitRiskReservationLegacyUnverified(ExecutionAttemptRecord &record) const;
+    bool               NormalizeRiskReservationForPersist(ExecutionAttemptRecord &record, string &err) const;
+    bool               ReadAttemptRiskReservationColumns(int handle, int start_col, ExecutionAttemptRecord &record) const;
+    bool               PopulateRiskReservationFromAttemptParams(const string symbol, ENUM_ORDER_INTENT intent, double volume, double entry_price, double stop_loss, ExecutionAttemptRecord &record, string &err) const;
     string             GenerateAttemptId();
     string             EscapeSQL(const string s) const;
     struct AttemptIdentityEventRef
@@ -389,7 +424,9 @@ CExecutionLedger::CExecutionLedger()
    m_db_filename = "";
    // E2.6: schema v2 adds retry_approval_events (durable single-use controlled retry audit/idempotency).
    // Migration source is backward-compatible; live DB migration execution is NOT authorized in this phase.
-   m_schema_version = 2;
+   // F-002: schema v3 adds durable per-Attempt risk reservation columns on execution_attempts (additive, tx-safe migration source).
+   // Live DB migration execution is NOT authorized in this task.
+   m_schema_version = 3;
     m_open_attempts_count = 0;
     m_last_init_stage = "";
     m_last_init_operation = "";
@@ -531,6 +568,8 @@ bool CExecutionLedger::CreateSchema()
    if(m_db_handle == INVALID_HANDLE)
       return false;
 
+   // F-002 schema v3: durable per-Attempt risk reservation columns (additive). Legacy migrated rows may have NULLs
+   // => LEGACY_UNVERIFIED semantics; callers must fail closed, never treat NULL as 0 risk.
    string sql1 = "CREATE TABLE IF NOT EXISTS execution_attempts ("
                  "attempt_id TEXT PRIMARY KEY,"
                  "setup_id TEXT,"
@@ -559,7 +598,17 @@ bool CExecutionLedger::CreateSchema()
                  "state INTEGER,"
                  "submission_allowed INTEGER,"
                  "last_reason TEXT,"
-                 "schema_version INTEGER"
+                 "schema_version INTEGER,"
+                 "risk_reserve_initial_amount REAL,"
+                 "risk_reserve_remaining_amount REAL,"
+                 "risk_reserve_currency TEXT,"
+                 "risk_reserve_equity_snapshot REAL,"
+                 "risk_reserve_percent_snapshot REAL,"
+                 "risk_reserve_model_version INTEGER,"
+                 "risk_reserve_state INTEGER,"
+                 "risk_reserve_revision INTEGER,"
+                 "risk_reserve_updated_at INTEGER,"
+                 "risk_reserve_release_reason TEXT"
                  ");";
 
     ResetLastError();
@@ -815,11 +864,44 @@ bool CExecutionLedger::MigrateSchema()
          m_last_init_error = GetLastError();
          return false;
         }
-      string set_ver = "INSERT OR REPLACE INTO execution_schema_meta (key, value) VALUES ('schema_version', '" + IntegerToString(m_schema_version) + "');";
-      if(!ExecuteSQL(set_ver))
+      current = 2;
+      string set_ver2 = "INSERT OR REPLACE INTO execution_schema_meta (key, value) VALUES ('schema_version', '2');";
+      if(!ExecuteSQL(set_ver2))
         {
          m_last_init_stage = "ExecutionLedger.MigrateSchema";
          m_last_init_operation = "ExecuteSQL(v1->v2:set_schema_version)";
+         m_last_init_error = GetLastError();
+         return false;
+        }
+     }
+   // v2 -> v3 (F-002): additive durable per-Attempt risk reservation columns on execution_attempts.
+   // No ALTER TABLE expression defaults (SQLite/MQL5 compatibility). Legacy rows receive NULL reservation fields
+   // and MUST be treated as LEGACY_UNVERIFIED by readers/arbitration (never 0 risk). Idempotent best-effort adds.
+   if(current < 3)
+     {
+      // Best-effort additive ALTERs; duplicate-column is treated as already-migrated for that column.
+      MigrateV2ToV3AddColumnBestEffort("execution_attempts", "risk_reserve_initial_amount", "REAL");
+      MigrateV2ToV3AddColumnBestEffort("execution_attempts", "risk_reserve_remaining_amount", "REAL");
+      MigrateV2ToV3AddColumnBestEffort("execution_attempts", "risk_reserve_currency", "TEXT");
+      MigrateV2ToV3AddColumnBestEffort("execution_attempts", "risk_reserve_equity_snapshot", "REAL");
+      MigrateV2ToV3AddColumnBestEffort("execution_attempts", "risk_reserve_percent_snapshot", "REAL");
+      MigrateV2ToV3AddColumnBestEffort("execution_attempts", "risk_reserve_model_version", "INTEGER");
+      MigrateV2ToV3AddColumnBestEffort("execution_attempts", "risk_reserve_state", "INTEGER");
+      MigrateV2ToV3AddColumnBestEffort("execution_attempts", "risk_reserve_revision", "INTEGER");
+      MigrateV2ToV3AddColumnBestEffort("execution_attempts", "risk_reserve_updated_at", "INTEGER");
+      MigrateV2ToV3AddColumnBestEffort("execution_attempts", "risk_reserve_release_reason", "TEXT");
+      if(!VerifyExecutionAttemptsV3Columns())
+        {
+         m_last_init_stage = "ExecutionLedger.MigrateSchema";
+         m_last_init_operation = "ExecuteSQL(v2->v3:VERIFY_EXECUTION_ATTEMPTS_V3_COLUMNS)";
+         m_last_init_error = GetLastError();
+         return false;
+        }
+      string set_ver3 = "INSERT OR REPLACE INTO execution_schema_meta (key, value) VALUES ('schema_version', '3');";
+      if(!ExecuteSQL(set_ver3))
+        {
+         m_last_init_stage = "ExecutionLedger.MigrateSchema";
+         m_last_init_operation = "ExecuteSQL(v2->v3:set_schema_version)";
          m_last_init_error = GetLastError();
          return false;
         }
@@ -1206,7 +1288,10 @@ bool CExecutionLedger::GetAttempt(const string attempt_id, ExecutionAttemptRecor
                 "executed_volume, remaining_volume, entry_price, stop_loss, take_profit, "
                 "created_at, submission_bound_at, submitted_at, broker_response_at, observed_at, resolved_at, "
                 "last_retcode, last_retcode_desc, broker_order_ticket, broker_deal_ticket, broker_position_ticket, "
-                "failure_class, state, submission_allowed, last_reason, schema_version "
+                "failure_class, state, submission_allowed, last_reason, schema_version, "
+                "COALESCE(risk_reserve_initial_amount,0), COALESCE(risk_reserve_remaining_amount,0), COALESCE(risk_reserve_currency,''), "
+                "COALESCE(risk_reserve_equity_snapshot,0), COALESCE(risk_reserve_percent_snapshot,0), COALESCE(risk_reserve_model_version,0), "
+                "COALESCE(risk_reserve_state,-1), COALESCE(risk_reserve_revision,0), COALESCE(risk_reserve_updated_at,0), COALESCE(risk_reserve_release_reason,'') "
                 "FROM execution_attempts WHERE attempt_id = '" + EscapeSQL(attempt_id) + "';";
 
    int handle = DatabasePrepare(m_db_handle, sql);
@@ -1244,6 +1329,8 @@ bool CExecutionLedger::GetAttempt(const string attempt_id, ExecutionAttemptRecor
       record.submission_allowed = (DatabaseColumnLong2(handle, 25) == 1);
       record.last_reason = DatabaseColumnString(handle, 26);
       record.schema_version = (int)DatabaseColumnLong2(handle, 27);
+      // F-002: reservation columns at 28..37 (COALESCE protects NULL legacy). State -1/unknown => LEGACY_UNVERIFIED.
+      ReadAttemptRiskReservationColumns(handle, 28, record);
       found = true;
      }
    DatabaseFinalize(handle);
@@ -2021,6 +2108,9 @@ bool CExecutionLedger::PrepareIntentRecord(ExecutionAttemptRecord &record) const
    record.executed_volume = 0.0;
    record.remaining_volume = record.requested_volume;
    record.schema_version = m_schema_version;
+   // F-002 foundation: unknown runtime reservation remains explicit; InsertIntentNoTx fails closed until verified.
+   if(record.risk_reserve_state == EXEC_RISK_RESERVE_STATE_UNKNOWN && !record.risk_reserve_known && record.risk_reserve_model_version == 0)
+      InitRiskReservationUnknown(record);
    return true;
   }
 
@@ -2028,28 +2118,48 @@ bool CExecutionLedger::InsertIntentNoTx(const ExecutionAttemptRecord &record)
   {
    if(!m_db_available || m_db_handle == INVALID_HANDLE)
       return false;
+   ExecutionAttemptRecord persist = record;
+   string perr="";
+   // F-002: durable initial reservation is required atomically with durable Intent for supported schema v3 paths.
+   // Legacy/unverified/unknown reservation is fail-closed for new intent persistence (never 0-risk, never silent).
+   if(!NormalizeRiskReservationForPersist(persist, perr))
+      return false;
    string sql = "INSERT INTO execution_attempts (attempt_id, setup_id, symbol, magic, intent, direction, "
                 "requested_volume, executed_volume, remaining_volume, entry_price, stop_loss, take_profit, "
-                "created_at, state, submission_allowed, schema_version) VALUES ('" +
-                EscapeSQL(record.attempt_id) + "','" +
-                EscapeSQL(record.setup_id) + "','" +
-                EscapeSQL(record.symbol) + "'," +
-                IntegerToString((long)record.magic) + "," +
-                IntegerToString((int)record.intent) + "," +
-                IntegerToString((int)record.direction) + "," +
-                DoubleToString(record.requested_volume, 8) + "," +
-                DoubleToString(record.executed_volume, 8) + "," +
-                DoubleToString(record.remaining_volume, 8) + "," +
-                DoubleToString(record.entry_price, 8) + "," +
-                DoubleToString(record.stop_loss, 8) + "," +
-                DoubleToString(record.take_profit, 8) + "," +
-                IntegerToString((long)record.created_at) + "," +
-                IntegerToString((int)record.state) + "," +
+                "created_at, state, submission_allowed, schema_version, "
+                "risk_reserve_initial_amount, risk_reserve_remaining_amount, risk_reserve_currency, "
+                "risk_reserve_equity_snapshot, risk_reserve_percent_snapshot, risk_reserve_model_version, "
+                "risk_reserve_state, risk_reserve_revision, risk_reserve_updated_at, risk_reserve_release_reason) VALUES ('" +
+                EscapeSQL(persist.attempt_id) + "','" +
+                EscapeSQL(persist.setup_id) + "','" +
+                EscapeSQL(persist.symbol) + "'," +
+                IntegerToString((long)persist.magic) + "," +
+                IntegerToString((int)persist.intent) + "," +
+                IntegerToString((int)persist.direction) + "," +
+                DoubleToString(persist.requested_volume, 8) + "," +
+                DoubleToString(persist.executed_volume, 8) + "," +
+                DoubleToString(persist.remaining_volume, 8) + "," +
+                DoubleToString(persist.entry_price, 8) + "," +
+                DoubleToString(persist.stop_loss, 8) + "," +
+                DoubleToString(persist.take_profit, 8) + "," +
+                IntegerToString((long)persist.created_at) + "," +
+                IntegerToString((int)persist.state) + "," +
                 IntegerToString(0) + "," +
-                IntegerToString(record.schema_version) + ");";
+                IntegerToString(persist.schema_version) + "," +
+                DoubleToString(persist.risk_reserve_initial_amount, 8) + "," +
+                DoubleToString(persist.risk_reserve_remaining_amount, 8) + ",'" +
+                EscapeSQL(persist.risk_reserve_currency) + "'," +
+                DoubleToString(persist.risk_reserve_equity_snapshot, 8) + "," +
+                DoubleToString(persist.risk_reserve_percent_snapshot, 8) + "," +
+                IntegerToString(persist.risk_reserve_model_version) + "," +
+                IntegerToString(persist.risk_reserve_state) + "," +
+                IntegerToString(persist.risk_reserve_revision) + "," +
+                IntegerToString((long)persist.risk_reserve_updated_at) + ",'" +
+                EscapeSQL(persist.risk_reserve_release_reason) + "');";
    if(!ExecuteSQL(sql))
       return false;
-   return LogStateTransitionInTx(record.attempt_id, EXEC_STATE_NONE, EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED, "Intent created");
+   return LogStateTransitionInTx(persist.attempt_id, EXEC_STATE_NONE, EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED,
+                                 "Intent created; risk_reserve=" + DoubleToString(persist.risk_reserve_initial_amount, 2) + " " + persist.risk_reserve_currency);
   }
 
 bool CExecutionLedger::CreateIntentInTx(ExecutionAttemptRecord &record, string &err)
@@ -2080,6 +2190,176 @@ bool CExecutionLedger::AffectedRowsIsOne(bool &ok)
    return true;
   }
 
+bool CExecutionLedger::TableHasColumn(const string table_name, const string column_name, bool &has_column)
+  {
+   has_column = false;
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+      return false;
+   string sql = "PRAGMA table_info(" + EscapeSQL(table_name) + ");";
+   int h = DatabasePrepare(m_db_handle, sql);
+   if(h == INVALID_HANDLE)
+      return false;
+   while(DatabaseRead(h))
+     {
+      string name = DatabaseColumnString(h, 1);
+      if(name == column_name)
+        { has_column = true; DatabaseFinalize(h); return true; }
+     }
+   DatabaseFinalize(h);
+   return true;
+  }
+
+bool CExecutionLedger::MigrateV2ToV3AddColumnBestEffort(const string table_name, const string column_name, const string column_type)
+  {
+   bool has = false;
+   if(!TableHasColumn(table_name, column_name, has))
+      return false;
+   if(has)
+      return true;
+   string sql = "ALTER TABLE " + EscapeSQL(table_name) + " ADD COLUMN " + EscapeSQL(column_name) + " " + column_type + ";";
+   // Best-effort: if column already exists in a race/drift case, treat as success; verification is authoritative.
+   if(ExecuteSQL(sql))
+      return true;
+   has = false;
+   if(TableHasColumn(table_name, column_name, has) && has)
+      return true;
+   return false;
+  }
+
+bool CExecutionLedger::VerifyExecutionAttemptsV3Columns()
+  {
+   bool ok=false;
+   if(!TableHasColumn("execution_attempts","risk_reserve_initial_amount",ok) || !ok) return false;
+   if(!TableHasColumn("execution_attempts","risk_reserve_remaining_amount",ok) || !ok) return false;
+   if(!TableHasColumn("execution_attempts","risk_reserve_currency",ok) || !ok) return false;
+   if(!TableHasColumn("execution_attempts","risk_reserve_equity_snapshot",ok) || !ok) return false;
+   if(!TableHasColumn("execution_attempts","risk_reserve_percent_snapshot",ok) || !ok) return false;
+   if(!TableHasColumn("execution_attempts","risk_reserve_model_version",ok) || !ok) return false;
+   if(!TableHasColumn("execution_attempts","risk_reserve_state",ok) || !ok) return false;
+   if(!TableHasColumn("execution_attempts","risk_reserve_revision",ok) || !ok) return false;
+   if(!TableHasColumn("execution_attempts","risk_reserve_updated_at",ok) || !ok) return false;
+   if(!TableHasColumn("execution_attempts","risk_reserve_release_reason",ok) || !ok) return false;
+   return true;
+  }
+
+void CExecutionLedger::InitRiskReservationUnknown(ExecutionAttemptRecord &record) const
+  {
+   record.risk_reserve_initial_amount = 0.0;
+   record.risk_reserve_remaining_amount = 0.0;
+   record.risk_reserve_currency = "";
+   record.risk_reserve_equity_snapshot = 0.0;
+   record.risk_reserve_percent_snapshot = 0.0;
+   record.risk_reserve_model_version = 0;
+   record.risk_reserve_state = EXEC_RISK_RESERVE_STATE_UNKNOWN;
+   record.risk_reserve_revision = 0;
+   record.risk_reserve_updated_at = 0;
+   record.risk_reserve_release_reason = "";
+   record.risk_reserve_known = false;
+  }
+
+void CExecutionLedger::InitRiskReservationLegacyUnverified(ExecutionAttemptRecord &record) const
+  {
+   InitRiskReservationUnknown(record);
+   record.risk_reserve_state = EXEC_RISK_RESERVE_STATE_LEGACY_UNVERIFIED;
+   record.risk_reserve_release_reason = "LEGACY_SCHEMA_NULL";
+   record.risk_reserve_known = false;
+  }
+
+bool CExecutionLedger::NormalizeRiskReservationForPersist(ExecutionAttemptRecord &record, string &err) const
+  {
+   err = "";
+   if(!record.risk_reserve_known)
+     { err = "RESERVATION_UNKNOWN_OR_UNVERIFIED"; return false; }
+   if(record.risk_reserve_model_version != EXEC_RISK_RESERVE_MODEL_V1)
+     { err = "RESERVATION_MODEL_UNKNOWN"; return false; }
+   if(record.risk_reserve_currency == "")
+     { err = "RESERVATION_CURRENCY_MISSING"; return false; }
+   if(!MathIsValidNumber(record.risk_reserve_initial_amount) || record.risk_reserve_initial_amount <= 0.0)
+     { err = "RESERVATION_INITIAL_INVALID"; return false; }
+   if(!MathIsValidNumber(record.risk_reserve_remaining_amount) || record.risk_reserve_remaining_amount < 0.0)
+     { err = "RESERVATION_REMAINING_INVALID"; return false; }
+   if(!MathIsValidNumber(record.risk_reserve_equity_snapshot) || record.risk_reserve_equity_snapshot <= 0.0)
+     { err = "RESERVATION_EQUITY_INVALID"; return false; }
+   if(!MathIsValidNumber(record.risk_reserve_percent_snapshot) || record.risk_reserve_percent_snapshot <= 0.0)
+     { err = "RESERVATION_PERCENT_INVALID"; return false; }
+   if(record.risk_reserve_revision < 1)
+     record.risk_reserve_revision = 1;
+   if(record.risk_reserve_state <= EXEC_RISK_RESERVE_STATE_LEGACY_UNVERIFIED)
+     record.risk_reserve_state = EXEC_RISK_RESERVE_STATE_ACTIVE;
+   if(record.risk_reserve_updated_at <= 0)
+     record.risk_reserve_updated_at = TimeCurrent();
+   return true;
+  }
+
+bool CExecutionLedger::PopulateRiskReservationFromAttemptParams(const string symbol, ENUM_ORDER_INTENT intent, double volume, double entry_price, double stop_loss, ExecutionAttemptRecord &record, string &err) const
+  {
+   err = "";
+   InitRiskReservationUnknown(record);
+   if(symbol == "" || volume <= 0.0 || entry_price <= 0.0 || stop_loss <= 0.0)
+     { err = "RESERVATION_INPUT_INVALID"; return false; }
+   ENUM_ORDER_TYPE order_type = (intent == ORDER_INTENT_OPEN_LONG ? ORDER_TYPE_BUY : (intent == ORDER_INTENT_OPEN_SHORT ? ORDER_TYPE_SELL : (ENUM_ORDER_TYPE)-1));
+   if(order_type != ORDER_TYPE_BUY && order_type != ORDER_TYPE_SELL)
+     { err = "RESERVATION_ORDER_TYPE_INVALID"; return false; }
+   double loss = 0.0;
+   ResetLastError();
+   if(!OrderCalcProfit(order_type, symbol, volume, entry_price, stop_loss, loss))
+     { err = "RESERVATION_ORDERCALCPROFIT_FAILED"; return false; }
+   loss = MathAbs(loss);
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   string currency = AccountInfoString(ACCOUNT_CURRENCY);
+   if(!MathIsValidNumber(loss) || loss <= 0.0) { err = "RESERVATION_LOSS_INVALID"; return false; }
+   if(!MathIsValidNumber(equity) || equity <= 0.0) { err = "RESERVATION_EQUITY_INVALID"; return false; }
+   if(currency == "") { err = "RESERVATION_CURRENCY_INVALID"; return false; }
+   record.risk_reserve_known = true;
+   record.risk_reserve_model_version = EXEC_RISK_RESERVE_MODEL_V1;
+   record.risk_reserve_state = EXEC_RISK_RESERVE_STATE_ACTIVE;
+   record.risk_reserve_initial_amount = loss;
+   record.risk_reserve_remaining_amount = loss;
+   record.risk_reserve_currency = currency;
+   record.risk_reserve_equity_snapshot = equity;
+   record.risk_reserve_percent_snapshot = (loss / equity * 100.0);
+   record.risk_reserve_revision = 1;
+   record.risk_reserve_updated_at = TimeCurrent();
+   record.risk_reserve_release_reason = "";
+   return true;
+  }
+
+bool CExecutionLedger::ReadAttemptRiskReservationColumns(int handle, int start_col, ExecutionAttemptRecord &record) const
+  {
+   // start_col points to risk_reserve_initial_amount (REAL, nullable in legacy migrated rows).
+   // COALESCE in SELECT maps NULL->0/''/-1; -1 state means legacy/null/unverified and must fail closed (never 0 risk).
+   record.risk_reserve_initial_amount   = DatabaseColumnDouble2(handle, start_col + 0);
+   record.risk_reserve_remaining_amount = DatabaseColumnDouble2(handle, start_col + 1);
+   record.risk_reserve_currency         = DatabaseColumnString(handle, start_col + 2);
+   record.risk_reserve_equity_snapshot  = DatabaseColumnDouble2(handle, start_col + 3);
+   record.risk_reserve_percent_snapshot = DatabaseColumnDouble2(handle, start_col + 4);
+   record.risk_reserve_model_version    = (int)DatabaseColumnLong2(handle, start_col + 5);
+   record.risk_reserve_state            = (int)DatabaseColumnLong2(handle, start_col + 6);
+   record.risk_reserve_revision         = (int)DatabaseColumnLong2(handle, start_col + 7);
+   record.risk_reserve_updated_at       = (datetime)DatabaseColumnLong2(handle, start_col + 8);
+   record.risk_reserve_release_reason   = DatabaseColumnString(handle, start_col + 9);
+   if(record.risk_reserve_state < 0)
+      record.risk_reserve_state = EXEC_RISK_RESERVE_STATE_LEGACY_UNVERIFIED;
+   record.risk_reserve_known = (record.risk_reserve_state > EXEC_RISK_RESERVE_STATE_LEGACY_UNVERIFIED &&
+                                record.risk_reserve_model_version == EXEC_RISK_RESERVE_MODEL_V1 &&
+                                record.risk_reserve_currency != "" &&
+                                record.risk_reserve_initial_amount > 0.0 &&
+                                MathIsValidNumber(record.risk_reserve_initial_amount));
+   if(!record.risk_reserve_known)
+     {
+      // Preserve amounts/currency for diagnostics only; known=false prevents reservation credit.
+      if(record.risk_reserve_state == EXEC_RISK_RESERVE_STATE_UNKNOWN)
+         InitRiskReservationLegacyUnverified(record);
+      else if(record.risk_reserve_state == EXEC_RISK_RESERVE_STATE_LEGACY_UNVERIFIED)
+         { record.risk_reserve_known = false; if(record.risk_reserve_release_reason=="") record.risk_reserve_release_reason="LEGACY_SCHEMA_NULL"; }
+      else
+         { InitRiskReservationUnknown(record); record.risk_reserve_state=EXEC_RISK_RESERVE_STATE_INVALID; }
+     }
+   return true;
+  }
+
+
+
 //+------------------------------------------------------------------+
 //| Log State Transition                                             |
 //+------------------------------------------------------------------+
@@ -2099,8 +2379,6 @@ CExecutionLedger::ENUM_CLAIM_RESULT CExecutionLedger::CreateClaim(
     int serialization_version,
     ExecutionAttemptRecord &initial_attempt)
   {
-   (void)strategy_group_key; (void)logical_setup_key; (void)canonical_identity;
-   (void)serialization_version;
    initial_attempt.last_reason = "OPTION_B_DEPRECATED_NONATOMIC_CREATE_CLAIM";
    return CLAIM_DEPRECATED_UNBOUND;
   }
@@ -2513,6 +2791,20 @@ CExecutionLedger::ENUM_RETRY_APPROVE_RESULT CExecutionLedger::ApproveAndCreateRe
    if(new_attempt.setup_id == "") new_attempt.setup_id = prior.setup_id;
    if(new_attempt.symbol == "") new_attempt.symbol = prior.symbol;
    if(new_attempt.magic == 0) new_attempt.magic = prior.magic;
+   if(new_attempt.intent == 0) new_attempt.intent = prior.intent;
+   if(new_attempt.direction == 0) new_attempt.direction = prior.direction;
+   if(new_attempt.requested_volume <= 0.0) new_attempt.requested_volume = prior.requested_volume;
+   if(new_attempt.entry_price <= 0.0) new_attempt.entry_price = prior.entry_price;
+   if(new_attempt.stop_loss <= 0.0) new_attempt.stop_loss = prior.stop_loss;
+   if(new_attempt.take_profit <= 0.0) new_attempt.take_profit = prior.take_profit;
+   // F-002: durable per-Attempt reservation required atomically for retry intent. Compute from prior requested exposure
+   // (conservative pre-submit reservation) if caller did not provide a verified reservation; fail closed if uncomputable.
+   if(!new_attempt.risk_reserve_known)
+     {
+      string rerr="";
+      if(!PopulateRiskReservationFromAttemptParams(new_attempt.symbol, new_attempt.intent, new_attempt.requested_volume, new_attempt.entry_price, new_attempt.stop_loss, new_attempt, rerr))
+        { DatabaseTransactionRollback(m_db_handle); out_detail="RETRY_RESERVATION_FAILED:"+rerr; return RETRY_APPROVE_DB_ERROR; }
+     }
    string txerr="";
    if(!CreateIntentInTx(new_attempt, txerr)) { DatabaseTransactionRollback(m_db_handle); out_detail="CREATE_INTENT_IN_TX_FAILED:"+txerr; return RETRY_APPROVE_DB_ERROR; }
 
@@ -2691,8 +2983,6 @@ CExecutionLedger::ENUM_CLAIM_RESULT CExecutionLedger::CreateSetupClaim(
     int serialization_version,
     const string attempt_id)
   {
-   (void)strategy_group_key; (void)logical_setup_key; (void)canonical_identity;
-   (void)serialization_version; (void)attempt_id;
    return CLAIM_DEPRECATED_UNBOUND;
   }
 
@@ -3176,7 +3466,6 @@ CExecutionLedger::ENUM_ATTEMPT_IDENTITY_RESOLUTION CExecutionLedger::GetSetupIde
     current_attempt_id = DatabaseColumnString(ch, 5);
     retry_sequence = (int)DatabaseColumnLong2(ch, 6);
     DatabaseFinalize(ch);
-    (void)claim_state;
     if(strategy_group_key == "" || logical_setup_key == "" || canonical_identity == "")
       { detail = "CLAIM_IDENTITY_FIELDS_MISSING claim=" + claim_id; return IDENTITY_CONFLICT; }
    }

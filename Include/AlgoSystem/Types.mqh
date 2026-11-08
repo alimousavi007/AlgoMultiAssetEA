@@ -128,10 +128,11 @@ struct RiskDecision
    string symbol;
 
    double risk_percent;
-   double risk_amount;
+   double risk_amount;            // configured budget: equity * risk_percent/100 (not per-candidate reservation)
 
    double stop_distance;
    double calculated_volume;
+   double actual_monetary_risk;   // F-002: verified per-candidate estimated loss for calculated_volume/entry/SL (account currency, OrderCalcProfit-based). 0/invalid => fail closed.
 
    double portfolio_risk_after;
 

@@ -51,6 +51,7 @@ private:
 
       decision.stop_distance=0.0;
       decision.calculated_volume=0.0;
+      decision.actual_monetary_risk=0.0;
 
       decision.portfolio_risk_after=0.0;
 
@@ -555,6 +556,18 @@ public:
 
       decision.calculated_volume=
          volume;
+      // F-002: verified per-candidate reservation amount (actual estimated loss for chosen volume), account currency.
+      // Smallest correct, no buffers; fail-closed if calculation invalid.
+      {
+       double candidate_risk=0.0;
+       ResetLastError();
+       if(!OrderCalcProfit(order_type,signal.symbol,volume,entry_price,signal.stop,candidate_risk))
+          return Reject(decision,REJECT_EXECUTION,"OrderCalcProfit(candidate volume) failed");
+       candidate_risk=MathAbs(candidate_risk);
+       if(!MathIsValidNumber(candidate_risk) || candidate_risk<=0.0)
+          return Reject(decision,REJECT_EXECUTION,"Invalid candidate monetary risk");
+       decision.actual_monetary_risk=candidate_risk;
+      }
 
       // PortfolioRisk will refine this value later.
       decision.portfolio_risk_after=

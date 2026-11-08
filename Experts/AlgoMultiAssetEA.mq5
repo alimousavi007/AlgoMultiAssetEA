@@ -1147,23 +1147,36 @@ if(struct_res != EVIDENCE_SUFFICIENT_NO_INVALIDATION)
       }
     ExecutionAttemptRecord attempt_rec;
     ZeroMemory(attempt_rec);
-    attempt_rec.attempt_id = request.attempt_id;
-    attempt_rec.setup_id = normalized_plan.setup_id;
-    attempt_rec.symbol = request.symbol;
-    attempt_rec.magic = request.magic;
-    attempt_rec.intent = request.intent;
-    attempt_rec.direction = request.direction;
-    attempt_rec.requested_volume = request.volume;
-    attempt_rec.entry_price = request.price;
-    attempt_rec.stop_loss = request.stop_loss;
-    attempt_rec.take_profit = request.take_profit;
-    // E2.6/RS identity fields for atomic claim+intent (restart-stable; not setup_id/attempt_id)
-    attempt_rec.strategy_group_key = g_strategy_group_key;
-    attempt_rec.logical_setup_key = normalized_plan.logical_setup_key;
-    attempt_rec.serialization_version = 2;
-    attempt_rec.canonical_identity = CExecutionLedger::BuildStableCanonicalIdentity(
-        g_strategy_group_key, normalized_plan.symbol, "DEFAULT_SETUP",
-        (int)normalized_plan.direction, normalized_plan.signal_time, (int)runtime.setup_tf, 2);
+     attempt_rec.attempt_id = request.attempt_id;
+     attempt_rec.setup_id = normalized_plan.setup_id;
+     attempt_rec.symbol = request.symbol;
+     attempt_rec.magic = request.magic;
+     attempt_rec.intent = request.intent;
+     attempt_rec.direction = request.direction;
+     attempt_rec.requested_volume = request.volume;
+     attempt_rec.entry_price = request.price;
+     attempt_rec.stop_loss = request.stop_loss;
+     attempt_rec.take_profit = request.take_profit;
+     // F-002: durable per-Attempt initial risk reservation (verified per-candidate monetary loss, account currency).
+     // Atomic with durable Intent via CreateSetupClaimAndIntent; fail-closed if unknown/invalid.
+     attempt_rec.risk_reserve_known = (risk.actual_monetary_risk > 0.0 && MathIsValidNumber(risk.actual_monetary_risk) && AccountInfoDouble(ACCOUNT_EQUITY) > 0.0);
+     attempt_rec.risk_reserve_model_version = EXEC_RISK_RESERVE_MODEL_V1;
+     attempt_rec.risk_reserve_state = EXEC_RISK_RESERVE_STATE_ACTIVE;
+     attempt_rec.risk_reserve_initial_amount = risk.actual_monetary_risk;
+     attempt_rec.risk_reserve_remaining_amount = risk.actual_monetary_risk;
+     attempt_rec.risk_reserve_currency = AccountInfoString(ACCOUNT_CURRENCY);
+     attempt_rec.risk_reserve_equity_snapshot = AccountInfoDouble(ACCOUNT_EQUITY);
+     attempt_rec.risk_reserve_percent_snapshot = (attempt_rec.risk_reserve_equity_snapshot > 0.0 ? (attempt_rec.risk_reserve_initial_amount / attempt_rec.risk_reserve_equity_snapshot * 100.0) : 0.0);
+     attempt_rec.risk_reserve_revision = 1;
+     attempt_rec.risk_reserve_updated_at = TimeCurrent();
+     attempt_rec.risk_reserve_release_reason = "";
+     // E2.6/RS identity fields for atomic claim+intent (restart-stable; not setup_id/attempt_id)
+     attempt_rec.strategy_group_key = g_strategy_group_key;
+     attempt_rec.logical_setup_key = normalized_plan.logical_setup_key;
+     attempt_rec.serialization_version = 2;
+     attempt_rec.canonical_identity = CExecutionLedger::BuildStableCanonicalIdentity(
+         g_strategy_group_key, normalized_plan.symbol, "DEFAULT_SETUP",
+         (int)normalized_plan.direction, normalized_plan.signal_time, (int)runtime.setup_tf, 2);
     {
      // RS01-CANON-01: stable canonical identity (v2). Legacy v1 claims recognized by ledger compatibility.
      string claim_intent_err = "";
