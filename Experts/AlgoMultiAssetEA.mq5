@@ -2617,7 +2617,11 @@ bool RetryUIFillReviewFromLedgerCandidate(const CExecutionLedger::RetryEligibleC
    out.chart_id=ChartID(); out.chart_symbol=ChartSymbol(0); out.chart_period=(int)Period();
    out.config_fingerprint=g_config_fingerprint; out.reviewed_at=TimeCurrent();
    out.valid=true;
-   return RetryUIChartContextCurrent(out) ? true : (diag="CHART_CONTEXT_INVALID", out.valid=false, false);
+   if(RetryUIChartContextCurrent(out))
+      return true;
+   diag="CHART_CONTEXT_INVALID";
+   out.valid=false;
+   return false;
   }
 
 bool RetryUILoadCandidateList(string &diag)
@@ -2660,8 +2664,8 @@ bool RetryUIRefreshCandidate(RetryReviewCandidate &c, string &diag)
    if(n < 0) { diag = (err=="" ? "CANDIDATE_RELOAD_FAILED" : err); return false; }
    for(int i=0;i<n;i++)
      {
-      CExecutionLedger::RetryEligibleCandidate &x=list[i];
-      if(!x.valid) continue;
+       CExecutionLedger::RetryEligibleCandidate x = list[i];
+       if(!x.valid) continue;
       if(x.claim_id==c.claim_id && x.strategy_group_key==c.strategy_group_key && x.logical_setup_key==c.logical_setup_key &&
          x.prior_attempt_id==c.prior_attempt_id && x.retry_sequence==c.retry_sequence)
         {
@@ -3016,7 +3020,7 @@ bool RetryUIRevalidateFreshPlan(CSymbolRuntime &runtime,
    if(!runtime.valid || runtime.symbol!=new_att.symbol) { reason="RUNTIME_SYMBOL_MISMATCH"; return false; }
    if(expected_group_key=="" || expected_lsk=="" || expected_group_key!=g_strategy_group_key) { reason="GROUP_KEY_MISMATCH"; return false; }
    if(expected_config_fingerprint!=g_config_fingerprint) { reason="CONFIG_FINGERPRINT_CHANGED"; return false; }
-   if(!IsSessionFilterAllowed(TimeCurrent())) { reason="SESSION_FILTER_BLOCKED"; return false; }
+   if(!g_session_filter.IsAllowed(TimeCurrent())) { reason="SESSION_FILTER_BLOCKED"; return false; }
 
    MarketSnapshot context_market, structure_market, setup_market, entry_market;
    FeatureSet context_features, structure_features, setup_features, entry_features;
@@ -3253,7 +3257,6 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
    // E2.6: invalidate local retry review on geometry/context-affecting events (no ledger/broker mutation).
    RetryUIInvalidate("CHART_GEOMETRY_CHANGED");
    if(id == CHARTEVENT_CHART_CHANGE)
-     {)
      {
       g_dashboard.HandleChartGeometryChange();
       RetryUIEnsureObjects();
@@ -3447,7 +3450,6 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
             { known = true; break; }
          }
        // Unknown sender ignored (fail-safe). Known ACK is accepted as protocol evidence only.
-       (void)ack_seq; (void)known;
       }
     else if(id == CHARTEVENT_CUSTOM + CHARTREG_UNREGISTER)
       {

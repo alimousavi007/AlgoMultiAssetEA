@@ -42,6 +42,14 @@ enum ENUM_GATEWAY_AUTHORITY_STATE
 
 //+------------------------------------------------------------------+
 //| Execution Attempt Record                                         |
+//| Option B identity contract (R3A): setup_claims is authoritative  |
+//| for strategy_group_key/logical_setup_key/canonical_identity and   |
+//| claim serialization_version. execution_attempts stores execution  |
+//| state and broker evidence only. The four identity fields below    |
+//| are creation-time/caller context and are NOT durably persisted or |
+//| reconstructed by GetAttempt(); empty/default values must never be |
+//| treated as valid persisted setup identity. Use an explicit        |
+//| fail-closed claim-resolution path for identity-dependent logic.   |
 //+------------------------------------------------------------------+
 struct ExecutionAttemptRecord
   {
@@ -68,6 +76,10 @@ struct ExecutionAttemptRecord
    ulong                 broker_order_ticket;
    ulong                 broker_deal_ticket;
    ulong                 broker_position_ticket;
+   string                strategy_group_key;      // creation-time context; not persisted by GetAttempt (Option B)
+   string                logical_setup_key;        // creation-time context; not persisted by GetAttempt (Option B)
+   string                canonical_identity;       // creation-time context; not persisted by GetAttempt (Option B)
+   int                   serialization_version;    // claim serialization context; not persisted by GetAttempt (Option B)
    string                failure_class;
    ENUM_EXEC_ATTEMPT_STATE state;
    bool                  submission_allowed;
@@ -99,9 +111,20 @@ private:
                                              uint retcode=0);
     bool               PrepareIntentRecord(ExecutionAttemptRecord &record) const;
     bool               InsertIntentNoTx(const ExecutionAttemptRecord &record);
+    bool               CreateIntentInTx(ExecutionAttemptRecord &record, string &err);
     bool               AffectedRowsIsOne(bool &ok);
     string             GenerateAttemptId();
     string             EscapeSQL(const string s) const;
+    struct AttemptIdentityEventRef
+      {
+       string claim_id;
+       string group;
+       string lsk;
+       string prior_id;
+       string new_id;
+       int    seq_before;
+       int    seq_after;
+      };
 
 public:
                      CExecutionLedger();
@@ -121,8 +144,8 @@ public:
     bool               HasUnresolvedForSymbol(const string symbol, bool include_ambiguous);
 
     // Intent and submission tracking
+    // Option B (R3A): deprecated/unbound creation APIs fail closed (no DB mutation, no claim binding).
     bool               CreateIntent(ExecutionAttemptRecord &record);
-    bool               CreateIntentInTx(ExecutionAttemptRecord &record, string &err);
     bool               MarkSubmissionBound(const string attempt_id, const string reason="");
     bool               CanSubmit(const string attempt_id, string &reason);
     bool               MarkSubmissionMayHaveOccurred(const string attempt_id, const string reason="");
@@ -142,15 +165,17 @@ public:
     bool               QuarantineOrphanIntent(const ExecutionAttemptRecord &rec);
 
     // E2.3 / RS-01: Setup Claim lifecycle (durable logical-setup deduplication)
-    enum ENUM_CLAIM_RESULT { CLAIM_CREATED=0, CLAIM_ALREADY_EXISTS, CLAIM_IDENTITY_COLLISION, CLAIM_ERROR };
+    // Option B (R3A): setup_claims is authoritative for logical setup identity.
+    // Supported attempt creation paths only: CreateSetupClaimAndIntent (initial) and ApproveAndCreateRetry (controlled retry).
+    // CreateClaim/CreateSetupClaim are deprecated compatibility APIs and fail closed (no durable mutation).
+    enum ENUM_CLAIM_RESULT { CLAIM_CREATED=0, CLAIM_ALREADY_EXISTS, CLAIM_IDENTITY_COLLISION, CLAIM_ERROR, CLAIM_DEPRECATED_UNBOUND };
     ENUM_CLAIM_RESULT  CreateClaim(const string strategy_group_key,
                                     const string logical_setup_key,
                                     const string canonical_identity,
                                     int serialization_version,
                                     ExecutionAttemptRecord &initial_attempt);
-    // RS-01: acquire durable claim for an attempt id WITHOUT creating the intent (EA creates intent
-    // separately). Claim is ACTIVE and bound to attempt_id. Fail-closed. A claim-without-intent
-    // crash state remains fail-closed (blocks same logical setup) and is visible to recovery.
+    // Deprecated (Option B): claim-only acquisition without atomic intent is not a supported submission path.
+    // Fails closed; no claim row is created/mutated.
     ENUM_CLAIM_RESULT  CreateSetupClaim(const string strategy_group_key,
                                         const string logical_setup_key,
                                         const string canonical_identity,
@@ -292,6 +317,25 @@ public:
                                    const string attempt_id,
                                    ENUM_EXEC_ATTEMPT_STATE final_state,
                                    const string reason);
+
+    // Option B (R3A): read-only, fail-closed Attempt -> authoritative setup_claim identity resolver.
+    // Never mutates DB/state, never infers/regenerates identity, never uses symbol/magic/time/tickets/chart.
+    enum ENUM_ATTEMPT_IDENTITY_RESOLUTION
+      {
+       IDENTITY_RESOLVED=0,
+       IDENTITY_NOT_FOUND,
+       IDENTITY_AMBIGUOUS,
+       IDENTITY_CONFLICT,
+       IDENTITY_DB_UNAVAILABLE
+      };
+    ENUM_ATTEMPT_IDENTITY_RESOLUTION GetSetupIdentityForAttempt(
+                                        const string attempt_id,
+                                        string &claim_id,
+                                        string &strategy_group_key,
+                                        string &logical_setup_key,
+                                        string &canonical_identity,
+                                        int &serialization_version,
+                                        string &detail);
 
     // E2.4: Gateway Authority
     bool               ProvisionAuthority(const string authority_key);
@@ -795,26 +839,14 @@ string CExecutionLedger::GenerateAttemptId()
 
 //+------------------------------------------------------------------+
 //| Create Intent                                                     |
+//| Option B (R3A): deprecated fail-closed. Supported initial/retry  |
+//| attempt creation must use CreateSetupClaimAndIntent or            |
+//| ApproveAndCreateRetry (atomic claim-bound paths). No DB mutation. |
 //+------------------------------------------------------------------+
 bool CExecutionLedger::CreateIntent(ExecutionAttemptRecord &record)
   {
-   if(!m_db_available || m_db_handle == INVALID_HANDLE)
-      return false;
-
-   if(record.attempt_id == "")
-      record.attempt_id = GenerateAttemptId();
-   if(!PrepareIntentRecord(record))
-      return false;
-   if(!DatabaseTransactionBegin(m_db_handle))
-      return false;
-   if(!InsertIntentNoTx(record))
-     {
-      DatabaseTransactionRollback(m_db_handle);
-      return false;
-     }
-   if(!DatabaseTransactionCommit(m_db_handle))
-      return false;
-   return true;
+   record.last_reason = "OPTION_B_DEPRECATED_UNBOUND_CREATE_INTENT";
+   return false;
   }
 
 //+------------------------------------------------------------------+
@@ -1158,6 +1190,12 @@ bool CExecutionLedger::ResolveAttempt(const string attempt_id, ENUM_EXEC_ATTEMPT
 
 //+------------------------------------------------------------------+
 //| Get Attempt                                                       |
+//| Option B (R3A): returns execution/broker evidence only.           |
+//| strategy_group_key/logical_setup_key/canonical_identity/          |
+//| serialization_version are NOT persisted in execution_attempts and  |
+//| are NOT reconstructed here. Identity-dependent callers must use a |
+//| validated setup_claim path (e.g. GetSetupIdentityForAttempt) and  |
+//| must never treat empty/default values as valid persisted identity. |
 //+------------------------------------------------------------------+
 bool CExecutionLedger::GetAttempt(const string attempt_id, ExecutionAttemptRecord &record)
   {
@@ -2053,6 +2091,7 @@ bool CExecutionLedger::LogStateTransition(const string attempt_id, ENUM_EXEC_ATT
    }
 
 // E2.3: Setup Claim lifecycle implementations (minimal, fail-closed)
+// Option B (R3A): legacy non-atomic/unbound APIs are fail-closed. No DB mutation.
 CExecutionLedger::ENUM_CLAIM_RESULT CExecutionLedger::CreateClaim(
     const string strategy_group_key,
     const string logical_setup_key,
@@ -2060,65 +2099,10 @@ CExecutionLedger::ENUM_CLAIM_RESULT CExecutionLedger::CreateClaim(
     int serialization_version,
     ExecutionAttemptRecord &initial_attempt)
   {
-   if(!m_db_available || m_db_handle == INVALID_HANDLE)
-      return CLAIM_ERROR;
-   if(strategy_group_key == "" || logical_setup_key == "" || canonical_identity == "")
-      return CLAIM_ERROR;
-    // Check existing claim
-    string check_sql = "SELECT claim_id, canonical_identity FROM setup_claims WHERE strategy_group_key='" +
-                       EscapeSQL(strategy_group_key) + "' AND logical_setup_key='" + EscapeSQL(logical_setup_key) + "';";
-    int handle = DatabasePrepare(m_db_handle, check_sql);
-    if(handle == INVALID_HANDLE)
-       return CLAIM_ERROR;
-    bool exists = false;
-    string existing_id = "";
-    string existing_canonical = "";
-    if(DatabaseRead(handle))
-      {
-       exists = true;
-       existing_id = DatabaseColumnString(handle, 0);
-       existing_canonical = DatabaseColumnString(handle, 1);
-      }
-     DatabaseFinalize(handle);
-     if(exists)
-       {
-        // RS01-CANON-01: compare stable logical identity; accept legacy v1 (ignore volatile setup_id).
-        if(!CanonicalSameLogicalSetup(existing_canonical, canonical_identity))
-           return CLAIM_IDENTITY_COLLISION;
-        if(existing_canonical != canonical_identity)
-           UpgradeClaimCanonicalIfSafe(existing_id, existing_canonical, canonical_identity);
-        // Existing claim for same logical setup blocks a new submission attempt (fail-closed).
-        // Releasing/recycling is not performed here; it must follow approved claim/attempt semantics.
-        return CLAIM_ALREADY_EXISTS;
-       }
-   // Persist initial Attempt first (separate transaction)
-   if(initial_attempt.attempt_id == "")
-      initial_attempt.attempt_id = GenerateAttemptId();
-   if(!CreateIntent(initial_attempt))
-      return CLAIM_ERROR;
-   // Create claim row (atomic)
-   if(!DatabaseTransactionBegin(m_db_handle))
-      return CLAIM_ERROR;
-   string claim_id = "CLAIM_" + IntegerToString((long)TimeCurrent()) + "_" + IntegerToString(MathRand());
-   datetime now = TimeCurrent();
-   string insert_claim = "INSERT INTO setup_claims (claim_id, strategy_group_key, logical_setup_key, canonical_identity, "
-                        "serialization_version, claim_state, current_attempt_id, retry_sequence, created_at, updated_at, last_reason) "
-                        "VALUES ('" + EscapeSQL(claim_id) + "','" + EscapeSQL(strategy_group_key) + "','" +
-                        EscapeSQL(logical_setup_key) + "','" + EscapeSQL(canonical_identity) + "'," +
-                        IntegerToString(serialization_version) + "," + IntegerToString((int)SETUP_CLAIM_ACTIVE) + ",'" +
-                        EscapeSQL(initial_attempt.attempt_id) + "',0," + IntegerToString((long)now) + "," +
-                        IntegerToString((long)now) + ",'CREATED');";
-   if(!ExecuteSQL(insert_claim))
-     {
-      DatabaseTransactionRollback(m_db_handle);
-      return CLAIM_ERROR;
-     }
-   if(!DatabaseTransactionCommit(m_db_handle))
-     {
-      DatabaseTransactionRollback(m_db_handle);
-      return CLAIM_ERROR;
-     }
-   return CLAIM_CREATED;
+   (void)strategy_group_key; (void)logical_setup_key; (void)canonical_identity;
+   (void)serialization_version;
+   initial_attempt.last_reason = "OPTION_B_DEPRECATED_NONATOMIC_CREATE_CLAIM";
+   return CLAIM_DEPRECATED_UNBOUND;
   }
 
 //+------------------------------------------------------------------+
@@ -2440,8 +2424,9 @@ CExecutionLedger::ENUM_RETRY_APPROVE_RESULT CExecutionLedger::ApproveAndCreateRe
      { out_detail="INVALID_RETRY_SEQUENCE"; return RETRY_APPROVE_CANDIDATE_INVALID; }
    if(ctx.action_source != "LOCAL_CHART_OBJECT_CLICK")
      { out_detail="INVALID_ACTION_SOURCE"; return RETRY_APPROVE_NOT_AUTHORIZED; }
-   if(ctx.auth_model == "")
-      ((RetryLocalContext&)ctx).auth_model = "LOCAL_TERMINAL_SESSION_CONTEXT_ONLY";
+   RetryLocalContext effective_ctx = ctx;
+   if(effective_ctx.auth_model == "")
+      effective_ctx.auth_model = "LOCAL_TERMINAL_SESSION_CONTEXT_ONLY";
 
    string action_id = BuildRetryActionId(claim_id, prior_attempt_id, expected_retry_sequence);
    out_action_id = action_id;
@@ -2549,9 +2534,9 @@ CExecutionLedger::ENUM_RETRY_APPROVE_RESULT CExecutionLedger::ApproveAndCreateRe
    if(!AffectedRowsIsOne(ok) || !ok) { DatabaseTransactionRollback(m_db_handle); out_detail="CLAIM_UPDATE_AFFECTED_ROWS!=1"; return RETRY_APPROVE_CANDIDATE_INVALID; }
 
    // Durable single-use approval event (audit/idempotency), same tx.
-   datetime ts = (ctx.local_action_time>0 ? ctx.local_action_time : TimeCurrent());
+   datetime ts = (effective_ctx.local_action_time>0 ? effective_ctx.local_action_time : TimeCurrent());
    string ev_reason = evidence_reason; if(StringLen(ev_reason)>240) ev_reason = StringSubstr(ev_reason,0,240);
-   string b_reason = ctx.bounded_reason; if(StringLen(b_reason)>120) b_reason = StringSubstr(b_reason,0,120);
+   string b_reason = effective_ctx.bounded_reason; if(StringLen(b_reason)>120) b_reason = StringSubstr(b_reason,0,120);
    string ev_sql = "INSERT INTO retry_approval_events (action_id,claim_id,strategy_group_key,logical_setup_key,prior_attempt_id,new_attempt_id,"
                     "retry_sequence_before,retry_sequence_after,approval_timestamp,action_source,auth_model,account_login,account_server,"
                     "chart_id,chart_symbol,chart_period,ea_program,terminal_build,evidence_state,evidence_failure_class,evidence_retcode,"
@@ -2559,15 +2544,15 @@ CExecutionLedger::ENUM_RETRY_APPROVE_RESULT CExecutionLedger::ApproveAndCreateRe
                     EscapeSQL(action_id) + "','" + EscapeSQL(claim_id) + "','" + EscapeSQL(strategy_group_key) + "','" +
                     EscapeSQL(logical_setup_key) + "','" + EscapeSQL(prior_attempt_id) + "','" + EscapeSQL(new_attempt.attempt_id) + "'," +
                     IntegerToString(retry_seq) + "," + IntegerToString(retry_seq+1) + "," + IntegerToString((long)ts) + ",'" +
-                    EscapeSQL(ctx.action_source) + "','" + EscapeSQL(ctx.auth_model) + "','" + EscapeSQL(ctx.account_login) + "','" +
-                    EscapeSQL(ctx.account_server) + "'," + IntegerToString((long)ctx.chart_id) + ",'" + EscapeSQL(ctx.chart_symbol) + "'," +
-                    IntegerToString(ctx.chart_period) + ",'" + EscapeSQL(ctx.ea_program) + "'," + IntegerToString(ctx.terminal_build) + "," +
+                    EscapeSQL(effective_ctx.action_source) + "','" + EscapeSQL(effective_ctx.auth_model) + "','" + EscapeSQL(effective_ctx.account_login) + "','" +
+                    EscapeSQL(effective_ctx.account_server) + "'," + IntegerToString((long)effective_ctx.chart_id) + ",'" + EscapeSQL(effective_ctx.chart_symbol) + "'," +
+                    IntegerToString(effective_ctx.chart_period) + ",'" + EscapeSQL(effective_ctx.ea_program) + "'," + IntegerToString(effective_ctx.terminal_build) + "," +
                     IntegerToString((int)prior.state) + ",'" + EscapeSQL(prior.failure_class) + "'," + IntegerToString((int)prior.last_retcode) + ",'" +
                     EscapeSQL(ev_reason) + ";ui=" + EscapeSQL(b_reason) + "','COMMITTED_NOT_SUBMITTED'," + IntegerToString(m_schema_version) + ");";
    if(!ExecuteSQL(ev_sql)) { DatabaseTransactionRollback(m_db_handle); out_detail="INSERT_APPROVAL_EVENT_FAILED"; return RETRY_APPROVE_DB_ERROR; }
 
    if(!LogStateTransitionInTx(prior_attempt_id, EXEC_STATE_FINAL_FAILURE, EXEC_STATE_FINAL_FAILURE,
-                              "E2.6_RETRY_APPROVED action="+action_id+" new="+new_attempt.attempt_id+" src="+ctx.action_source, prior.last_retcode))
+                              "E2.6_RETRY_APPROVED action="+action_id+" new="+new_attempt.attempt_id+" src="+effective_ctx.action_source, prior.last_retcode))
      { DatabaseTransactionRollback(m_db_handle); out_detail="HISTORY_PRIOR_FAILED"; return RETRY_APPROVE_DB_ERROR; }
 
    if(!DatabaseTransactionCommit(m_db_handle))
@@ -2587,8 +2572,6 @@ bool CExecutionLedger::RetryAuthorize(const string claim_id,
                                      const string operator_approval_ref,
                                      const string reason)
   {
-   (void)claim_id; (void)strategy_group_key; (void)logical_setup_key; (void)attempt_id;
-   (void)expected_retry_sequence; (void)operator_approval_ref; (void)reason;
    return false;
   }
 
@@ -2599,8 +2582,6 @@ bool CExecutionLedger::RetryCreate(const string claim_id,
                                   int expected_retry_sequence_after_authorize,
                                   ExecutionAttemptRecord &new_attempt)
   {
-   (void)claim_id; (void)strategy_group_key; (void)logical_setup_key; (void)expected_prior_attempt_id;
-   (void)expected_retry_sequence_after_authorize; (void)new_attempt;
    return false;
   }
 
@@ -2697,20 +2678,11 @@ bool CExecutionLedger::GetSetupClaim(const string strategy_group_key,
 
 //+------------------------------------------------------------------+
 //| RS-01: CreateSetupClaim                                           |
-//| Acquires durable logical-setup claim bound to attempt_id WITHOUT  |
-//| creating an execution intent. The caller must create the intent   |
-//| separately only on CLAIM_CREATED. Fail-closed on any error,       |
-//| duplicate, identity collision, or DB unavailability.              |
-//|                                                                   |
-//| Claim-only crash state (claim exists, no intent row):            |
-//| - Same logical setup cannot acquire a second claim (UNIQUE +     |
-//|   duplicate check) => no second CreateIntent/broker submission.   |
-//| - Recovery must quarantine/report via attempt/claim visibility;   |
-//|   it must not auto-create intent or resubmit.                     |
-//|                                                                   |
-//| Not atomic with CreateIntent using current APIs (separate         |
-//| transactions). This is the smallest safe correction without       |
-//| unsafe nested-transaction refactor or schema rewrite.             |
+//| Option B (R3A): deprecated fail-closed. Claim-only acquisition    |
+//| without atomic intent is not a supported submission path and must  |
+//| not create durable claim state through this compatibility API.    |
+//| No DB mutation. Use CreateSetupClaimAndIntent for supported       |
+//| initial attempts.                                                 |
 //+------------------------------------------------------------------+
 CExecutionLedger::ENUM_CLAIM_RESULT CExecutionLedger::CreateSetupClaim(
     const string strategy_group_key,
@@ -2719,67 +2691,9 @@ CExecutionLedger::ENUM_CLAIM_RESULT CExecutionLedger::CreateSetupClaim(
     int serialization_version,
     const string attempt_id)
   {
-   if(!m_db_available || m_db_handle == INVALID_HANDLE)
-      return CLAIM_ERROR;
-   if(strategy_group_key == "" || logical_setup_key == "" || canonical_identity == "" || attempt_id == "")
-      return CLAIM_ERROR;
-   // Check existing claim (durable duplicate prevention across restarts)
-   string existing_id = "", existing_attempt = "";
-   int existing_state = -1;
-   // Read canonical_identity too
-   string check_sql = "SELECT claim_id, canonical_identity, claim_state, current_attempt_id FROM setup_claims WHERE strategy_group_key='" +
-                      EscapeSQL(strategy_group_key) + "' AND logical_setup_key='" + EscapeSQL(logical_setup_key) + "';";
-   int handle = DatabasePrepare(m_db_handle, check_sql);
-   if(handle == INVALID_HANDLE)
-      return CLAIM_ERROR;
-   bool exists = false;
-   string existing_canonical = "";
-   if(DatabaseRead(handle))
-     {
-      exists = true;
-      existing_id = DatabaseColumnString(handle, 0);
-      existing_canonical = DatabaseColumnString(handle, 1);
-      existing_state = (int)DatabaseColumnLong2(handle, 2);
-      existing_attempt = DatabaseColumnString(handle, 3);
-     }
-    DatabaseFinalize(handle);
-    if(exists)
-      {
-       // RS01-CANON-01: stable logical identity comparison; accept legacy v1 (ignore volatile setup_id).
-       // Unknown/unsafe formats and genuine stable-component differences fail closed as collision.
-       if(!CanonicalSameLogicalSetup(existing_canonical, canonical_identity))
-          return CLAIM_IDENTITY_COLLISION;
-       // Best-effort safe upgrade of legacy representation (transactional, optimistic). Failure does
-       // not weaken uniqueness, does not recycle LSK, and does not permit a second claim.
-       if(existing_canonical != canonical_identity)
-          UpgradeClaimCanonicalIfSafe(existing_id, existing_canonical, canonical_identity);
-       // Existing claim for same logical setup blocks a new submission attempt (fail-closed).
-       // Releasing/recycling is not performed here; it must follow approved claim/attempt semantics.
-       return CLAIM_ALREADY_EXISTS;
-      }
-   // Insert claim (ACTIVE) bound to this attempt_id. Attempt intent is created by caller on success.
-   if(!DatabaseTransactionBegin(m_db_handle))
-      return CLAIM_ERROR;
-   string claim_id = "CLAIM_" + IntegerToString((long)TimeCurrent()) + "_" + IntegerToString(MathRand());
-   datetime now = TimeCurrent();
-   string insert_claim = "INSERT INTO setup_claims (claim_id, strategy_group_key, logical_setup_key, canonical_identity, "
-                         "serialization_version, claim_state, current_attempt_id, retry_sequence, created_at, updated_at, last_reason) "
-                         "VALUES ('" + EscapeSQL(claim_id) + "','" + EscapeSQL(strategy_group_key) + "','" +
-                         EscapeSQL(logical_setup_key) + "','" + EscapeSQL(canonical_identity) + "'," +
-                         IntegerToString(serialization_version) + "," + IntegerToString((int)SETUP_CLAIM_ACTIVE) + ",'" +
-                         EscapeSQL(attempt_id) + "',0," + IntegerToString((long)now) + "," +
-                         IntegerToString((long)now) + ",'CREATED_NO_INTENT');";
-   if(!ExecuteSQL(insert_claim))
-     {
-      DatabaseTransactionRollback(m_db_handle);
-      return CLAIM_ERROR;
-     }
-   if(!DatabaseTransactionCommit(m_db_handle))
-     {
-      DatabaseTransactionRollback(m_db_handle);
-      return CLAIM_ERROR;
-     }
-   return CLAIM_CREATED;
+   (void)strategy_group_key; (void)logical_setup_key; (void)canonical_identity;
+   (void)serialization_version; (void)attempt_id;
+   return CLAIM_DEPRECATED_UNBOUND;
   }
 
 //+------------------------------------------------------------------+
@@ -3151,6 +3065,180 @@ int CExecutionLedger::GetAuthorityState(const string authority_key)
       DatabaseColumnInteger(handle, 0, state);
    DatabaseFinalize(handle);
    return state;
+   }
+
+CExecutionLedger::ENUM_ATTEMPT_IDENTITY_RESOLUTION CExecutionLedger::GetSetupIdentityForAttempt(
+   const string attempt_id,
+   string &claim_id,
+   string &strategy_group_key,
+   string &logical_setup_key,
+   string &canonical_identity,
+   int &serialization_version,
+   string &detail)
+  {
+   claim_id = ""; strategy_group_key = ""; logical_setup_key = ""; canonical_identity = "";
+   serialization_version = 0; detail = "";
+   if(attempt_id == "")
+     { detail = "ATTEMPT_ID_EMPTY"; return IDENTITY_NOT_FOUND; }
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+     { detail = "LEDGER_DB_UNAVAILABLE"; return IDENTITY_DB_UNAVAILABLE; }
+
+   // 1-2) Confirm attempt row exists; distinguish DB read failure from missing row.
+   string a_sql = "SELECT attempt_id FROM execution_attempts WHERE attempt_id='" + EscapeSQL(attempt_id) + "';";
+   ResetLastError();
+   int ah = DatabasePrepare(m_db_handle, a_sql);
+   if(ah == INVALID_HANDLE)
+     { detail = "ATTEMPT_EXISTENCE_PREPARE_FAILED"; return IDENTITY_DB_UNAVAILABLE; }
+   bool attempt_exists = DatabaseRead(ah);
+   DatabaseFinalize(ah);
+   if(!attempt_exists)
+     { detail = "ATTEMPT_ROW_NOT_FOUND"; return IDENTITY_NOT_FOUND; }
+
+   // Collect unique candidate claim_ids from direct pointer and retry events.
+   string candidates[];
+   int ccount = 0;
+
+   // 3) Direct claim candidates: setup_claims.current_attempt_id
+   {
+    string dsql = "SELECT claim_id FROM setup_claims WHERE current_attempt_id='" + EscapeSQL(attempt_id) + "';";
+    int dh = DatabasePrepare(m_db_handle, dsql);
+    if(dh == INVALID_HANDLE) { detail = "DIRECT_CLAIM_PREPARE_FAILED"; return IDENTITY_DB_UNAVAILABLE; }
+    while(DatabaseRead(dh))
+      {
+       string cid = DatabaseColumnString(dh, 0);
+       if(cid != "")
+         {
+          bool seen = false;
+          for(int i = 0; i < ccount; i++) if(candidates[i] == cid) { seen = true; break; }
+          if(!seen) { ArrayResize(candidates, ccount + 1); candidates[ccount] = cid; ccount++; }
+         }
+      }
+    DatabaseFinalize(dh);
+   }
+
+   // 4-5) Historical candidates via retry_approval_events; resolve each by exact claim_id/group/lsk binding.
+   AttemptIdentityEventRef event_refs[];
+   int ecount = 0;
+   {
+    string esql = "SELECT claim_id,strategy_group_key,logical_setup_key,prior_attempt_id,new_attempt_id,retry_sequence_before,retry_sequence_after "
+                  "FROM retry_approval_events WHERE prior_attempt_id='" + EscapeSQL(attempt_id) + "' OR new_attempt_id='" + EscapeSQL(attempt_id) + "' "
+                  "ORDER BY claim_id ASC,retry_sequence_before ASC,action_id ASC;";
+    int eh = DatabasePrepare(m_db_handle, esql);
+    if(eh == INVALID_HANDLE) { detail = "RETRY_EVENT_PREPARE_FAILED"; return IDENTITY_DB_UNAVAILABLE; }
+    while(DatabaseRead(eh))
+      {
+       AttemptIdentityEventRef er;
+       er.claim_id = DatabaseColumnString(eh, 0);
+       er.group = DatabaseColumnString(eh, 1);
+       er.lsk = DatabaseColumnString(eh, 2);
+       er.prior_id = DatabaseColumnString(eh, 3);
+       er.new_id = DatabaseColumnString(eh, 4);
+       er.seq_before = (int)DatabaseColumnLong2(eh, 5);
+       er.seq_after = (int)DatabaseColumnLong2(eh, 6);
+       if(er.claim_id == "" || er.group == "" || er.lsk == "" || er.prior_id == "" || er.new_id == "" || er.seq_after != er.seq_before + 1)
+         { DatabaseFinalize(eh); detail = "RETRY_EVENT_ROW_INVALID_OR_INCONSISTENT"; return IDENTITY_CONFLICT; }
+       // Event must resolve through exact claim_id + group + lsk binding.
+       string csql = "SELECT claim_id FROM setup_claims WHERE claim_id='" + EscapeSQL(er.claim_id) + "' AND strategy_group_key='" + EscapeSQL(er.group) + "' AND logical_setup_key='" + EscapeSQL(er.lsk) + "';";
+       int ch = DatabasePrepare(m_db_handle, csql);
+       if(ch == INVALID_HANDLE) { DatabaseFinalize(eh); detail = "EVENT_CLAIM_BIND_PREPARE_FAILED"; return IDENTITY_DB_UNAVAILABLE; }
+       bool bound = DatabaseRead(ch);
+       DatabaseFinalize(ch);
+       if(!bound) { DatabaseFinalize(eh); detail = "RETRY_EVENT_CLAIM_BINDING_NOT_FOUND claim=" + er.claim_id; return IDENTITY_CONFLICT; }
+       int idx = ArraySize(event_refs); ArrayResize(event_refs, idx + 1); event_refs[idx] = er;
+       ecount++;
+       bool seen = false;
+       for(int i = 0; i < ccount; i++) if(candidates[i] == er.claim_id) { seen = true; break; }
+       if(!seen) { ArrayResize(candidates, ccount + 1); candidates[ccount] = er.claim_id; ccount++; }
+      }
+    DatabaseFinalize(eh);
+   }
+
+   // 8) Zero / multiple distinct claims
+   if(ccount == 0)
+     { detail = "UNBOUND_OR_LEGACY_ATTEMPT_NO_AUTHORITATIVE_CLAIM_MAPPING attempt=" + attempt_id; return IDENTITY_NOT_FOUND; }
+   if(ccount > 1)
+     { detail = "MULTIPLE_DISTINCT_CLAIMS_MATCH_ATTEMPT count=" + IntegerToString(ccount); return IDENTITY_AMBIGUOUS; }
+   claim_id = candidates[0];
+
+   // 6) Load authoritative claim identity.
+   string claim_state_s = ""; string current_attempt_id = ""; int retry_sequence = -1;
+   {
+    string csql = "SELECT strategy_group_key,logical_setup_key,canonical_identity,serialization_version,claim_state,current_attempt_id,retry_sequence "
+                  "FROM setup_claims WHERE claim_id='" + EscapeSQL(claim_id) + "';";
+    int ch = DatabasePrepare(m_db_handle, csql);
+    if(ch == INVALID_HANDLE) { detail = "CLAIM_LOAD_PREPARE_FAILED"; return IDENTITY_DB_UNAVAILABLE; }
+    if(!DatabaseRead(ch)) { DatabaseFinalize(ch); detail = "CLAIM_ROW_NOT_FOUND claim=" + claim_id; return IDENTITY_CONFLICT; }
+    strategy_group_key = DatabaseColumnString(ch, 0);
+    logical_setup_key = DatabaseColumnString(ch, 1);
+    canonical_identity = DatabaseColumnString(ch, 2);
+    serialization_version = (int)DatabaseColumnLong2(ch, 3);
+    int claim_state = (int)DatabaseColumnLong2(ch, 4);
+    current_attempt_id = DatabaseColumnString(ch, 5);
+    retry_sequence = (int)DatabaseColumnLong2(ch, 6);
+    DatabaseFinalize(ch);
+    (void)claim_state;
+    if(strategy_group_key == "" || logical_setup_key == "" || canonical_identity == "")
+      { detail = "CLAIM_IDENTITY_FIELDS_MISSING claim=" + claim_id; return IDENTITY_CONFLICT; }
+   }
+
+   // 9) Direct/current pointer consistency (if direct match exists) is implicit via candidate selection; validate chain below.
+
+   // 10-11) Verify complete retry chain for this claim and that attempt is part of it/current pointer.
+   {
+    string rsql = "SELECT prior_attempt_id,new_attempt_id,retry_sequence_before,retry_sequence_after "
+                  "FROM retry_approval_events WHERE claim_id='" + EscapeSQL(claim_id) + "' "
+                  "AND strategy_group_key='" + EscapeSQL(strategy_group_key) + "' AND logical_setup_key='" + EscapeSQL(logical_setup_key) + "' "
+                  "ORDER BY retry_sequence_before ASC, action_id ASC;";
+    int rh = DatabasePrepare(m_db_handle, rsql);
+    if(rh == INVALID_HANDLE) { detail = "CLAIM_CHAIN_PREPARE_FAILED"; return IDENTITY_DB_UNAVAILABLE; }
+    string last_new = ""; int last_after = -1; int chain_count = 0;
+    while(DatabaseRead(rh))
+      {
+       string prior = DatabaseColumnString(rh, 0);
+       string nnew = DatabaseColumnString(rh, 1);
+       int before = (int)DatabaseColumnLong2(rh, 2);
+       int after = (int)DatabaseColumnLong2(rh, 3);
+       if(prior == "" || nnew == "" || after != before + 1)
+         { DatabaseFinalize(rh); detail = "RETRY_CHAIN_ROW_INVALID claim=" + claim_id; return IDENTITY_CONFLICT; }
+       if(chain_count == 0)
+         { if(before != 0) { DatabaseFinalize(rh); detail = "RETRY_CHAIN_DOES_NOT_START_AT_ZERO claim=" + claim_id; return IDENTITY_CONFLICT; } }
+       else
+         {
+          if(before != last_after || prior != last_new)
+            { DatabaseFinalize(rh); detail = "RETRY_CHAIN_DISCONTINUITY claim=" + claim_id; return IDENTITY_CONFLICT; }
+         }
+       last_new = nnew; last_after = after; chain_count++;
+      }
+    DatabaseFinalize(rh);
+    if(retry_sequence < 0 || retry_sequence != chain_count)
+      { detail = "CLAIM_RETRY_SEQUENCE_CHAIN_LENGTH_MISMATCH claim=" + claim_id; return IDENTITY_CONFLICT; }
+    if(chain_count > 0)
+      {
+       if(current_attempt_id == "" || current_attempt_id != last_new)
+         { detail = "CLAIM_CURRENT_ATTEMPT_NOT_LATEST_CHAIN_ATTEMPT claim=" + claim_id; return IDENTITY_CONFLICT; }
+      }
+    else
+      {
+       // retry_sequence zero: current pointer must be unambiguous attempt for this claim.
+       if(current_attempt_id == "")
+         { detail = "CLAIM_ZERO_RETRY_CURRENT_ATTEMPT_EMPTY claim=" + claim_id; return IDENTITY_CONFLICT; }
+      }
+    // Attempt must be the claim's current attempt or appear in validated chain events.
+    bool in_chain = (current_attempt_id == attempt_id);
+    if(!in_chain)
+      {
+       for(int i = 0; i < ecount; i++)
+         {
+          if(event_refs[i].claim_id == claim_id && (event_refs[i].prior_id == attempt_id || event_refs[i].new_id == attempt_id))
+            { in_chain = true; break; }
+         }
+      }
+    if(!in_chain)
+      { detail = "ATTEMPT_NOT_PART_OF_RESOLVED_CLAIM_CHAIN claim=" + claim_id; return IDENTITY_CONFLICT; }
+   }
+
+   detail = "RESOLVED claim=" + claim_id + " group=" + strategy_group_key + " lsk=" + logical_setup_key + " chain_retry_seq=" + IntegerToString(retry_sequence);
+   return IDENTITY_RESOLVED;
   }
 
 #endif
