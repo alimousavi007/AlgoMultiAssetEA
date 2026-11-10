@@ -68,3 +68,5 @@
 # Build tools
 !tools/
 !tools/Compile-MT5.ps1
+!tools/AlgoMultiAssetEA-ValidationHarness.ps1
+!tools/ValidationHarness.Tests.ps1
