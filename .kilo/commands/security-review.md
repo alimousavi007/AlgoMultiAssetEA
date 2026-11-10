@@ -5,7 +5,7 @@ description: Read-only security and privacy review of a scoped code or configura
 # Security Review — Read Only
 
 ## 1. Scope
-Identify the exact application surface, files, data flows, dependencies, and threat boundaries. Read `AGENTS.md`, `.kilo/rules/core.md`, and `.agents/skills/security-review/SKILL.md`.
+Identify the exact application surface, files, data flows, dependencies, and threat boundaries. Read `AGENTS.MD`, `.kilo/rules/core.md`, and `.agents/skills/security-review/SKILL.md`.
 
 ## 2. Review
 Inspect only relevant risks:

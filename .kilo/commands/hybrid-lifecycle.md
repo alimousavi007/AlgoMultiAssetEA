@@ -42,7 +42,7 @@ Do not alter schema/arbitration beyond scope; identify E2.7 dependency if requir
 
 ## 5. Verification and report
 
-Use `/ea-risk-review` for execution/risk-sensitive changes; otherwise use `/ea-implement`'s independent review gate. Do not invoke a nonexistent `/hybrid-lifecycle-review` command.
+Use `/ea-risk-review` for execution/risk-sensitive changes; otherwise use `/ea-implement`'s independent review gate. Use the existing `/hybrid-lifecycle-review` Workflow for independent lifecycle review. For a same-session combined implementation and validation run, use `/hybrid-lifecycle-implement-validate`; that composite reads and applies the component instructions in one invocation.
 
 Compile/test/runtime only when explicitly authorized and safe. Report each criterion `PASSED`, `FAILED`, `NOT RUN`, or `BLOCKED`.
 

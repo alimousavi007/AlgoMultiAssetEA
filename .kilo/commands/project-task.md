@@ -20,7 +20,7 @@ Choose the smallest matching task type:
 Do not convert a simple answer or transformation into a multi-stage engineering process.
 
 ## 2. Establish scope and baseline
-- Read `AGENTS.md` and applicable `.kilo/rules/`.
+- Read `AGENTS.MD` and applicable `.kilo/rules/`.
 - Inspect only the relevant files, dependencies, configuration, and evidence.
 - Inspect Git state before editing or delivery.
 - Preserve all pre-existing user changes and untracked files.
