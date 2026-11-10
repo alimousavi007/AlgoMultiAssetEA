@@ -1092,10 +1092,38 @@ if(struct_res != EVIDENCE_SUFFICIENT_NO_INVALIDATION)
       return;
      }
 
-   g_dashboard.Update(decision, portfolio_state);
+g_dashboard.Update(decision, portfolio_state);
 
-   // All pre-submit revalidation checks passed — setup is valid and ready for execution
-   decision.plan.state = SETUP_STATE_VALID;
+    // F-002: Centralized admission with durable reservation aggregation (initial check).
+    // This runs after PortfolioRisk.CanOpen and before durable intent creation.
+    CAlgoPortfolioRisk::AdmissionDecision admission_decision;
+    if(!g_portfolio_risk.CanAdmit(legacy_signal, risk, admission_decision))
+      {
+      risk.decision=RISK_REJECTED;
+      risk.rejection_reason=REJECT_PORTFOLIO_RISK;
+      risk.reason=admission_decision.rejection_reason;
+
+      g_logger.Event(
+         LOG_WARNING, "PORTFOLIO", "ADMISSION_REJECTED",
+         legacy_signal.symbol,
+         "",
+         "",
+         legacy_signal.signal_id,
+         "REJECT",
+         admission_decision.rejection_code,
+         admission_decision.rejection_reason,
+         0, 0,
+         (double)risk.risk_percent,
+         g_portfolio_risk.CurrentRiskPercent(),
+         (double)portfolio_state.total_positions);
+
+      g_logger.Risk(risk);
+      g_dashboard.Update(decision, portfolio_state);
+      return;
+      }
+
+    // All pre-submit revalidation checks passed — setup is valid and ready for execution
+    decision.plan.state = SETUP_STATE_VALID;
 
    bool execute=false;
 
@@ -1157,7 +1185,16 @@ if(struct_res != EVIDENCE_SUFFICIENT_NO_INVALIDATION)
      attempt_rec.entry_price = request.price;
      attempt_rec.stop_loss = request.stop_loss;
      attempt_rec.take_profit = request.take_profit;
-     // F-002: durable per-Attempt initial risk reservation (verified per-candidate monetary loss, account currency).
+     // F-002: Validate risk reservation amount before creating durable intent (fail-closed).
+      if(!(risk.actual_monetary_risk > 0.0 && MathIsValidNumber(risk.actual_monetary_risk)))
+         {
+         g_logger.Event(LOG_ERROR, "EXECUTION", "RISK_RESERVE_INVALID", request.symbol, "", "", request.signal_id,
+                        "REJECT", "RISK_RESERVE", "RiskEngine did not provide valid actual_monetary_risk for reservation");
+         runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+         return;
+         }
+
+      // F-002: durable per-Attempt initial risk reservation (verified per-candidate monetary loss, account currency).
      // Atomic with durable Intent via CreateSetupClaimAndIntent; fail-closed if unknown/invalid.
      attempt_rec.risk_reserve_known = (risk.actual_monetary_risk > 0.0 && MathIsValidNumber(risk.actual_monetary_risk) && AccountInfoDouble(ACCOUNT_EQUITY) > 0.0);
      attempt_rec.risk_reserve_model_version = EXEC_RISK_RESERVE_MODEL_V1;
@@ -1173,11 +1210,13 @@ if(struct_res != EVIDENCE_SUFFICIENT_NO_INVALIDATION)
      // E2.6/RS identity fields for atomic claim+intent (restart-stable; not setup_id/attempt_id)
      attempt_rec.strategy_group_key = g_strategy_group_key;
      attempt_rec.logical_setup_key = normalized_plan.logical_setup_key;
-     attempt_rec.serialization_version = 2;
-     attempt_rec.canonical_identity = CExecutionLedger::BuildStableCanonicalIdentity(
-         g_strategy_group_key, normalized_plan.symbol, "DEFAULT_SETUP",
-         (int)normalized_plan.direction, normalized_plan.signal_time, (int)runtime.setup_tf, 2);
-    {
+attempt_rec.serialization_version = 2;
+      attempt_rec.canonical_identity = CExecutionLedger::BuildStableCanonicalIdentity(
+          g_strategy_group_key, normalized_plan.symbol, "DEFAULT_SETUP",
+          (int)normalized_plan.direction, normalized_plan.signal_time, (int)runtime.setup_tf, 2);
+      // F-005.2.2: Account scope for ownership resolution (schema v5).
+      attempt_rec.account_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
+     {
      // RS01-CANON-01: stable canonical identity (v2). Legacy v1 claims recognized by ledger compatibility.
      string claim_intent_err = "";
      CExecutionLedger::ENUM_CLAIM_RESULT claim_res = g_execution_ledger.CreateSetupClaimAndIntent(
@@ -1192,9 +1231,13 @@ if(struct_res != EVIDENCE_SUFFICIENT_NO_INVALIDATION)
         runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
         return;
        }
-    }
-
-    // Check ledger for blocking unresolved attempts
+}
+     
+     // F-005.2: Ledger allocates attempt_magic atomically with Intent.
+     // Copy to request so TradeExecutor uses it for broker-visible Magic.
+     request.attempt_magic = attempt_rec.attempt_magic;
+     
+     // Check ledger for blocking unresolved attempts
     string ledger_block = "";
     if(!g_execution_ledger.IsAvailable() ||g_execution_ledger.HasBlockingUnresolved(ledger_block))
       {
@@ -1223,6 +1266,19 @@ if(struct_res != EVIDENCE_SUFFICIENT_NO_INVALIDATION)
         {
          g_logger.Event(LOG_ERROR, "EXECUTION", "AUTHORIZATION_DENIED", request.symbol, "", "", request.signal_id, "FAIL", "AUTHORITY", "Not Coordinator - execution denied");
          // F-E26-002: handle ResolveAttempt failure; do not claim durable ABORTED on ledger failure.
+         // F-002-R2: Release durable reservation on confirmed non-submission abort (no broker call).
+         {
+         ExecutionAttemptRecord abort_rec;
+         if(g_execution_ledger.GetAttempt(request.attempt_id, abort_rec))
+            {
+            string release_reason = "ABORTED_NON_SUBMISSION:NotCoordinator";
+            string rel_reason = "";
+            if(g_execution_ledger.ReleaseReservation(request.attempt_id, abort_rec.risk_reserve_revision, release_reason, rel_reason) != CExecutionLedger::RESERVATION_LIFECYCLE_OK)
+               {
+               g_logger.Event(LOG_WARNING, "EXECUTION", "RESERVATION_RELEASE_FAILED", request.symbol, "", "", request.signal_id, "WARN", "RESERVATION", "ReleaseReservation failed: " + rel_reason);
+               }
+            }
+         }
          if(!g_execution_ledger.ResolveAttempt(request.attempt_id, EXEC_STATE_ABORTED, "Authorization denied: not coordinator"))
            {
             g_logger.Event(LOG_ERROR, "EXECUTION", "RESOLVE_ATTEMPT_FAILED", request.symbol, "", "", request.signal_id, "FAIL", "LEDGER_ERROR", "ResolveAttempt(ABORTED) failed after coordinator denial - fail closed, no submit");
@@ -1232,87 +1288,171 @@ if(struct_res != EVIDENCE_SUFFICIENT_NO_INVALIDATION)
          runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
          return;
         }
-      {
-       string authority_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
-       g_executor.SyncAuthority(g_authority_epoch, (g_coordinator_mode == COORD_MODE_COORDINATOR));
-       if(!g_execution_ledger.ValidateAuthority(authority_key, g_owner_instance_token, g_authority_epoch))
-         {
-          g_logger.Event(LOG_ERROR, "EXECUTION", "AUTHORIZATION_DENIED", request.symbol, "", "", request.signal_id, "FAIL", "AUTHORITY", "Authority validation failed - execution denied");
-          // F-E26-002
-          if(!g_execution_ledger.ResolveAttempt(request.attempt_id, EXEC_STATE_ABORTED, "Authorization denied: authority validation failed"))
-            {
-             g_logger.Event(LOG_ERROR, "EXECUTION", "RESOLVE_ATTEMPT_FAILED", request.symbol, "", "", request.signal_id, "FAIL", "LEDGER_ERROR", "ResolveAttempt(ABORTED) failed after authority denial - fail closed, no submit");
-             string block_reason="";
-             g_execution_ledger.HasBlockingUnresolved(block_reason);
-            }
-          runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
-          return;
-         }
-      }
+{
+        string authority_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
+        g_executor.SyncAuthority(g_authority_epoch, (g_coordinator_mode == COORD_MODE_COORDINATOR));
+        if(!g_execution_ledger.ValidateAuthority(authority_key, g_owner_instance_token, g_authority_epoch))
+          {
+           g_logger.Event(LOG_ERROR, "EXECUTION", "AUTHORIZATION_DENIED", request.symbol, "", "", request.signal_id, "FAIL", "AUTHORITY", "Authority validation failed - execution denied");
+           // F-E26-002
+           // F-002-R2: Release durable reservation on confirmed non-submission abort (no broker call).
+           {
+           ExecutionAttemptRecord abort_rec;
+           if(g_execution_ledger.GetAttempt(request.attempt_id, abort_rec))
+              {
+              string release_reason = "ABORTED_NON_SUBMISSION:AuthorityValidation";
+              string rel_reason = "";
+              if(g_execution_ledger.ReleaseReservation(request.attempt_id, abort_rec.risk_reserve_revision, release_reason, rel_reason) != CExecutionLedger::RESERVATION_LIFECYCLE_OK)
+                 {
+                 g_logger.Event(LOG_WARNING, "EXECUTION", "RESERVATION_RELEASE_FAILED", request.symbol, "", "", request.signal_id, "WARN", "RESERVATION", "ReleaseReservation failed: " + rel_reason);
+                 }
+              }
+           }
+           if(!g_execution_ledger.ResolveAttempt(request.attempt_id, EXEC_STATE_ABORTED, "Authorization denied: authority validation failed"))
+             {
+              g_logger.Event(LOG_ERROR, "EXECUTION", "RESOLVE_ATTEMPT_FAILED", request.symbol, "", "", request.signal_id, "FAIL", "LEDGER_ERROR", "ResolveAttempt(ABORTED) failed after authority denial - fail closed, no submit");
+              string block_reason="";
+              g_execution_ledger.HasBlockingUnresolved(block_reason);
+             }
+           runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+           return;
+          }
+       }
 
      // F-E26-001: bind durable intent (still non-ambiguous, no broker call), then CanSubmit, then enter
      // SUBMISSION_MAY_HAVE_OCCURRED immediately adjacent to the broker invocation. No unrelated work
      // between MarkSubmissionMayHaveOccurred and Execute.
-     if(!g_execution_ledger.MarkSubmissionBound(request.attempt_id, "Pre-submit validation passed"))
-       {
-        g_logger.Event(
-           LOG_ERROR, "EXECUTION", "SUBMISSION_BOUND_FAILED",
-           request.symbol, "", "",
-           request.signal_id,
-           "FAIL", "LEDGER_ERROR", "Failed to mark submission bound");
-        // Intent remains durable non-submitted (or ledger unavailable); fail closed.
-        if(!g_execution_ledger.ResolveAttempt(request.attempt_id, EXEC_STATE_ABORTED, "Submission binding failed - non-submission"))
-          {
-           g_logger.Event(LOG_ERROR, "EXECUTION", "RESOLVE_ATTEMPT_FAILED", request.symbol, "", "", request.signal_id, "FAIL", "LEDGER_ERROR", "ResolveAttempt(ABORTED) failed after binding failure - fail closed, no submit");
-           string block_reason="";
-           g_execution_ledger.HasBlockingUnresolved(block_reason);
-          }
-        runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
-        return;
-       }
-     string submit_reason = "";
-     if(!g_execution_ledger.CanSubmit(request.attempt_id, submit_reason))
-       {
-        g_logger.Event(
-           LOG_ERROR, "EXECUTION", "SUBMIT_NOT_ALLOWED",
-           request.symbol, "", "",
-           request.signal_id,
-           "FAIL", "LEDGER_ERROR", submit_reason);
-        // Bound intent was never sent to broker in this flow; resolve as terminal non-submission.
-        if(!g_execution_ledger.ResolveAttempt(request.attempt_id, EXEC_STATE_ABORTED, "Submit not allowed: " + submit_reason))
-          {
-           g_logger.Event(LOG_ERROR, "EXECUTION", "RESOLVE_ATTEMPT_FAILED", request.symbol, "", "", request.signal_id, "FAIL", "LEDGER_ERROR", "ResolveAttempt(ABORTED) failed after submit gate - fail closed, no submit");
-           string block_reason="";
-           g_execution_ledger.HasBlockingUnresolved(block_reason);
-          }
-        runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
-        return;
-       }
+if(!g_execution_ledger.MarkSubmissionBound(request.attempt_id, "Pre-submit validation passed"))
+        {
+         g_logger.Event(
+            LOG_ERROR, "EXECUTION", "SUBMISSION_BOUND_FAILED",
+            request.symbol, "", "",
+            request.signal_id,
+            "FAIL", "LEDGER_ERROR", "Failed to mark submission bound");
+         // Intent remains durable non-submitted (or ledger unavailable); fail closed.
+         // F-002-R2: Release durable reservation on confirmed non-submission abort (no broker call).
+         {
+         ExecutionAttemptRecord abort_rec;
+         if(g_execution_ledger.GetAttempt(request.attempt_id, abort_rec))
+            {
+            string release_reason = "ABORTED_NON_SUBMISSION:SubmissionBoundFailed";
+            string rel_reason = "";
+            if(g_execution_ledger.ReleaseReservation(request.attempt_id, abort_rec.risk_reserve_revision, release_reason, rel_reason) != CExecutionLedger::RESERVATION_LIFECYCLE_OK)
+               {
+               g_logger.Event(LOG_WARNING, "EXECUTION", "RESERVATION_RELEASE_FAILED", request.symbol, "", "", request.signal_id, "WARN", "RESERVATION", "ReleaseReservation failed: " + rel_reason);
+               }
+            }
+         }
+         if(!g_execution_ledger.ResolveAttempt(request.attempt_id, EXEC_STATE_ABORTED, "Submission binding failed - non-submission"))
+           {
+            g_logger.Event(LOG_ERROR, "EXECUTION", "RESOLVE_ATTEMPT_FAILED", request.symbol, "", "", request.signal_id, "FAIL", "LEDGER_ERROR", "ResolveAttempt(ABORTED) failed after binding failure - fail closed, no submit");
+            string block_reason="";
+            g_execution_ledger.HasBlockingUnresolved(block_reason);
+           }
+         runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+         return;
+        }
+string submit_reason = "";
+      if(!g_execution_ledger.CanSubmit(request.attempt_id, submit_reason))
+        {
+         g_logger.Event(
+            LOG_ERROR, "EXECUTION", "SUBMIT_NOT_ALLOWED",
+            request.symbol, "", "",
+            request.signal_id,
+            "FAIL", "LEDGER_ERROR", submit_reason);
+         // Bound intent was never sent to broker in this flow; resolve as terminal non-submission.
+         // F-002-R2: Release durable reservation on confirmed non-submission abort (no broker call).
+         {
+         ExecutionAttemptRecord abort_rec;
+         if(g_execution_ledger.GetAttempt(request.attempt_id, abort_rec))
+            {
+            string release_reason = "ABORTED_NON_SUBMISSION:CanSubmitFailed:" + submit_reason;
+            string rel_reason = "";
+            if(g_execution_ledger.ReleaseReservation(request.attempt_id, abort_rec.risk_reserve_revision, release_reason, rel_reason) != CExecutionLedger::RESERVATION_LIFECYCLE_OK)
+               {
+               g_logger.Event(LOG_WARNING, "EXECUTION", "RESERVATION_RELEASE_FAILED", request.symbol, "", "", request.signal_id, "WARN", "RESERVATION", "ReleaseReservation failed: " + rel_reason);
+               }
+            }
+         }
+         if(!g_execution_ledger.ResolveAttempt(request.attempt_id, EXEC_STATE_ABORTED, "Submit not allowed: " + submit_reason))
+           {
+            g_logger.Event(LOG_ERROR, "EXECUTION", "RESOLVE_ATTEMPT_FAILED", request.symbol, "", "", request.signal_id, "FAIL", "LEDGER_ERROR", "ResolveAttempt(ABORTED) failed after submit gate - fail closed, no submit");
+            string block_reason="";
+            g_execution_ledger.HasBlockingUnresolved(block_reason);
+           }
+         runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+         return;
+        }
 
-     g_logger.Event(
-        LOG_INFO, "EXECUTION", "EXECUTION_SUBMITTED",
-        request.symbol, "", "",
-        request.signal_id,
-        "SUBMIT", "EXECUTION_READY", "Order execution request ready",
-        0, 0,
-        request.volume,
-        request.stop_loss,
-        request.take_profit);
+g_logger.Event(
+         LOG_INFO, "EXECUTION", "EXECUTION_SUBMITTED",
+         request.symbol, "", "",
+         request.signal_id,
+         "SUBMIT", "EXECUTION_READY", "Order execution request ready",
+         0, 0,
+         request.volume,
+         request.stop_loss,
+         request.take_profit);
 
-     // Final durable transition immediately before broker API. If this fails, do not call broker.
-     if(!g_execution_ledger.MarkSubmissionMayHaveOccurred(request.attempt_id, "Broker invocation boundary - submission may have occurred"))
-       {
-        g_logger.Event(LOG_ERROR, "EXECUTION", "SUBMISSION_MARK_FAILED", request.symbol, "", "", request.signal_id, "FAIL", "LEDGER_ERROR", "Could not durably mark submission-may-have-occurred; broker call aborted (fail closed)");
-        // State is still bound non-submitted; resolve terminally without broker call.
-        if(!g_execution_ledger.ResolveAttempt(request.attempt_id, EXEC_STATE_ABORTED, "Pre-broker ambiguity mark failed - no broker invocation"))
-          {
-           g_logger.Event(LOG_ERROR, "EXECUTION", "RESOLVE_ATTEMPT_FAILED", request.symbol, "", "", request.signal_id, "FAIL", "LEDGER_ERROR", "ResolveAttempt(ABORTED) failed after submission-mark failure");
-           string block_reason="";
-           g_execution_ledger.HasBlockingUnresolved(block_reason);
-          }
-        runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
-        return;
-       }
+      // F-002: Final pre-submit revalidation at SUBMISSION_MAY_HAVE_OCCURRED boundary.
+      // Verifies nothing changed since CanAdmit: equity, positions, pending orders, reservations.
+      // F-002-P0: Exclude current attempt's own reservation to avoid double-counting.
+      string reval_reason = "";
+      if(!g_portfolio_risk.RevalidateAdmission(legacy_signal, risk, admission_decision, reval_reason, request.attempt_id))
+         {
+         g_logger.Event(LOG_ERROR, "EXECUTION", "READMISSION_FAILED", request.symbol, "", "", request.signal_id,
+                        "FAIL", "READMISSION_FAILED", reval_reason);
+         // Bound intent was never sent to broker; resolve as terminal non-submission.
+         // F-002-R2: Release durable reservation on confirmed non-submission abort (no broker call).
+         {
+         ExecutionAttemptRecord abort_rec;
+         if(g_execution_ledger.GetAttempt(request.attempt_id, abort_rec))
+            {
+            string release_reason = "ABORTED_NON_SUBMISSION:RevalidationFailed:" + reval_reason;
+            string rel_reason = "";
+            if(g_execution_ledger.ReleaseReservation(request.attempt_id, abort_rec.risk_reserve_revision, release_reason, rel_reason) != CExecutionLedger::RESERVATION_LIFECYCLE_OK)
+               {
+               g_logger.Event(LOG_WARNING, "EXECUTION", "RESERVATION_RELEASE_FAILED", request.symbol, "", "", request.signal_id, "WARN", "RESERVATION", "ReleaseReservation failed: " + rel_reason);
+               }
+            }
+         }
+         if(!g_execution_ledger.ResolveAttempt(request.attempt_id, EXEC_STATE_ABORTED, "Revalidation failed: " + reval_reason))
+            {
+            g_logger.Event(LOG_ERROR, "EXECUTION", "RESOLVE_ATTEMPT_FAILED", request.symbol, "", "", request.signal_id, "FAIL", "LEDGER_ERROR", "ResolveAttempt(ABORTED) failed after revalidation failure");
+            string block_reason="";
+            g_execution_ledger.HasBlockingUnresolved(block_reason);
+            }
+         runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+         return;
+         }
+
+// Final durable transition immediately before broker API. If this fails, do not call broker.
+      if(!g_execution_ledger.MarkSubmissionMayHaveOccurred(request.attempt_id, "Broker invocation boundary - submission may have occurred"))
+        {
+         g_logger.Event(LOG_ERROR, "EXECUTION", "SUBMISSION_MARK_FAILED", request.symbol, "", "", request.signal_id, "FAIL", "LEDGER_ERROR", "Could not durably mark submission-may-have-occurred; broker call aborted (fail closed)");
+         // State is still bound non-submitted; resolve terminally without broker call.
+         // F-002-R2: Release durable reservation on confirmed non-submission abort (no broker call).
+         {
+         ExecutionAttemptRecord abort_rec;
+         if(g_execution_ledger.GetAttempt(request.attempt_id, abort_rec))
+            {
+            string release_reason = "ABORTED_NON_SUBMISSION:SubmissionMarkFailed";
+            string rel_reason = "";
+            if(g_execution_ledger.ReleaseReservation(request.attempt_id, abort_rec.risk_reserve_revision, release_reason, rel_reason) != CExecutionLedger::RESERVATION_LIFECYCLE_OK)
+               {
+               g_logger.Event(LOG_WARNING, "EXECUTION", "RESERVATION_RELEASE_FAILED", request.symbol, "", "", request.signal_id, "WARN", "RESERVATION", "ReleaseReservation failed: " + rel_reason);
+               }
+            }
+         }
+         if(!g_execution_ledger.ResolveAttempt(request.attempt_id, EXEC_STATE_ABORTED, "Pre-broker ambiguity mark failed - no broker invocation"))
+           {
+            g_logger.Event(LOG_ERROR, "EXECUTION", "RESOLVE_ATTEMPT_FAILED", request.symbol, "", "", request.signal_id, "FAIL", "LEDGER_ERROR", "ResolveAttempt(ABORTED) failed after submission-mark failure");
+            string block_reason="";
+            g_execution_ledger.HasBlockingUnresolved(block_reason);
+           }
+         runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+         return;
+        }
 
      ExecutionResult result;
      bool execution_ok = g_executor.Execute(request, result);
@@ -1989,9 +2129,15 @@ ENUM_SYSTEM_INIT_STATUS InitializeSystemWhenReady()
        else if(orphan_claims > 0)
           g_logger.Event(LOG_WARNING, "SYSTEM", "CLAIM_ORPHAN_DETECTED", _Symbol, "", "", "", "WARNING", "CLAIM_DIAG",
                          "orphan_claims=" + IntegerToString(orphan_claims) + " rows=" + IntegerToString(claim_rows) + " detail=" + claim_diag);
-       else if(claim_rows > 0)
-          g_logger.Event(LOG_INFO, "SYSTEM", "CLAIM_DIAG", _Symbol, "", "", "", "OK", "CLAIM_DIAG", "active_claims_checked=" + IntegerToString(claim_rows));
-      }
+else if(claim_rows > 0)
+           g_logger.Event(LOG_INFO, "SYSTEM", "CLAIM_DIAG", _Symbol, "", "", "", "OK", "CLAIM_DIAG", "active_claims_checked=" + IntegerToString(claim_rows));
+       }
+
+    // F-005.2.2: Wire execution ledger to consumers for ownership resolution
+    string account_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
+    g_position_manager.SetExecutionLedger(GetPointer(g_execution_ledger), account_key);
+    g_portfolio_risk.SetExecutionLedger(GetPointer(g_execution_ledger), account_key);
+    g_state.SetExecutionLedger(GetPointer(g_execution_ledger), account_key);
 
     g_position_manager.SetBreakEven(
       InpBreakEven,
@@ -2406,6 +2552,8 @@ void OnTimer()
 //| identifiers and updates the ExecutionLedger. Does NOT auto-      |
 //| retry on ambiguous outcomes; complement to timer-based           |
 //| reconciliation in OnTimer.                                       |
+//| F-005.2.4: Event-type-specific handling per MQL5 semantics.      |
+//| request/result only valid for TRADE_TRANSACTION_REQUEST.         |
 //+------------------------------------------------------------------+
 void OnTradeTransaction(const MqlTradeTransaction &trans,
                         const MqlTradeRequest &request,
@@ -2414,29 +2562,123 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
    if(!g_system_ready)
       return;
 
-   // Only handle transactions for our managed magics
-   bool is_managed_magic =
-        request.magic==MAGIC_HYBRID_SCALP ||
-        request.magic==MAGIC_HYBRID_DAY   ||
-        request.magic==MAGIC_HYBRID_SWING ||
-        request.magic==MAGIC_TREND ||
-        request.magic==MAGIC_BREAKOUT ||
-        request.magic==MAGIC_MOMENTUM ||
-        request.magic==MAGIC_MEAN_REVERSION ||
-        request.magic==MAGIC_RELATIVE_VALUE;
+   // F-005.2.4: Process by transaction type - request/result only valid for REQUEST
+   ENUM_TRADE_TRANSACTION_TYPE txn_type = trans.type;
 
-   if(!is_managed_magic)
+   // Candidate Magic for filtering - use valid data per transaction type
+   ulong candidate_magic = 0;
+   bool  has_valid_magic = false;
+
+   switch(txn_type)
+     {
+      case TRADE_TRANSACTION_REQUEST:
+         // request/result are valid for this type
+         candidate_magic = request.magic;
+         has_valid_magic = true;
+         break;
+
+      case TRADE_TRANSACTION_ORDER_ADD:
+      case TRADE_TRANSACTION_ORDER_UPDATE:
+      case TRADE_TRANSACTION_ORDER_DELETE:
+         // Use order Magic from history
+         if(trans.order > 0 && HistoryOrderSelect(trans.order))
+           {
+            long order_magic = 0;
+            if(HistoryOrderGetInteger(trans.order, ORDER_MAGIC, order_magic))
+              {
+               candidate_magic = (ulong)order_magic;
+               has_valid_magic = true;
+              }
+           }
+         break;
+
+      case TRADE_TRANSACTION_DEAL_ADD:
+      case TRADE_TRANSACTION_DEAL_UPDATE:
+         // Use deal Magic from history
+         if(trans.deal > 0 && HistoryDealSelect(trans.deal))
+           {
+            long deal_magic = 0;
+            if(HistoryDealGetInteger(trans.deal, DEAL_MAGIC, deal_magic))
+              {
+               candidate_magic = (ulong)deal_magic;
+               has_valid_magic = true;
+              }
+           }
+         break;
+
+      case TRADE_TRANSACTION_HISTORY_ADD:
+      case TRADE_TRANSACTION_HISTORY_UPDATE:
+      case TRADE_TRANSACTION_HISTORY_DELETE:
+         // History events - use deal/order Magic if available
+         if(trans.deal > 0 && HistoryDealSelect(trans.deal))
+           {
+            long deal_magic = 0;
+            if(HistoryDealGetInteger(trans.deal, DEAL_MAGIC, deal_magic))
+              {
+               candidate_magic = (ulong)deal_magic;
+               has_valid_magic = true;
+              }
+           }
+         else if(trans.order > 0 && HistoryOrderSelect(trans.order))
+           {
+            long order_magic = 0;
+            if(HistoryOrderGetInteger(trans.order, ORDER_MAGIC, order_magic))
+              {
+               candidate_magic = (ulong)order_magic;
+               has_valid_magic = true;
+              }
+           }
+         break;
+
+      case TRADE_TRANSACTION_POSITION:
+         // Position events - use position Magic
+         if(trans.position > 0 && PositionSelectByTicket(trans.position))
+           {
+            long pos_magic = 0;
+            if(PositionGetInteger(POSITION_MAGIC, pos_magic))
+              {
+               candidate_magic = (ulong)pos_magic;
+               has_valid_magic = true;
+              }
+           }
+         break;
+
+      default:
+         // Unknown transaction type - no valid Magic available
+         break;
+     }
+
+   // Filter: only process if we have a valid candidate Magic in our managed namespace
+   bool is_managed_candidate = false;
+   if(has_valid_magic)
+     {
+      // Strategy/style Magic (legacy ownership)
+      if(candidate_magic==MAGIC_TREND ||
+         candidate_magic==MAGIC_BREAKOUT ||
+         candidate_magic==MAGIC_MOMENTUM ||
+         candidate_magic==MAGIC_MEAN_REVERSION ||
+         candidate_magic==MAGIC_RELATIVE_VALUE ||
+         candidate_magic==MAGIC_HYBRID_SCALP ||
+         candidate_magic==MAGIC_HYBRID_DAY ||
+         candidate_magic==MAGIC_HYBRID_SWING)
+         is_managed_candidate = true;
+      // Attempt Magic range - candidate only, exact ownership requires ledger
+      else if(candidate_magic >= MAGIC_ATTEMPT_BASE && candidate_magic <= MAGIC_ATTEMPT_MAX)
+         is_managed_candidate = true;
+     }
+
+   if(!is_managed_candidate)
       return;
 
    // Log transaction for auditability
    g_logger.Event(
       LOG_DEBUG, "TRADE", "TRADE_TRANSACTION",
       trans.symbol, "", "",
-      "", "TXN", IntegerToString((int)trans.type),
+      "", "TXN", IntegerToString((int)txn_type),
       "order="+IntegerToString((long)trans.order)+
       " deal="+IntegerToString((long)trans.deal)+
       " position="+IntegerToString((long)trans.position)+
-      " magic="+IntegerToString((long)request.magic));
+      (has_valid_magic ? " magic="+IntegerToString((long)candidate_magic) : " magic=UNKNOWN"));
 
    // Event-driven reconciliation: when a broker transaction related
    // to our EA occurs, reconcile unresolved attempts. Reduces the
@@ -2859,8 +3101,10 @@ void RetryUIHandleConfirmClick()
 
    CExecutionLedger::RetryLocalContext ctx;
    RetryUIBuildLocalContext(ctx);
-   ExecutionAttemptRecord new_attempt; ZeroMemory(new_attempt);
-   string action_id="", detail="";
+ExecutionAttemptRecord new_attempt; ZeroMemory(new_attempt);
+    // F-005.2.2: Account scope for ownership resolution (schema v5).
+    new_attempt.account_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
+    string action_id="", detail="";
    CExecutionLedger::ENUM_RETRY_APPROVE_RESULT res = g_execution_ledger.ApproveAndCreateRetry(
       g_retry_review.claim_id, g_retry_review.strategy_group_key, g_retry_review.logical_setup_key,
       g_retry_review.prior_attempt_id, g_retry_review.retry_sequence,
@@ -3183,28 +3427,33 @@ void ProcessRetryPendingHandoff()
    g_executor.SyncAuthority(g_authority_epoch, true);
    if(g_execution_ledger.HasBlockingUnresolved(g_retry_ui_detail) || g_execution_ledger.HasUnresolvedForSymbol(new_att.symbol, true))
      { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_FINAL_UNRESOLVED_BLOCK"; g_execution_ledger.MarkReconciliationRequired(g_retry_handoff.new_attempt_id,"Unresolved/ledger block before submit"); return; }
-   // Re-read attempt immediately before bind/submit.
-   if(!g_execution_ledger.GetAttempt(g_retry_handoff.new_attempt_id, new_att) || new_att.state != EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED)
-     { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_FINAL_ATTEMPT_CHANGED"; return; }
+// Re-read attempt immediately before bind/submit.
+    if(!g_execution_ledger.GetAttempt(g_retry_handoff.new_attempt_id, new_att) || new_att.state != EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED)
+      { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_FINAL_ATTEMPT_CHANGED"; return; }
+
+    // F-005.2: Get attempt_magic allocated by ledger for this retry attempt.
+    // Ledger allocates atomically in ApproveAndCreateRetry/CreateIntentInTx.
+    ulong attempt_magic = new_att.attempt_magic;
    string final_submit_reason="";
    if(!g_execution_ledger.CanSubmit(g_retry_handoff.new_attempt_id, final_submit_reason))
      { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_FINAL_CANNOT_SUBMIT"; g_retry_ui_detail=final_submit_reason; g_execution_ledger.MarkReconciliationRequired(g_retry_handoff.new_attempt_id,"CanSubmit failed before submit: "+final_submit_reason); return; }
 
-   // Build fresh ExecutionRequest bound to new attempt ID (not old plan/request).
-   ExecutionRequest request;
-   request.intent = (fresh_plan.direction==SIGNAL_LONG ? ORDER_INTENT_OPEN_LONG : ORDER_INTENT_OPEN_SHORT);
-   request.symbol = g_runtime[rt_idx].symbol;
-   request.direction = fresh_plan.direction;
-   request.strategy = STRATEGY_TREND_PULLBACK;
-   request.volume = fresh_risk.calculated_volume;
-   request.price = fresh_plan.entry;
-   request.stop_loss = fresh_plan.stop;
-   request.take_profit = fresh_plan.target;
-   request.position_ticket = 0;
-   request.magic = MagicForStyle(g_runtime[rt_idx].style);
-   request.comment = "E26_RETRY|" + g_retry_handoff.action_id;
-   request.signal_id = fresh_plan.setup_id;
-   request.attempt_id = g_retry_handoff.new_attempt_id;
+// Build fresh ExecutionRequest bound to new attempt ID (not old plan/request).
+    ExecutionRequest request;
+    request.intent = (fresh_plan.direction==SIGNAL_LONG ? ORDER_INTENT_OPEN_LONG : ORDER_INTENT_OPEN_SHORT);
+    request.symbol = g_runtime[rt_idx].symbol;
+    request.direction = fresh_plan.direction;
+    request.strategy = STRATEGY_TREND_PULLBACK;
+    request.volume = fresh_risk.calculated_volume;
+    request.price = fresh_plan.entry;
+    request.stop_loss = fresh_plan.stop;
+    request.take_profit = fresh_plan.target;
+    request.position_ticket = 0;
+    request.magic = MagicForStyle(g_runtime[rt_idx].style);
+    request.comment = "E26_RETRY|" + g_retry_handoff.action_id;
+    request.signal_id = fresh_plan.setup_id;
+    request.attempt_id = g_retry_handoff.new_attempt_id;
+    request.attempt_magic = attempt_magic;
 
    if(!g_execution_ledger.MarkSubmissionBound(request.attempt_id, "E2.6 retry pre-submit revalidation passed action="+g_retry_handoff.action_id))
      { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_BIND_FAILED"; g_execution_ledger.MarkReconciliationRequired(request.attempt_id,"MarkSubmissionBound failed (no broker call)"); return; }

@@ -61,15 +61,23 @@ enum ENUM_GATEWAY_AUTHORITY_STATE
 #define EXEC_RISK_RESERVE_STATE_UNKNOWN   0
 #define EXEC_RISK_RESERVE_STATE_LEGACY_UNVERIFIED 1
 #define EXEC_RISK_RESERVE_STATE_ACTIVE    2
-#define EXEC_RISK_RESERVE_STATE_RELEASED  3
-#define EXEC_RISK_RESERVE_STATE_INVALID   4
+#define EXEC_RISK_RESERVE_STATE_PARTIALLY_COVERED 3
+#define EXEC_RISK_RESERVE_STATE_EXPOSURE_RECONCILED 4
+#define EXEC_RISK_RESERVE_STATE_RELEASED  5
+#define EXEC_RISK_RESERVE_STATE_RECONCILIATION_REQUIRED 6
+#define EXEC_RISK_RESERVE_STATE_INVALID   7
 
 struct ExecutionAttemptRecord
   {
    string                attempt_id;
    string                setup_id;
-   string                symbol;
+string                symbol;
    ulong                 magic;
+
+   // F-005.2: durable broker-visible per-Attempt Magic token (non-overlapping with strategy/style Magic).
+   // Allocated atomically with Intent/reservation; never reused; NULL/0 in legacy rows.
+   ulong                 attempt_magic;
+
    ENUM_ORDER_INTENT     intent;
    ENUM_SIGNAL_DIRECTION direction;
    double                requested_volume;
@@ -97,8 +105,10 @@ struct ExecutionAttemptRecord
    ENUM_EXEC_ATTEMPT_STATE state;
    bool                  submission_allowed;
    string                last_reason;
-   int                   schema_version;
-   // F-002 durable per-Attempt risk reservation (schema v3). NULL/unknown in legacy DB rows => LEGACY_UNVERIFIED, never 0.
+int                   schema_version;
+    // F-005.2.2: account scope for ownership resolution (schema v5).
+    string                account_key;
+    // F-002 durable per-Attempt risk reservation (schema v3). NULL/unknown in legacy DB rows => LEGACY_UNVERIFIED, never 0.
    double                risk_reserve_initial_amount;    // immutable initial reservation, account currency
    double                risk_reserve_remaining_amount;  // remaining reservation, account currency
    string                risk_reserve_currency;          // ACCOUNT_CURRENCY at reservation time
@@ -149,6 +159,8 @@ private:
     bool               ReadAttemptRiskReservationColumns(int handle, int start_col, ExecutionAttemptRecord &record) const;
     bool               PopulateRiskReservationFromAttemptParams(const string symbol, ENUM_ORDER_INTENT intent, double volume, double entry_price, double stop_loss, ExecutionAttemptRecord &record, string &err) const;
     string             GenerateAttemptId();
+    // F-005.2: allocate per-Attempt Magic from non-overlapping range; fails closed on collision/overflow.
+    ulong              GenerateAttemptMagic(string &err);
     string             EscapeSQL(const string s) const;
     struct AttemptIdentityEventRef
       {
@@ -168,11 +180,17 @@ public:
    bool               Initialize(const string db_name="execution_ledger.sqlite");
    void               Deinitialize();
 
-    bool               IsInitialized() const { return m_initialized && m_db_available; }
+bool               IsInitialized() const { return m_initialized && m_db_available; }
     bool               IsAvailable() const { return m_db_available; }
-   string             LastInitStage() const { return m_last_init_stage; }
-   string             LastInitOperation() const { return m_last_init_operation; }
-   int                LastInitError() const { return m_last_init_error; }
+    string             LastInitStage() const { return m_last_init_stage; }
+    string             LastInitOperation() const { return m_last_init_operation; }
+    int                LastInitError() const { return m_last_init_error; }
+
+    // F-002: Get database handle for read-only queries by PortfolioRisk
+    int                GetDbHandle() const { return m_db_handle; }
+
+    // F-002: Public SQL escaping helper
+    static string      EscapeSQLStatic(const string s);
 
     bool               GetAttemptState(const string attempt_id, ENUM_EXEC_ATTEMPT_STATE &state);
     bool               GetAttempt(const string attempt_id, ExecutionAttemptRecord &record);
@@ -186,10 +204,33 @@ public:
     bool               MarkSubmissionMayHaveOccurred(const string attempt_id, const string reason="");
     bool               RecordSubmission(const string attempt_id);
 
-   // Result tracking
-   bool               RecordResult(const string attempt_id, const ExecutionResult &result, const string reason="");
-   bool               MarkReconciliationRequired(const string attempt_id, const string reason);
-   bool               ResolveAttempt(const string attempt_id, ENUM_EXEC_ATTEMPT_STATE final_state, const string reason);
+// Result tracking
+    bool               RecordResult(const string attempt_id, const ExecutionResult &result, const string reason="");
+    bool               MarkReconciliationRequired(const string attempt_id, const string reason);
+    bool               ResolveAttempt(const string attempt_id, ENUM_EXEC_ATTEMPT_STATE final_state, const string reason);
+
+    // F-002: Durable per-Attempt risk reservation lifecycle (CAS/revision).
+    // State transitions: ACTIVE(2) -> PARTIALLY_COVERED(3) -> EXPOSURE_RECONCILED(4)/RELEASED(5)/RECONCILIATION_REQUIRED(6)
+    // LEGACY_UNVERIFIED(1), UNKNOWN(0), INVALID(7) are terminal/no-op for lifecycle.
+    // All transitions require matching expected_revision (CAS) and increment revision on success.
+    enum ENUM_RESERVATION_LIFECYCLE_RESULT
+      {
+       RESERVATION_LIFECYCLE_OK = 0,
+       RESERVATION_LIFECYCLE_NOT_FOUND,
+       RESERVATION_LIFECYCLE_INVALID_STATE,
+       RESERVATION_LIFECYCLE_REVISION_MISMATCH,
+       RESERVATION_LIFECYCLE_DB_ERROR,
+       RESERVATION_LIFECYCLE_LEGACY_UNVERIFIED,
+       RESERVATION_LIFECYCLE_INVALID_TRANSITION
+       };
+    // Transition ACTIVE -> PARTIALLY_COVERED (partial fill observed)
+    ENUM_RESERVATION_LIFECYCLE_RESULT UpdateReservationToPartiallyCovered(const string attempt_id, int expected_revision, double executed_volume, double new_remaining_amount, double new_remaining_volume, string &reason);
+    // Transition PARTIALLY_COVERED -> EXPOSURE_RECONCILED (position confirmed, exposure matches)
+    ENUM_RESERVATION_LIFECYCLE_RESULT UpdateReservationToExposureReconciled(const string attempt_id, int expected_revision, string &reason);
+    // Transition ACTIVE/PARTIALLY_COVERED -> RELEASED (explicit release, e.g., position closed, retry aborted)
+    ENUM_RESERVATION_LIFECYCLE_RESULT ReleaseReservation(const string attempt_id, int expected_revision, const string release_reason, string &reason);
+    // Transition ACTIVE/PARTIALLY_COVERED -> RECONCILIATION_REQUIRED (ambiguous outcome)
+    ENUM_RESERVATION_LIFECYCLE_RESULT MarkReservationReconciliationRequired(const string attempt_id, int expected_revision, const string reason, string &out_reason);
 
     // Broker reconciliation
     bool               ReconcileAttempt(const string attempt_id);
@@ -198,6 +239,25 @@ public:
     bool               HasBlockingUnresolved(string &blocking_reason);
     // RS-02: conservative quarantine for INTENT_DURABLE_NOT_SUBMITTED (no auto-resubmit)
     bool               QuarantineOrphanIntent(const ExecutionAttemptRecord &rec);
+
+    // F-005.2: Magic ownership resolution — central authority for all consumers.
+    // Range membership is only a candidate filter; exact ownership requires durable ledger lookup.
+    enum ENUM_MAGIC_OWNERSHIP
+      {
+       MAGIC_OWNERSHIP_EXACT_ATTEMPT = 0,   // valid attempt_magic with durable mapping to this account
+       MAGIC_OWNERSHIP_LEGACY_STRATEGY = 1, // recognized strategy/style Magic constant
+       MAGIC_OWNERSHIP_EXTERNAL = 2,        // not EA-owned (proven: out of range or no mapping)
+       MAGIC_OWNERSHIP_AMBIGUOUS = 3        // multiple/conflicting mappings, DB error, or unverified
+      };
+    // Resolve ownership for a candidate Magic value within the current account scope.
+    // Returns AMBIGUOUS for DB/unavailable/unverified; EXTERNAL only for proven non-EA ownership.
+    ENUM_MAGIC_OWNERSHIP ResolveMagicOwnership(const ulong magic, const string account_key);
+    // Helper: check if Magic is in the reserved attempt_magic namespace.
+    bool                 IsAttemptMagicRange(const ulong magic) const;
+    // Helper: validate exact attempt_magic binding (attempt_id + magic + account).
+    bool                 ValidateAttemptMagicBinding(const string attempt_id, const ulong attempt_magic, const string account_key);
+    // Diagnostic: get human-readable reason for ownership classification
+    string               GetOwnershipReason(const ulong magic, const string account_key);
 
     // E2.3 / RS-01: Setup Claim lifecycle (durable logical-setup deduplication)
     // Option B (R3A): setup_claims is authoritative for logical setup identity.
@@ -406,11 +466,15 @@ public:
                                                    string &out_direction,
                                                    string &out_signal_time,
                                                    string &out_setup_tf);
-    bool               CanonicalSameLogicalSetup(const string existing_canonical,
-                                                const string new_canonical);
+bool               CanonicalSameLogicalSetup(const string existing_canonical,
+                                                 const string new_canonical);
     bool               UpgradeClaimCanonicalIfSafe(const string claim_id,
-                                                  const string expected_existing,
-                                                  const string new_canonical);
+                                                   const string expected_existing,
+                                                   const string new_canonical);
+
+    // F-005.2: Magic ownership resolution implementation
+    // (Declared above with ENUM_MAGIC_OWNERSHIP at line 222-228)
+
    };
 
 //+------------------------------------------------------------------+
@@ -418,15 +482,19 @@ public:
 //+------------------------------------------------------------------+
 CExecutionLedger::CExecutionLedger()
   {
-   m_db_handle = INVALID_HANDLE;
-   m_initialized = false;
-   m_db_available = false;
-   m_db_filename = "";
-   // E2.6: schema v2 adds retry_approval_events (durable single-use controlled retry audit/idempotency).
-   // Migration source is backward-compatible; live DB migration execution is NOT authorized in this phase.
-   // F-002: schema v3 adds durable per-Attempt risk reservation columns on execution_attempts (additive, tx-safe migration source).
-   // Live DB migration execution is NOT authorized in this task.
-   m_schema_version = 3;
+m_db_handle = INVALID_HANDLE;
+    m_initialized = false;
+    m_db_available = false;
+    m_db_filename = "";
+// E2.6: schema v2 adds retry_approval_events (durable single-use controlled retry audit/idempotency).
+    // Migration source is backward-compatible; live DB migration execution is NOT authorized in this phase.
+    // F-002: schema v3 adds durable per-Attempt risk reservation columns on execution_attempts (additive, tx-safe migration source).
+    // Live DB migration execution is NOT authorized in this task.
+    // F-005.2: schema v4 adds durable per-Attempt broker-visible Magic token (additive, tx-safe migration source).
+    // Live DB migration execution is NOT authorized in this task.
+    // F-005.2.2: schema v5 adds account_key column for ownership resolution (additive, tx-safe migration source).
+    // Live DB migration execution is NOT authorized in this task.
+    m_schema_version = 5;
     m_open_attempts_count = 0;
     m_last_init_stage = "";
     m_last_init_operation = "";
@@ -523,6 +591,14 @@ string CExecutionLedger::EscapeSQL(const string s) const
     return result;
    }
 
+// F-002: Static SQL escaping helper for external callers
+string CExecutionLedger::EscapeSQLStatic(const string s)
+   {
+    string result = s;
+    StringReplace(result, "'", "''");
+    return result;
+   }
+
 //+------------------------------------------------------------------+
 //| Database Column String Helper                                    |
 //+------------------------------------------------------------------+
@@ -568,54 +644,71 @@ bool CExecutionLedger::CreateSchema()
    if(m_db_handle == INVALID_HANDLE)
       return false;
 
-   // F-002 schema v3: durable per-Attempt risk reservation columns (additive). Legacy migrated rows may have NULLs
-   // => LEGACY_UNVERIFIED semantics; callers must fail closed, never treat NULL as 0 risk.
-   string sql1 = "CREATE TABLE IF NOT EXISTS execution_attempts ("
-                 "attempt_id TEXT PRIMARY KEY,"
-                 "setup_id TEXT,"
-                 "symbol TEXT,"
-                 "magic INTEGER,"
-                 "intent INTEGER,"
-                 "direction INTEGER,"
-                 "requested_volume DOUBLE,"
-                 "executed_volume DOUBLE,"
-                 "remaining_volume DOUBLE,"
-                 "entry_price DOUBLE,"
-                 "stop_loss DOUBLE,"
-                 "take_profit DOUBLE,"
-                 "created_at INTEGER,"
-                 "submission_bound_at INTEGER,"
-                 "submitted_at INTEGER,"
-                 "broker_response_at INTEGER,"
-                 "observed_at INTEGER,"
-                 "resolved_at INTEGER,"
-                 "last_retcode INTEGER,"
-                 "last_retcode_desc TEXT,"
-                 "broker_order_ticket INTEGER,"
-                 "broker_deal_ticket INTEGER,"
-                 "broker_position_ticket INTEGER,"
-                 "failure_class TEXT,"
-                 "state INTEGER,"
-                 "submission_allowed INTEGER,"
-                 "last_reason TEXT,"
-                 "schema_version INTEGER,"
-                 "risk_reserve_initial_amount REAL,"
-                 "risk_reserve_remaining_amount REAL,"
-                 "risk_reserve_currency TEXT,"
-                 "risk_reserve_equity_snapshot REAL,"
-                 "risk_reserve_percent_snapshot REAL,"
-                 "risk_reserve_model_version INTEGER,"
-                 "risk_reserve_state INTEGER,"
-                 "risk_reserve_revision INTEGER,"
-                 "risk_reserve_updated_at INTEGER,"
-                 "risk_reserve_release_reason TEXT"
-                 ");";
+// F-002 schema v3: durable per-Attempt risk reservation columns (additive). Legacy migrated rows may have NULLs
+    // => LEGACY_UNVERIFIED semantics; callers must fail closed, never treat NULL as 0 risk.
+    // F-005.2 schema v4: adds attempt_magic column (additive). Legacy migrated rows have NULL/0 => not used for broker correlation.
+    // F-005.2.2 schema v5: adds account_key column for ownership resolution (additive). Legacy migrated rows have NULL => external scope.
+    string sql1 = "CREATE TABLE IF NOT EXISTS execution_attempts ("
+                  "attempt_id TEXT PRIMARY KEY,"
+                  "setup_id TEXT,"
+                  "symbol TEXT,"
+                  "magic INTEGER,"
+                  "attempt_magic INTEGER,"
+                  "intent INTEGER,"
+                  "direction INTEGER,"
+                  "requested_volume DOUBLE,"
+                  "executed_volume DOUBLE,"
+                  "remaining_volume DOUBLE,"
+                  "entry_price DOUBLE,"
+                  "stop_loss DOUBLE,"
+                  "take_profit DOUBLE,"
+                  "created_at INTEGER,"
+                  "submission_bound_at INTEGER,"
+                  "submitted_at INTEGER,"
+                  "broker_response_at INTEGER,"
+                  "observed_at INTEGER,"
+                  "resolved_at INTEGER,"
+                  "last_retcode INTEGER,"
+                  "last_retcode_desc TEXT,"
+                  "broker_order_ticket INTEGER,"
+                  "broker_deal_ticket INTEGER,"
+                  "broker_position_ticket INTEGER,"
+                  "failure_class TEXT,"
+                  "state INTEGER,"
+                  "submission_allowed INTEGER,"
+                  "last_reason TEXT,"
+                  "schema_version INTEGER,"
+                  "account_key TEXT,"
+                  "risk_reserve_initial_amount REAL,"
+                  "risk_reserve_remaining_amount REAL,"
+                  "risk_reserve_currency TEXT,"
+                  "risk_reserve_equity_snapshot REAL,"
+                  "risk_reserve_percent_snapshot REAL,"
+                  "risk_reserve_model_version INTEGER,"
+                  "risk_reserve_state INTEGER,"
+                  "risk_reserve_revision INTEGER,"
+                  "risk_reserve_updated_at INTEGER,"
+                  "risk_reserve_release_reason TEXT"
+                  ");";
+
+ResetLastError();
+     if(!ExecuteSQL(sql1))
+       {
+        m_last_init_stage = "ExecutionLedger.CreateSchema";
+        m_last_init_operation = "ExecuteSQL(sql1:CREATE_EXECUTION_ATTEMPTS)";
+        m_last_init_error = GetLastError();
+        return false;
+       }
+
+    // F-005.2.2: unique index on attempt_magic for non-NULL values (identity-first recovery)
+    string sql1_idx = "CREATE UNIQUE INDEX IF NOT EXISTS idx_execution_attempts_attempt_magic "
+                      "ON execution_attempts(attempt_magic) WHERE attempt_magic IS NOT NULL;";
 
     ResetLastError();
-    if(!ExecuteSQL(sql1))
+    if(!ExecuteSQL(sql1_idx))
       {
        m_last_init_stage = "ExecutionLedger.CreateSchema";
-       m_last_init_operation = "ExecuteSQL(sql1:CREATE_EXECUTION_ATTEMPTS)";
+       m_last_init_operation = "ExecuteSQL(sql1_idx:CREATE_UNIQUE_INDEX_ATTEMPT_MAGIC)";
        m_last_init_error = GetLastError();
        return false;
       }
@@ -898,16 +991,62 @@ bool CExecutionLedger::MigrateSchema()
          return false;
         }
       string set_ver3 = "INSERT OR REPLACE INTO execution_schema_meta (key, value) VALUES ('schema_version', '3');";
-      if(!ExecuteSQL(set_ver3))
-        {
-         m_last_init_stage = "ExecutionLedger.MigrateSchema";
-         m_last_init_operation = "ExecuteSQL(v2->v3:set_schema_version)";
-         m_last_init_error = GetLastError();
-         return false;
-        }
-     }
-   return true;
-  }
+if(!ExecuteSQL(set_ver3))
+         {
+          m_last_init_stage = "ExecutionLedger.MigrateSchema";
+          m_last_init_operation = "ExecuteSQL(v2->v3:set_schema_version)";
+          m_last_init_error = GetLastError();
+          return false;
+         }
+      }
+    // v3 -> v4 (F-005.2): additive durable per-Attempt broker-visible Magic token column on execution_attempts.
+    // Legacy rows receive NULL/0 attempt_magic; callers must treat as legacy (not used for broker correlation).
+    if(current < 4)
+      {
+       // Best-effort additive ALTER; duplicate-column is treated as already-migrated.
+       MigrateV2ToV3AddColumnBestEffort("execution_attempts", "attempt_magic", "INTEGER");
+       // Verify column exists (best-effort; same helper used for v3 columns).
+       bool has_col = false;
+       if(!TableHasColumn("execution_attempts", "attempt_magic", has_col) || !has_col)
+         {
+          m_last_init_stage = "ExecutionLedger.MigrateSchema";
+          m_last_init_operation = "ExecuteSQL(v3->v4:VERIFY_ATTEMPT_MAGIC_COLUMN)";
+          m_last_init_error = GetLastError();
+          return false;
+         }
+string set_ver4 = "INSERT OR REPLACE INTO execution_schema_meta (key, value) VALUES ('schema_version', '4');";
+        if(!ExecuteSQL(set_ver4))
+          {
+           m_last_init_stage = "ExecutionLedger.MigrateSchema";
+           m_last_init_operation = "ExecuteSQL(v3->v4:set_schema_version)";
+           m_last_init_error = GetLastError();
+           return false;
+          }
+       }
+     // v4 -> v5 (F-005.2.2): additive account_key column for ownership resolution.
+     // Legacy rows receive NULL account_key => external scope, not EA-owned.
+     if(current < 5)
+       {
+        MigrateV2ToV3AddColumnBestEffort("execution_attempts", "account_key", "TEXT");
+        bool has_col = false;
+        if(!TableHasColumn("execution_attempts", "account_key", has_col) || !has_col)
+          {
+           m_last_init_stage = "ExecutionLedger.MigrateSchema";
+           m_last_init_operation = "ExecuteSQL(v4->v5:VERIFY_ACCOUNT_KEY_COLUMN)";
+           m_last_init_error = GetLastError();
+           return false;
+          }
+        string set_ver5 = "INSERT OR REPLACE INTO execution_schema_meta (key, value) VALUES ('schema_version', '5');";
+        if(!ExecuteSQL(set_ver5))
+          {
+           m_last_init_stage = "ExecutionLedger.MigrateSchema";
+           m_last_init_operation = "ExecuteSQL(v4->v5:set_schema_version)";
+           m_last_init_error = GetLastError();
+           return false;
+          }
+       }
+     return true;
+   }
 
 //+------------------------------------------------------------------+
 //| Generate Attempt ID                                               |
@@ -917,6 +1056,63 @@ string CExecutionLedger::GenerateAttemptId()
    datetime now = TimeCurrent();
    string id = "ATT_" + IntegerToString((long)now) + "_" + IntegerToString(MathRand()) + "_" + IntegerToString(GetTickCount());
    return id;
+  }
+
+//+------------------------------------------------------------------+
+//| Generate Per-Attempt Magic (F-005.2)                              |
+//| Allocates from non-overlapping range [MAGIC_ATTEMPT_BASE..MAGIC_ATTEMPT_MAX].
+//| Sequential allocation with collision detection; fails closed on overflow.
+//| Never reused; persists atomically with Intent/reservation.
+//+------------------------------------------------------------------+
+ulong CExecutionLedger::GenerateAttemptMagic(string &err)
+  {
+   err = "";
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+     {
+      err = "LEDGER_UNAVAILABLE";
+      return 0;
+     }
+   // Read max allocated attempt_magic from execution_attempts
+   string sql = "SELECT MAX(attempt_magic) FROM execution_attempts WHERE attempt_magic >= " + IntegerToString(MAGIC_ATTEMPT_BASE) + " AND attempt_magic <= " + IntegerToString(MAGIC_ATTEMPT_MAX) + ";";
+   int handle = DatabasePrepare(m_db_handle, sql);
+   if(handle == INVALID_HANDLE)
+     {
+      err = "MAX_MAGIC_QUERY_PREPARE_FAILED";
+      return 0;
+     }
+   ulong next_magic = MAGIC_ATTEMPT_BASE;
+   if(DatabaseRead(handle))
+     {
+      long max_val = 0;
+      DatabaseColumnLong(handle, 0, max_val);
+      if(max_val >= (long)MAGIC_ATTEMPT_BASE)
+        {
+         if((ulong)max_val >= MAGIC_ATTEMPT_MAX)
+           {
+            DatabaseFinalize(handle);
+            err = "ATTEMPT_MAGIC_EXHAUSTED";
+            return 0; // overflow - fail closed
+           }
+         next_magic = (ulong)max_val + 1;
+        }
+     }
+   DatabaseFinalize(handle);
+   // Verify candidate is not already in use (defensive; MAX should guarantee uniqueness but double-check)
+   string check_sql = "SELECT attempt_id FROM execution_attempts WHERE attempt_magic = " + IntegerToString((long)next_magic) + ";";
+   int check_handle = DatabasePrepare(m_db_handle, check_sql);
+   if(check_handle == INVALID_HANDLE)
+     {
+      err = "MAGIC_COLLISION_CHECK_PREPARE_FAILED";
+      return 0;
+     }
+   if(DatabaseRead(check_handle))
+     {
+      DatabaseFinalize(check_handle);
+      err = "ATTEMPT_MAGIC_COLLISION";
+      return 0; // collision - fail closed (should not happen with MAX+1)
+     }
+   DatabaseFinalize(check_handle);
+   return next_magic;
   }
 
 //+------------------------------------------------------------------+
@@ -1267,11 +1463,275 @@ bool CExecutionLedger::ResolveAttempt(const string attempt_id, ENUM_EXEC_ATTEMPT
    if(!DatabaseTransactionCommit(m_db_handle))
       return false;
 
-   return true;
-  }
+return true;
+   }
 
-//+------------------------------------------------------------------+
-//| Get Attempt                                                       |
+ //+------------------------------------------------------------------+
+ //| F-002: Update Reservation to PARTIALLY_COVERED                  |
+ //| Transition: ACTIVE(2) -> PARTIALLY_COVERED(3) with CAS/revision |
+ //+------------------------------------------------------------------+
+ CExecutionLedger::ENUM_RESERVATION_LIFECYCLE_RESULT CExecutionLedger::UpdateReservationToPartiallyCovered(
+     const string attempt_id, int expected_revision, double executed_volume, double new_remaining_amount, double new_remaining_volume, string &reason)
+   {
+   reason = "";
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+      { reason = "LEDGER_UNAVAILABLE"; return RESERVATION_LIFECYCLE_DB_ERROR; }
+
+   if(!DatabaseTransactionBegin(m_db_handle))
+      { reason = "BEGIN_TX_FAILED"; return RESERVATION_LIFECYCLE_DB_ERROR; }
+
+   // Read current state and revision for CAS
+   string sql = "SELECT risk_reserve_state, risk_reserve_revision, risk_reserve_known, risk_reserve_model_version "
+                "FROM execution_attempts WHERE attempt_id = '" + EscapeSQL(attempt_id) + "';";
+   int handle = DatabasePrepare(m_db_handle, sql);
+   if(handle == INVALID_HANDLE)
+      { DatabaseTransactionRollback(m_db_handle); reason = "READ_PREPARE_FAILED"; return RESERVATION_LIFECYCLE_DB_ERROR; }
+
+   int current_state = -1;
+   int current_revision = 0;
+   int known = 0;
+   int model_version = 0;
+   if(DatabaseRead(handle))
+      {
+      current_state = (int)DatabaseColumnLong2(handle, 0);
+      current_revision = (int)DatabaseColumnLong2(handle, 1);
+      known = (int)DatabaseColumnLong2(handle, 2);
+      model_version = (int)DatabaseColumnLong2(handle, 3);
+      }
+   DatabaseFinalize(handle);
+
+   if(current_state != EXEC_RISK_RESERVE_STATE_ACTIVE)
+      { DatabaseTransactionRollback(m_db_handle); reason = "INVALID_STATE_NOT_ACTIVE"; return RESERVATION_LIFECYCLE_INVALID_STATE; }
+   if(known != 1 || model_version != EXEC_RISK_RESERVE_MODEL_V1)
+      { DatabaseTransactionRollback(m_db_handle); reason = "LEGACY_UNVERIFIED"; return RESERVATION_LIFECYCLE_LEGACY_UNVERIFIED; }
+   if(current_revision != expected_revision)
+      { DatabaseTransactionRollback(m_db_handle); reason = "REVISION_MISMATCH"; return RESERVATION_LIFECYCLE_REVISION_MISMATCH; }
+
+datetime now = TimeCurrent();
+    int new_revision = expected_revision + 1;
+    string upd = "UPDATE execution_attempts SET "
+                 "risk_reserve_state = " + IntegerToString(EXEC_RISK_RESERVE_STATE_PARTIALLY_COVERED) + ","
+                 "risk_reserve_remaining_amount = " + DoubleToString(new_remaining_amount, 8) + ","
+                 "risk_reserve_revision = " + IntegerToString(new_revision) + ","
+                 "risk_reserve_updated_at = " + IntegerToString((long)now) + ","
+                 "executed_volume = " + DoubleToString(executed_volume, 8) + ","
+                 "remaining_volume = " + DoubleToString(new_remaining_volume, 8) + ","
+                 "last_reason = '" + EscapeSQL("PARTIAL_FILL:" + DoubleToString(executed_volume, 8)) + "'"
+                 " WHERE attempt_id = '" + EscapeSQL(attempt_id) + "'"
+                 " AND risk_reserve_revision = " + IntegerToString(expected_revision) + ";";
+
+   if(!ExecuteSQL(upd))
+      { DatabaseTransactionRollback(m_db_handle); reason = "UPDATE_FAILED"; return RESERVATION_LIFECYCLE_DB_ERROR; }
+
+   bool success = false;
+   if(!AffectedRowsIsOne(success) || !success)
+      { DatabaseTransactionRollback(m_db_handle); reason = "NO_ROWS_UPDATED"; return RESERVATION_LIFECYCLE_REVISION_MISMATCH; }
+
+   if(!DatabaseTransactionCommit(m_db_handle))
+      { reason = "COMMIT_FAILED"; return RESERVATION_LIFECYCLE_DB_ERROR; }
+
+   return RESERVATION_LIFECYCLE_OK;
+   }
+
+ //+------------------------------------------------------------------+
+ //| F-002: Update Reservation to EXPOSURE_RECONCILED                |
+ //| Transition: PARTIALLY_COVERED(3) -> EXPOSURE_RECONCILED(4)      |
+ //+------------------------------------------------------------------+
+ CExecutionLedger::ENUM_RESERVATION_LIFECYCLE_RESULT CExecutionLedger::UpdateReservationToExposureReconciled(
+     const string attempt_id, int expected_revision, string &reason)
+   {
+   reason = "";
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+      { reason = "LEDGER_UNAVAILABLE"; return RESERVATION_LIFECYCLE_DB_ERROR; }
+
+   if(!DatabaseTransactionBegin(m_db_handle))
+      { reason = "BEGIN_TX_FAILED"; return RESERVATION_LIFECYCLE_DB_ERROR; }
+
+   string sql = "SELECT risk_reserve_state, risk_reserve_revision, risk_reserve_known, risk_reserve_model_version "
+                "FROM execution_attempts WHERE attempt_id = '" + EscapeSQL(attempt_id) + "';";
+   int handle = DatabasePrepare(m_db_handle, sql);
+   if(handle == INVALID_HANDLE)
+      { DatabaseTransactionRollback(m_db_handle); reason = "READ_PREPARE_FAILED"; return RESERVATION_LIFECYCLE_DB_ERROR; }
+
+   int current_state = -1;
+   int current_revision = 0;
+   int known = 0;
+   int model_version = 0;
+   if(DatabaseRead(handle))
+      {
+      current_state = (int)DatabaseColumnLong2(handle, 0);
+      current_revision = (int)DatabaseColumnLong2(handle, 1);
+      known = (int)DatabaseColumnLong2(handle, 2);
+      model_version = (int)DatabaseColumnLong2(handle, 3);
+      }
+   DatabaseFinalize(handle);
+
+   if(current_state != EXEC_RISK_RESERVE_STATE_PARTIALLY_COVERED)
+      { DatabaseTransactionRollback(m_db_handle); reason = "INVALID_STATE_NOT_PARTIALLY_COVERED"; return RESERVATION_LIFECYCLE_INVALID_STATE; }
+   if(known != 1 || model_version != EXEC_RISK_RESERVE_MODEL_V1)
+      { DatabaseTransactionRollback(m_db_handle); reason = "LEGACY_UNVERIFIED"; return RESERVATION_LIFECYCLE_LEGACY_UNVERIFIED; }
+   if(current_revision != expected_revision)
+      { DatabaseTransactionRollback(m_db_handle); reason = "REVISION_MISMATCH"; return RESERVATION_LIFECYCLE_REVISION_MISMATCH; }
+
+   datetime now = TimeCurrent();
+   int new_revision = expected_revision + 1;
+   string upd = "UPDATE execution_attempts SET "
+                "risk_reserve_state = " + IntegerToString(EXEC_RISK_RESERVE_STATE_EXPOSURE_RECONCILED) + ","
+                "risk_reserve_revision = " + IntegerToString(new_revision) + ","
+                "risk_reserve_updated_at = " + IntegerToString((long)now) + ","
+                "risk_reserve_release_reason = 'EXPOSURE_RECONCILED',"
+                "last_reason = 'EXPOSURE_RECONCILED'"
+                " WHERE attempt_id = '" + EscapeSQL(attempt_id) + "'"
+                " AND risk_reserve_revision = " + IntegerToString(expected_revision) + ";";
+
+   if(!ExecuteSQL(upd))
+      { DatabaseTransactionRollback(m_db_handle); reason = "UPDATE_FAILED"; return RESERVATION_LIFECYCLE_DB_ERROR; }
+
+   bool success = false;
+   if(!AffectedRowsIsOne(success) || !success)
+      { DatabaseTransactionRollback(m_db_handle); reason = "NO_ROWS_UPDATED"; return RESERVATION_LIFECYCLE_REVISION_MISMATCH; }
+
+   if(!DatabaseTransactionCommit(m_db_handle))
+      { reason = "COMMIT_FAILED"; return RESERVATION_LIFECYCLE_DB_ERROR; }
+
+   return RESERVATION_LIFECYCLE_OK;
+   }
+
+ //+------------------------------------------------------------------+
+ //| F-002: Release Reservation                                       |
+ //| Transition: ACTIVE(2)/PARTIALLY_COVERED(3) -> RELEASED(5)       |
+ //+------------------------------------------------------------------+
+ CExecutionLedger::ENUM_RESERVATION_LIFECYCLE_RESULT CExecutionLedger::ReleaseReservation(
+     const string attempt_id, int expected_revision, const string release_reason, string &reason)
+   {
+   reason = "";
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+      { reason = "LEDGER_UNAVAILABLE"; return RESERVATION_LIFECYCLE_DB_ERROR; }
+
+   if(!DatabaseTransactionBegin(m_db_handle))
+      { reason = "BEGIN_TX_FAILED"; return RESERVATION_LIFECYCLE_DB_ERROR; }
+
+   string sql = "SELECT risk_reserve_state, risk_reserve_revision, risk_reserve_known, risk_reserve_model_version "
+                "FROM execution_attempts WHERE attempt_id = '" + EscapeSQL(attempt_id) + "';";
+   int handle = DatabasePrepare(m_db_handle, sql);
+   if(handle == INVALID_HANDLE)
+      { DatabaseTransactionRollback(m_db_handle); reason = "READ_PREPARE_FAILED"; return RESERVATION_LIFECYCLE_DB_ERROR; }
+
+   int current_state = -1;
+   int current_revision = 0;
+   int known = 0;
+   int model_version = 0;
+   if(DatabaseRead(handle))
+      {
+      current_state = (int)DatabaseColumnLong2(handle, 0);
+      current_revision = (int)DatabaseColumnLong2(handle, 1);
+      known = (int)DatabaseColumnLong2(handle, 2);
+      model_version = (int)DatabaseColumnLong2(handle, 3);
+      }
+   DatabaseFinalize(handle);
+
+   if(current_state != EXEC_RISK_RESERVE_STATE_ACTIVE && current_state != EXEC_RISK_RESERVE_STATE_PARTIALLY_COVERED)
+      { DatabaseTransactionRollback(m_db_handle); reason = "INVALID_STATE_FOR_RELEASE"; return RESERVATION_LIFECYCLE_INVALID_STATE; }
+   if(known != 1 || model_version != EXEC_RISK_RESERVE_MODEL_V1)
+      { DatabaseTransactionRollback(m_db_handle); reason = "LEGACY_UNVERIFIED"; return RESERVATION_LIFECYCLE_LEGACY_UNVERIFIED; }
+   if(current_revision != expected_revision)
+      { DatabaseTransactionRollback(m_db_handle); reason = "REVISION_MISMATCH"; return RESERVATION_LIFECYCLE_REVISION_MISMATCH; }
+
+   datetime now = TimeCurrent();
+   int new_revision = expected_revision + 1;
+   string safe_reason = release_reason;
+   StringReplace(safe_reason, "'", "''");
+   string upd = "UPDATE execution_attempts SET "
+                "risk_reserve_state = " + IntegerToString(EXEC_RISK_RESERVE_STATE_RELEASED) + ","
+                "risk_reserve_remaining_amount = 0.0,"
+                "risk_reserve_revision = " + IntegerToString(new_revision) + ","
+                "risk_reserve_updated_at = " + IntegerToString((long)now) + ","
+                "risk_reserve_release_reason = '" + EscapeSQL(safe_reason) + "',"
+                "last_reason = '" + EscapeSQL("RELEASED:" + safe_reason) + "'"
+                " WHERE attempt_id = '" + EscapeSQL(attempt_id) + "'"
+                " AND risk_reserve_revision = " + IntegerToString(expected_revision) + ";";
+
+   if(!ExecuteSQL(upd))
+      { DatabaseTransactionRollback(m_db_handle); reason = "UPDATE_FAILED"; return RESERVATION_LIFECYCLE_DB_ERROR; }
+
+   bool success = false;
+   if(!AffectedRowsIsOne(success) || !success)
+      { DatabaseTransactionRollback(m_db_handle); reason = "NO_ROWS_UPDATED"; return RESERVATION_LIFECYCLE_REVISION_MISMATCH; }
+
+   if(!DatabaseTransactionCommit(m_db_handle))
+      { reason = "COMMIT_FAILED"; return RESERVATION_LIFECYCLE_DB_ERROR; }
+
+   return RESERVATION_LIFECYCLE_OK;
+   }
+
+ //+------------------------------------------------------------------+
+ //| F-002: Mark Reservation RECONCILIATION_REQUIRED                 |
+ //| Transition: ACTIVE(2)/PARTIALLY_COVERED(3) -> RECONCILIATION_REQUIRED(6) |
+ //+------------------------------------------------------------------+
+ CExecutionLedger::ENUM_RESERVATION_LIFECYCLE_RESULT CExecutionLedger::MarkReservationReconciliationRequired(
+     const string attempt_id, int expected_revision, const string reason, string &out_reason)
+   {
+   out_reason = "";
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+      { out_reason = "LEDGER_UNAVAILABLE"; return RESERVATION_LIFECYCLE_DB_ERROR; }
+
+   if(!DatabaseTransactionBegin(m_db_handle))
+      { out_reason = "BEGIN_TX_FAILED"; return RESERVATION_LIFECYCLE_DB_ERROR; }
+
+   string sql = "SELECT risk_reserve_state, risk_reserve_revision, risk_reserve_known, risk_reserve_model_version "
+                "FROM execution_attempts WHERE attempt_id = '" + EscapeSQL(attempt_id) + "';";
+   int handle = DatabasePrepare(m_db_handle, sql);
+   if(handle == INVALID_HANDLE)
+      { DatabaseTransactionRollback(m_db_handle); out_reason = "READ_PREPARE_FAILED"; return RESERVATION_LIFECYCLE_DB_ERROR; }
+
+   int current_state = -1;
+   int current_revision = 0;
+   int known = 0;
+   int model_version = 0;
+   if(DatabaseRead(handle))
+      {
+      current_state = (int)DatabaseColumnLong2(handle, 0);
+      current_revision = (int)DatabaseColumnLong2(handle, 1);
+      known = (int)DatabaseColumnLong2(handle, 2);
+      model_version = (int)DatabaseColumnLong2(handle, 3);
+      }
+   DatabaseFinalize(handle);
+
+   if(current_state != EXEC_RISK_RESERVE_STATE_ACTIVE && current_state != EXEC_RISK_RESERVE_STATE_PARTIALLY_COVERED)
+      { DatabaseTransactionRollback(m_db_handle); out_reason = "INVALID_STATE_FOR_RECONCILIATION"; return RESERVATION_LIFECYCLE_INVALID_STATE; }
+   if(known != 1 || model_version != EXEC_RISK_RESERVE_MODEL_V1)
+      { DatabaseTransactionRollback(m_db_handle); out_reason = "LEGACY_UNVERIFIED"; return RESERVATION_LIFECYCLE_LEGACY_UNVERIFIED; }
+   if(current_revision != expected_revision)
+      { DatabaseTransactionRollback(m_db_handle); out_reason = "REVISION_MISMATCH"; return RESERVATION_LIFECYCLE_REVISION_MISMATCH; }
+
+   datetime now = TimeCurrent();
+   int new_revision = expected_revision + 1;
+   string safe_reason = reason;
+   StringReplace(safe_reason, "'", "''");
+   string upd = "UPDATE execution_attempts SET "
+                "risk_reserve_state = " + IntegerToString(EXEC_RISK_RESERVE_STATE_RECONCILIATION_REQUIRED) + ","
+                "risk_reserve_revision = " + IntegerToString(new_revision) + ","
+                "risk_reserve_updated_at = " + IntegerToString((long)now) + ","
+                "risk_reserve_release_reason = '" + EscapeSQL(safe_reason) + "',"
+                "last_reason = '" + EscapeSQL("RECONCILIATION_REQUIRED:" + safe_reason) + "'"
+                " WHERE attempt_id = '" + EscapeSQL(attempt_id) + "'"
+                " AND risk_reserve_revision = " + IntegerToString(expected_revision) + ";";
+
+   if(!ExecuteSQL(upd))
+      { DatabaseTransactionRollback(m_db_handle); out_reason = "UPDATE_FAILED"; return RESERVATION_LIFECYCLE_DB_ERROR; }
+
+   bool success = false;
+   if(!AffectedRowsIsOne(success) || !success)
+      { DatabaseTransactionRollback(m_db_handle); out_reason = "NO_ROWS_UPDATED"; return RESERVATION_LIFECYCLE_REVISION_MISMATCH; }
+
+   if(!DatabaseTransactionCommit(m_db_handle))
+      { out_reason = "COMMIT_FAILED"; return RESERVATION_LIFECYCLE_DB_ERROR; }
+
+   return RESERVATION_LIFECYCLE_OK;
+   }
+
+ //+------------------------------------------------------------------+
+ //| Get Attempt                                                       |
 //| Option B (R3A): returns execution/broker evidence only.           |
 //| strategy_group_key/logical_setup_key/canonical_identity/          |
 //| serialization_version are NOT persisted in execution_attempts and  |
@@ -1284,15 +1744,15 @@ bool CExecutionLedger::GetAttempt(const string attempt_id, ExecutionAttemptRecor
    if(!m_db_available || m_db_handle == INVALID_HANDLE)
       return false;
 
-   string sql = "SELECT attempt_id, setup_id, symbol, magic, intent, direction, requested_volume, "
-                "executed_volume, remaining_volume, entry_price, stop_loss, take_profit, "
-                "created_at, submission_bound_at, submitted_at, broker_response_at, observed_at, resolved_at, "
-                "last_retcode, last_retcode_desc, broker_order_ticket, broker_deal_ticket, broker_position_ticket, "
-                "failure_class, state, submission_allowed, last_reason, schema_version, "
-                "COALESCE(risk_reserve_initial_amount,0), COALESCE(risk_reserve_remaining_amount,0), COALESCE(risk_reserve_currency,''), "
-                "COALESCE(risk_reserve_equity_snapshot,0), COALESCE(risk_reserve_percent_snapshot,0), COALESCE(risk_reserve_model_version,0), "
-                "COALESCE(risk_reserve_state,-1), COALESCE(risk_reserve_revision,0), COALESCE(risk_reserve_updated_at,0), COALESCE(risk_reserve_release_reason,'') "
-                "FROM execution_attempts WHERE attempt_id = '" + EscapeSQL(attempt_id) + "';";
+string sql = "SELECT attempt_id, setup_id, symbol, magic, attempt_magic, intent, direction, requested_volume, "
+                  "executed_volume, remaining_volume, entry_price, stop_loss, take_profit, "
+                  "created_at, submission_bound_at, submitted_at, broker_response_at, observed_at, resolved_at, "
+                  "last_retcode, last_retcode_desc, broker_order_ticket, broker_deal_ticket, broker_position_ticket, "
+                  "failure_class, state, submission_allowed, last_reason, schema_version, account_key, "
+                  "COALESCE(risk_reserve_initial_amount,0), COALESCE(risk_reserve_remaining_amount,0), COALESCE(risk_reserve_currency,''), "
+                  "COALESCE(risk_reserve_equity_snapshot,0), COALESCE(risk_reserve_percent_snapshot,0), COALESCE(risk_reserve_model_version,0), "
+                  "COALESCE(risk_reserve_state,-1), COALESCE(risk_reserve_revision,0), COALESCE(risk_reserve_updated_at,0), COALESCE(risk_reserve_release_reason,'') "
+                  "FROM execution_attempts WHERE attempt_id = '" + EscapeSQL(attempt_id) + "';";
 
    int handle = DatabasePrepare(m_db_handle, sql);
    if(handle == INVALID_HANDLE)
@@ -1301,36 +1761,38 @@ bool CExecutionLedger::GetAttempt(const string attempt_id, ExecutionAttemptRecor
    bool found = false;
    if(DatabaseRead(handle))
      {
-      record.attempt_id = DatabaseColumnString(handle, 0);
-      record.setup_id = DatabaseColumnString(handle, 1);
-      record.symbol = DatabaseColumnString(handle, 2);
-      record.magic = (ulong)DatabaseColumnLong2(handle, 3);
-      record.intent = (ENUM_ORDER_INTENT)DatabaseColumnLong2(handle, 4);
-      record.direction = (ENUM_SIGNAL_DIRECTION)DatabaseColumnLong2(handle, 5);
-      record.requested_volume = DatabaseColumnDouble2(handle, 6);
-      record.executed_volume = DatabaseColumnDouble2(handle, 7);
-      record.remaining_volume = DatabaseColumnDouble2(handle, 8);
-      record.entry_price = DatabaseColumnDouble2(handle, 9);
-      record.stop_loss = DatabaseColumnDouble2(handle, 10);
-      record.take_profit = DatabaseColumnDouble2(handle, 11);
-      record.created_at = (datetime)DatabaseColumnLong2(handle, 12);
-      record.submission_bound_at = (datetime)DatabaseColumnLong2(handle, 13);
-      record.submitted_at = (datetime)DatabaseColumnLong2(handle, 14);
-      record.broker_response_at = (datetime)DatabaseColumnLong2(handle, 15);
-      record.observed_at = (datetime)DatabaseColumnLong2(handle, 16);
-      record.resolved_at = (datetime)DatabaseColumnLong2(handle, 17);
-      record.last_retcode = (uint)DatabaseColumnLong2(handle, 18);
-      record.last_retcode_desc = DatabaseColumnString(handle, 19);
-      record.broker_order_ticket = (ulong)DatabaseColumnLong2(handle, 20);
-      record.broker_deal_ticket = (ulong)DatabaseColumnLong2(handle, 21);
-      record.broker_position_ticket = (ulong)DatabaseColumnLong2(handle, 22);
-      record.failure_class = DatabaseColumnString(handle, 23);
-      record.state = (ENUM_EXEC_ATTEMPT_STATE)DatabaseColumnLong2(handle, 24);
-      record.submission_allowed = (DatabaseColumnLong2(handle, 25) == 1);
-      record.last_reason = DatabaseColumnString(handle, 26);
-      record.schema_version = (int)DatabaseColumnLong2(handle, 27);
-      // F-002: reservation columns at 28..37 (COALESCE protects NULL legacy). State -1/unknown => LEGACY_UNVERIFIED.
-      ReadAttemptRiskReservationColumns(handle, 28, record);
+record.attempt_id = DatabaseColumnString(handle, 0);
+       record.setup_id = DatabaseColumnString(handle, 1);
+       record.symbol = DatabaseColumnString(handle, 2);
+       record.magic = (ulong)DatabaseColumnLong2(handle, 3);
+       record.attempt_magic = (ulong)DatabaseColumnLong2(handle, 4);
+       record.intent = (ENUM_ORDER_INTENT)DatabaseColumnLong2(handle, 5);
+       record.direction = (ENUM_SIGNAL_DIRECTION)DatabaseColumnLong2(handle, 6);
+       record.requested_volume = DatabaseColumnDouble2(handle, 7);
+       record.executed_volume = DatabaseColumnDouble2(handle, 8);
+       record.remaining_volume = DatabaseColumnDouble2(handle, 9);
+       record.entry_price = DatabaseColumnDouble2(handle, 10);
+       record.stop_loss = DatabaseColumnDouble2(handle, 11);
+       record.take_profit = DatabaseColumnDouble2(handle, 12);
+       record.created_at = (datetime)DatabaseColumnLong2(handle, 13);
+       record.submission_bound_at = (datetime)DatabaseColumnLong2(handle, 14);
+       record.submitted_at = (datetime)DatabaseColumnLong2(handle, 15);
+       record.broker_response_at = (datetime)DatabaseColumnLong2(handle, 16);
+       record.observed_at = (datetime)DatabaseColumnLong2(handle, 17);
+       record.resolved_at = (datetime)DatabaseColumnLong2(handle, 18);
+       record.last_retcode = (uint)DatabaseColumnLong2(handle, 19);
+       record.last_retcode_desc = DatabaseColumnString(handle, 20);
+       record.broker_order_ticket = (ulong)DatabaseColumnLong2(handle, 21);
+       record.broker_deal_ticket = (ulong)DatabaseColumnLong2(handle, 22);
+       record.broker_position_ticket = (ulong)DatabaseColumnLong2(handle, 23);
+record.failure_class = DatabaseColumnString(handle, 24);
+        record.state = (ENUM_EXEC_ATTEMPT_STATE)DatabaseColumnLong2(handle, 25);
+        record.submission_allowed = (DatabaseColumnLong2(handle, 26) == 1);
+        record.last_reason = DatabaseColumnString(handle, 27);
+        record.schema_version = (int)DatabaseColumnLong2(handle, 28);
+        record.account_key = DatabaseColumnString(handle, 29);
+        // F-002: reservation columns at 30..39 (COALESCE protects NULL legacy). State -1/unknown => LEGACY_UNVERIFIED.
+        ReadAttemptRiskReservationColumns(handle, 30, record);
       found = true;
      }
    DatabaseFinalize(handle);
@@ -1537,30 +1999,32 @@ bool CExecutionLedger::ReconcileAttempt(const string attempt_id)
    if(!HistorySelect(from_time, to_time))
       return false;
 
-   // Prefer order/deal/position tickets if present in record
-   if(rec.broker_order_ticket > 0)
-     {
-      // Try to find deals by order
-      int deals_total = HistoryDealsTotal();
-      double total_volume = 0.0;
-      ulong found_deal = 0;
-      ulong found_order = rec.broker_order_ticket;
-      for(int i = 0; i < deals_total; i++)
-        {
-         ulong deal_ticket = HistoryDealGetTicket(i);
-         if(deal_ticket == 0) continue;
-         ulong deal_order = HistoryDealGetInteger(deal_ticket, DEAL_ORDER);
-         if(deal_order != rec.broker_order_ticket) continue;
-         string deal_symbol = HistoryDealGetString(deal_ticket, DEAL_SYMBOL);
-         if(deal_symbol != rec.symbol) continue;
-         long deal_magic = 0;
-         if(HistoryDealGetInteger(deal_ticket, DEAL_MAGIC, deal_magic))
-           {
-            if((ulong)deal_magic != rec.magic) continue;
-           }
-         total_volume += HistoryDealGetDouble(deal_ticket, DEAL_VOLUME);
-         if(found_deal == 0) found_deal = deal_ticket;
-        }
+// Prefer order/deal/position tickets if present in record
+    if(rec.broker_order_ticket > 0)
+      {
+       // Try to find deals by order
+       int deals_total = HistoryDealsTotal();
+       double total_volume = 0.0;
+       ulong found_deal = 0;
+       ulong found_order = rec.broker_order_ticket;
+       // F-005.2.2: For schema v4+, use attempt_magic for exact correlation; legacy uses strategy magic.
+       ulong correlation_magic = (rec.schema_version >= 4 && rec.attempt_magic != 0) ? rec.attempt_magic : rec.magic;
+       for(int i = 0; i < deals_total; i++)
+         {
+          ulong deal_ticket = HistoryDealGetTicket(i);
+          if(deal_ticket == 0) continue;
+          ulong deal_order = HistoryDealGetInteger(deal_ticket, DEAL_ORDER);
+          if(deal_order != rec.broker_order_ticket) continue;
+          string deal_symbol = HistoryDealGetString(deal_ticket, DEAL_SYMBOL);
+          if(deal_symbol != rec.symbol) continue;
+          long deal_magic = 0;
+          if(HistoryDealGetInteger(deal_ticket, DEAL_MAGIC, deal_magic))
+            {
+             if((ulong)deal_magic != correlation_magic) continue;
+            }
+          total_volume += HistoryDealGetDouble(deal_ticket, DEAL_VOLUME);
+          if(found_deal == 0) found_deal = deal_ticket;
+         }
         if(total_volume > 0.0)
           {
            if(!DatabaseTransactionBegin(m_db_handle))
@@ -1571,61 +2035,61 @@ bool CExecutionLedger::ReconcileAttempt(const string attempt_id)
               new_state = EXEC_STATE_PARTIAL_FILL;
            // Try to resolve position ticket if missing
            ulong pos_ticket_resolved = rec.broker_position_ticket;
-           if(pos_ticket_resolved == 0)
-             {
-              // Try to use position identifier from order/deal
-               if(found_order > 0 && HistoryOrderSelect(found_order))
-                 {
-                  long pos_id = HistoryOrderGetInteger(found_order, ORDER_POSITION_ID);
-                  if(pos_id > 0)
-                    {
-                     int total_pos = PositionsTotal();
-                     ulong resolved_pt = 0;
-                     int match_count = 0;
-                     for(int pp = 0; pp < total_pos; pp++)
-                       {
-                        ulong pt2 = PositionGetTicket(pp);
-                        if(pt2 == 0) continue;
-                        if(!PositionSelectByTicket(pt2)) continue;
-                        string psym2 = PositionGetString(POSITION_SYMBOL);
-                        if(psym2 != rec.symbol) continue;
-                        long pm2 = PositionGetInteger(POSITION_MAGIC);
-                        if((ulong)pm2 != rec.magic) continue;
-                        long pid2 = PositionGetInteger(POSITION_IDENTIFIER);
-                        if((ulong)pid2 != (ulong)pos_id) continue;
-                        match_count++;
-                        resolved_pt = pt2;
-                        if(match_count > 1) { resolved_pt = 0; break; }
-                       }
-                     if(match_count == 1 && resolved_pt != 0) pos_ticket_resolved = resolved_pt;
-                    }
-                 }
-               if(pos_ticket_resolved == 0 && found_deal > 0 && HistoryDealSelect(found_deal))
-                 {
-                  long pos_id = HistoryDealGetInteger(found_deal, DEAL_POSITION_ID);
-                  if(pos_id > 0)
-                    {
-                     int total_pos = PositionsTotal();
-                     ulong resolved_pt = 0;
-                     int match_count = 0;
-                     for(int pp = 0; pp < total_pos; pp++)
-                       {
-                        ulong pt2 = PositionGetTicket(pp);
-                        if(pt2 == 0) continue;
-                        if(!PositionSelectByTicket(pt2)) continue;
-                        string psym2 = PositionGetString(POSITION_SYMBOL);
-                        if(psym2 != rec.symbol) continue;
-                        long pm2 = PositionGetInteger(POSITION_MAGIC);
-                        if((ulong)pm2 != rec.magic) continue;
-                        long pid2 = PositionGetInteger(POSITION_IDENTIFIER);
-                        if((ulong)pid2 != (ulong)pos_id) continue;
-                        match_count++;
-                        resolved_pt = pt2;
-                        if(match_count > 1) { resolved_pt = 0; break; }
-                       }
-                     if(match_count == 1 && resolved_pt != 0) pos_ticket_resolved = resolved_pt;
-                    }
-                 }
+if(pos_ticket_resolved == 0)
+              {
+               // Try to use position identifier from order/deal
+                if(found_order > 0 && HistoryOrderSelect(found_order))
+                  {
+                   long pos_id = HistoryOrderGetInteger(found_order, ORDER_POSITION_ID);
+                   if(pos_id > 0)
+                     {
+                      int total_pos = PositionsTotal();
+                      ulong resolved_pt = 0;
+                      int match_count = 0;
+                      for(int pp = 0; pp < total_pos; pp++)
+                        {
+                         ulong pt2 = PositionGetTicket(pp);
+                         if(pt2 == 0) continue;
+                         if(!PositionSelectByTicket(pt2)) continue;
+                         string psym2 = PositionGetString(POSITION_SYMBOL);
+                         if(psym2 != rec.symbol) continue;
+                         long pm2 = PositionGetInteger(POSITION_MAGIC);
+                         if((ulong)pm2 != correlation_magic) continue;
+                         long pid2 = PositionGetInteger(POSITION_IDENTIFIER);
+                         if((ulong)pid2 != (ulong)pos_id) continue;
+                         match_count++;
+                         resolved_pt = pt2;
+                         if(match_count > 1) { resolved_pt = 0; break; }
+                        }
+                      if(match_count == 1 && resolved_pt != 0) pos_ticket_resolved = resolved_pt;
+                     }
+                  }
+                if(pos_ticket_resolved == 0 && found_deal > 0 && HistoryDealSelect(found_deal))
+                  {
+                   long pos_id = HistoryDealGetInteger(found_deal, DEAL_POSITION_ID);
+                   if(pos_id > 0)
+                     {
+                      int total_pos = PositionsTotal();
+                      ulong resolved_pt = 0;
+                      int match_count = 0;
+                      for(int pp = 0; pp < total_pos; pp++)
+                        {
+                         ulong pt2 = PositionGetTicket(pp);
+                         if(pt2 == 0) continue;
+                         if(!PositionSelectByTicket(pt2)) continue;
+                         string psym2 = PositionGetString(POSITION_SYMBOL);
+                         if(psym2 != rec.symbol) continue;
+                         long pm2 = PositionGetInteger(POSITION_MAGIC);
+                         if((ulong)pm2 != correlation_magic) continue;
+                         long pid2 = PositionGetInteger(POSITION_IDENTIFIER);
+                         if((ulong)pid2 != (ulong)pos_id) continue;
+                         match_count++;
+                         resolved_pt = pt2;
+                         if(match_count > 1) { resolved_pt = 0; break; }
+                        }
+                      if(match_count == 1 && resolved_pt != 0) pos_ticket_resolved = resolved_pt;
+                     }
+                  }
 
              }
            string sql = "UPDATE execution_attempts SET broker_deal_ticket = " +
@@ -1665,6 +2129,8 @@ IntegerToString((long)(found_deal>0?found_deal:rec.broker_deal_ticket)) +
     ulong matched_order = 0;
     double matched_volume = 0;
     int match_count = 0;
+    // F-005.2.2: For schema v4+, use attempt_magic for exact correlation; legacy uses strategy magic.
+    ulong correlation_magic = (rec.schema_version >= 4 && rec.attempt_magic != 0) ? rec.attempt_magic : rec.magic;
 
     for(int i = 0; i < deals_total; i++)
       {
@@ -1674,7 +2140,7 @@ IntegerToString((long)(found_deal>0?found_deal:rec.broker_deal_ticket)) +
        long deal_magic = 0;
        if(!HistoryDealGetInteger(deal_ticket, DEAL_MAGIC, deal_magic))
           continue;
-       if((ulong)deal_magic != rec.magic)
+       if((ulong)deal_magic != correlation_magic)
           continue;
 
        string deal_symbol = HistoryDealGetString(deal_ticket, DEAL_SYMBOL);
@@ -1716,65 +2182,65 @@ IntegerToString((long)(found_deal>0?found_deal:rec.broker_deal_ticket)) +
          return false;
         }
 
-     // Try to resolve position ticket if missing
-     ulong pos_ticket_resolved = rec.broker_position_ticket;
-     if(pos_ticket_resolved == 0)
-       {
-        // Try to use position identifier from order/deal
-         if(matched_order > 0 && HistoryOrderSelect(matched_order))
-           {
-            long pos_id = HistoryOrderGetInteger(matched_order, ORDER_POSITION_ID);
-            if(pos_id > 0)
-              {
-               int total_pos = PositionsTotal();
-               ulong resolved_pt = 0;
-               int match_count = 0;
-               for(int pp = 0; pp < total_pos; pp++)
-                 {
-                  ulong pt2 = PositionGetTicket(pp);
-                  if(pt2 == 0) continue;
-                  if(!PositionSelectByTicket(pt2)) continue;
-                  string psym2 = PositionGetString(POSITION_SYMBOL);
-                  if(psym2 != rec.symbol) continue;
-                  long pm2 = PositionGetInteger(POSITION_MAGIC);
-                  if((ulong)pm2 != rec.magic) continue;
-                  long pid2 = PositionGetInteger(POSITION_IDENTIFIER);
-                  if((ulong)pid2 != (ulong)pos_id) continue;
-                  match_count++;
-                  resolved_pt = pt2;
-                  if(match_count > 1) { resolved_pt = 0; break; }
-                 }
-               if(match_count == 1 && resolved_pt != 0) pos_ticket_resolved = resolved_pt;
-              }
-           }
-         if(pos_ticket_resolved == 0 && matched_deal > 0 && HistoryDealSelect(matched_deal))
-           {
-            long pos_id = HistoryDealGetInteger(matched_deal, DEAL_POSITION_ID);
-            if(pos_id > 0)
-              {
-               int total_pos = PositionsTotal();
-               ulong resolved_pt = 0;
-               int match_count = 0;
-               for(int pp = 0; pp < total_pos; pp++)
-                 {
-                  ulong pt2 = PositionGetTicket(pp);
-                  if(pt2 == 0) continue;
-                  if(!PositionSelectByTicket(pt2)) continue;
-                  string psym2 = PositionGetString(POSITION_SYMBOL);
-                  if(psym2 != rec.symbol) continue;
-                  long pm2 = PositionGetInteger(POSITION_MAGIC);
-                  if((ulong)pm2 != rec.magic) continue;
-                  long pid2 = PositionGetInteger(POSITION_IDENTIFIER);
-                  if((ulong)pid2 != (ulong)pos_id) continue;
-                  match_count++;
-                  resolved_pt = pt2;
-                  if(match_count > 1) { resolved_pt = 0; break; }
-                 }
-               if(match_count == 1 && resolved_pt != 0) pos_ticket_resolved = resolved_pt;
-              }
-           }
-        // No fallback to ambiguous symbol+magic matching
-       }
+// Try to resolve position ticket if missing
+      ulong pos_ticket_resolved = rec.broker_position_ticket;
+      if(pos_ticket_resolved == 0)
+        {
+         // Try to use position identifier from order/deal
+          if(matched_order > 0 && HistoryOrderSelect(matched_order))
+            {
+             long pos_id = HistoryOrderGetInteger(matched_order, ORDER_POSITION_ID);
+             if(pos_id > 0)
+               {
+                int total_pos = PositionsTotal();
+                ulong resolved_pt = 0;
+                int match_count = 0;
+                for(int pp = 0; pp < total_pos; pp++)
+                  {
+                   ulong pt2 = PositionGetTicket(pp);
+                   if(pt2 == 0) continue;
+                   if(!PositionSelectByTicket(pt2)) continue;
+                   string psym2 = PositionGetString(POSITION_SYMBOL);
+                   if(psym2 != rec.symbol) continue;
+                   long pm2 = PositionGetInteger(POSITION_MAGIC);
+                   if((ulong)pm2 != correlation_magic) continue;
+                   long pid2 = PositionGetInteger(POSITION_IDENTIFIER);
+                   if((ulong)pid2 != (ulong)pos_id) continue;
+                   match_count++;
+                   resolved_pt = pt2;
+                   if(match_count > 1) { resolved_pt = 0; break; }
+                  }
+                if(match_count == 1 && resolved_pt != 0) pos_ticket_resolved = resolved_pt;
+               }
+            }
+          if(pos_ticket_resolved == 0 && matched_deal > 0 && HistoryDealSelect(matched_deal))
+            {
+             long pos_id = HistoryDealGetInteger(matched_deal, DEAL_POSITION_ID);
+             if(pos_id > 0)
+               {
+                int total_pos = PositionsTotal();
+                ulong resolved_pt = 0;
+                int match_count = 0;
+                for(int pp = 0; pp < total_pos; pp++)
+                  {
+                   ulong pt2 = PositionGetTicket(pp);
+                   if(pt2 == 0) continue;
+                   if(!PositionSelectByTicket(pt2)) continue;
+                   string psym2 = PositionGetString(POSITION_SYMBOL);
+                   if(psym2 != rec.symbol) continue;
+                   long pm2 = PositionGetInteger(POSITION_MAGIC);
+                   if((ulong)pm2 != correlation_magic) continue;
+                   long pid2 = PositionGetInteger(POSITION_IDENTIFIER);
+                   if((ulong)pid2 != (ulong)pos_id) continue;
+                   match_count++;
+                   resolved_pt = pt2;
+                   if(match_count > 1) { resolved_pt = 0; break; }
+                  }
+                if(match_count == 1 && resolved_pt != 0) pos_ticket_resolved = resolved_pt;
+               }
+            }
+         // No fallback to ambiguous symbol+magic matching
+        }
 
      // Found match
      if(!DatabaseTransactionBegin(m_db_handle))
@@ -2108,10 +2574,15 @@ bool CExecutionLedger::PrepareIntentRecord(ExecutionAttemptRecord &record) const
    record.executed_volume = 0.0;
    record.remaining_volume = record.requested_volume;
    record.schema_version = m_schema_version;
-   // F-002 foundation: unknown runtime reservation remains explicit; InsertIntentNoTx fails closed until verified.
-   if(record.risk_reserve_state == EXEC_RISK_RESERVE_STATE_UNKNOWN && !record.risk_reserve_known && record.risk_reserve_model_version == 0)
-      InitRiskReservationUnknown(record);
-   return true;
+// F-002 foundation: unknown runtime reservation remains explicit; InsertIntentNoTx fails closed until verified.
+    if(record.risk_reserve_state == EXEC_RISK_RESERVE_STATE_UNKNOWN && !record.risk_reserve_known && record.risk_reserve_model_version == 0)
+       InitRiskReservationUnknown(record);
+    // F-005.2: per-Attempt Magic must be pre-allocated by CreateIntentInTx before this call.
+    // CreateIntentInTx generates attempt_magic atomically inside the same transaction as Intent persistence.
+    // PrepareIntentRecord does NOT allocate; it only validates pre-set attempt_magic is non-zero.
+    if(record.attempt_magic == 0)
+       return false; // fail closed: per-Attempt Magic not allocated
+    return true;
   }
 
 bool CExecutionLedger::InsertIntentNoTx(const ExecutionAttemptRecord &record)
@@ -2124,42 +2595,49 @@ bool CExecutionLedger::InsertIntentNoTx(const ExecutionAttemptRecord &record)
    // Legacy/unverified/unknown reservation is fail-closed for new intent persistence (never 0-risk, never silent).
    if(!NormalizeRiskReservationForPersist(persist, perr))
       return false;
-   string sql = "INSERT INTO execution_attempts (attempt_id, setup_id, symbol, magic, intent, direction, "
-                "requested_volume, executed_volume, remaining_volume, entry_price, stop_loss, take_profit, "
-                "created_at, state, submission_allowed, schema_version, "
-                "risk_reserve_initial_amount, risk_reserve_remaining_amount, risk_reserve_currency, "
-                "risk_reserve_equity_snapshot, risk_reserve_percent_snapshot, risk_reserve_model_version, "
-                "risk_reserve_state, risk_reserve_revision, risk_reserve_updated_at, risk_reserve_release_reason) VALUES ('" +
-                EscapeSQL(persist.attempt_id) + "','" +
-                EscapeSQL(persist.setup_id) + "','" +
-                EscapeSQL(persist.symbol) + "'," +
-                IntegerToString((long)persist.magic) + "," +
-                IntegerToString((int)persist.intent) + "," +
-                IntegerToString((int)persist.direction) + "," +
-                DoubleToString(persist.requested_volume, 8) + "," +
-                DoubleToString(persist.executed_volume, 8) + "," +
-                DoubleToString(persist.remaining_volume, 8) + "," +
-                DoubleToString(persist.entry_price, 8) + "," +
-                DoubleToString(persist.stop_loss, 8) + "," +
-                DoubleToString(persist.take_profit, 8) + "," +
-                IntegerToString((long)persist.created_at) + "," +
-                IntegerToString((int)persist.state) + "," +
-                IntegerToString(0) + "," +
-                IntegerToString(persist.schema_version) + "," +
-                DoubleToString(persist.risk_reserve_initial_amount, 8) + "," +
-                DoubleToString(persist.risk_reserve_remaining_amount, 8) + ",'" +
-                EscapeSQL(persist.risk_reserve_currency) + "'," +
-                DoubleToString(persist.risk_reserve_equity_snapshot, 8) + "," +
-                DoubleToString(persist.risk_reserve_percent_snapshot, 8) + "," +
-                IntegerToString(persist.risk_reserve_model_version) + "," +
-                IntegerToString(persist.risk_reserve_state) + "," +
-                IntegerToString(persist.risk_reserve_revision) + "," +
-                IntegerToString((long)persist.risk_reserve_updated_at) + ",'" +
-                EscapeSQL(persist.risk_reserve_release_reason) + "');";
+   // F-005.2: attempt_magic must be pre-allocated (non-zero) for atomic persistence with Intent.
+   // Legacy rows (schema < 4) will have NULL/0 attempt_magic; new intents must have valid attempt_magic.
+   if(persist.attempt_magic == 0)
+      return false; // fail closed: per-Attempt Magic not allocated
+string sql = "INSERT INTO execution_attempts (attempt_id, setup_id, symbol, magic, attempt_magic, intent, direction, "
+                 "requested_volume, executed_volume, remaining_volume, entry_price, stop_loss, take_profit, "
+                 "created_at, state, submission_allowed, schema_version, account_key, "
+                 "risk_reserve_initial_amount, risk_reserve_remaining_amount, risk_reserve_currency, "
+                 "risk_reserve_equity_snapshot, risk_reserve_percent_snapshot, risk_reserve_model_version, "
+                 "risk_reserve_state, risk_reserve_revision, risk_reserve_updated_at, risk_reserve_release_reason) VALUES ('" +
+                 EscapeSQL(persist.attempt_id) + "','" +
+                 EscapeSQL(persist.setup_id) + "','" +
+                 EscapeSQL(persist.symbol) + "'," +
+                 IntegerToString((long)persist.magic) + "," +
+                 IntegerToString((long)persist.attempt_magic) + "," +
+                 IntegerToString((int)persist.intent) + "," +
+                 IntegerToString((int)persist.direction) + "," +
+                 DoubleToString(persist.requested_volume, 8) + "," +
+                 DoubleToString(persist.executed_volume, 8) + "," +
+                 DoubleToString(persist.remaining_volume, 8) + "," +
+                 DoubleToString(persist.entry_price, 8) + "," +
+                 DoubleToString(persist.stop_loss, 8) + "," +
+                 DoubleToString(persist.take_profit, 8) + "," +
+                 IntegerToString((long)persist.created_at) + "," +
+                 IntegerToString((int)persist.state) + "," +
+                 IntegerToString(0) + "," +
+                 IntegerToString(persist.schema_version) + ",'" +
+                 EscapeSQL(persist.account_key) + "'," +
+                 DoubleToString(persist.risk_reserve_initial_amount, 8) + "," +
+                 DoubleToString(persist.risk_reserve_remaining_amount, 8) + ",'" +
+                 EscapeSQL(persist.risk_reserve_currency) + "'," +
+                 DoubleToString(persist.risk_reserve_equity_snapshot, 8) + "," +
+                 DoubleToString(persist.risk_reserve_percent_snapshot, 8) + "," +
+                 IntegerToString(persist.risk_reserve_model_version) + "," +
+                 IntegerToString(persist.risk_reserve_state) + "," +
+                 IntegerToString(persist.risk_reserve_revision) + "," +
+                 IntegerToString((long)persist.risk_reserve_updated_at) + ",'" +
+                 EscapeSQL(persist.risk_reserve_release_reason) + "');";
    if(!ExecuteSQL(sql))
       return false;
    return LogStateTransitionInTx(persist.attempt_id, EXEC_STATE_NONE, EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED,
-                                 "Intent created; risk_reserve=" + DoubleToString(persist.risk_reserve_initial_amount, 2) + " " + persist.risk_reserve_currency);
+                                 "Intent created; risk_reserve=" + DoubleToString(persist.risk_reserve_initial_amount, 2) + " " + persist.risk_reserve_currency +
+                                 "; attempt_magic=" + IntegerToString((long)persist.attempt_magic));
   }
 
 bool CExecutionLedger::CreateIntentInTx(ExecutionAttemptRecord &record, string &err)
@@ -2169,6 +2647,14 @@ bool CExecutionLedger::CreateIntentInTx(ExecutionAttemptRecord &record, string &
      { err="LEDGER_UNAVAILABLE"; return false; }
    if(record.attempt_id == "")
       record.attempt_id = GenerateAttemptId();
+   // F-005.2: allocate per-Attempt Magic atomically with Intent (fail closed on collision/overflow).
+   if(record.attempt_magic == 0)
+     {
+      string magic_err = "";
+      record.attempt_magic = GenerateAttemptMagic(magic_err);
+      if(record.attempt_magic == 0)
+        { err = "ATTEMPT_MAGIC_ALLOC_FAILED: " + magic_err; return false; }
+     }
    if(!PrepareIntentRecord(record))
      { err="PREPARE_INTENT_FAILED"; return false; }
    if(!InsertIntentNoTx(record))
@@ -3526,8 +4012,164 @@ CExecutionLedger::ENUM_ATTEMPT_IDENTITY_RESOLUTION CExecutionLedger::GetSetupIde
       { detail = "ATTEMPT_NOT_PART_OF_RESOLVED_CLAIM_CHAIN claim=" + claim_id; return IDENTITY_CONFLICT; }
    }
 
-   detail = "RESOLVED claim=" + claim_id + " group=" + strategy_group_key + " lsk=" + logical_setup_key + " chain_retry_seq=" + IntegerToString(retry_sequence);
-   return IDENTITY_RESOLVED;
-  }
+detail = "RESOLVED claim=" + claim_id + " group=" + strategy_group_key + " lsk=" + logical_setup_key + " chain_retry_seq=" + IntegerToString(retry_sequence);
+    return IDENTITY_RESOLVED;
+   }
 
-#endif
+//+------------------------------------------------------------------+
+    //| F-005.2: Resolve Magic Ownership                                 |
+    //| Range membership is only a candidate filter; exact ownership     |
+    //| requires durable ledger lookup with account scope verification.  |
+    //| Returns AMBIGUOUS for DB/unavailable/unverified; EXTERNAL only   |
+    //| for proven non-EA ownership.                                     |
+    //+------------------------------------------------------------------+
+    CExecutionLedger::ENUM_MAGIC_OWNERSHIP CExecutionLedger::ResolveMagicOwnership(const ulong magic, const string account_key)
+      {
+       // 1. Check if it's a recognized legacy strategy Magic (always verifiable without DB)
+       if(magic==MAGIC_TREND ||
+          magic==MAGIC_BREAKOUT ||
+          magic==MAGIC_MOMENTUM ||
+          magic==MAGIC_MEAN_REVERSION ||
+          magic==MAGIC_RELATIVE_VALUE ||
+          magic==MAGIC_HYBRID_SCALP ||
+          magic==MAGIC_HYBRID_DAY ||
+          magic==MAGIC_HYBRID_SWING)
+         {
+          return MAGIC_OWNERSHIP_LEGACY_STRATEGY;
+         }
+
+       // 2. Check if it's in the attempt_magic namespace
+       if(!IsAttemptMagicRange(magic))
+         return MAGIC_OWNERSHIP_EXTERNAL; // proven out of range
+
+       // 3. For attempt_magic range: require durable ledger lookup
+       if(!m_db_available || m_db_handle == INVALID_HANDLE)
+         return MAGIC_OWNERSHIP_AMBIGUOUS; // unverified due to DB unavailable - not proven external
+
+       // 4. Look up exact attempt_magic mapping in durable ledger
+       // Verify: exact match, account scope, valid attempt state
+       string sql = "SELECT attempt_id, state, schema_version FROM execution_attempts "
+                    "WHERE attempt_magic = " + IntegerToString((long)magic) +
+                    " AND account_key = '" + EscapeSQL(account_key) + "';";
+       int handle = DatabasePrepare(m_db_handle, sql);
+       if(handle == INVALID_HANDLE)
+         return MAGIC_OWNERSHIP_AMBIGUOUS; // DB error - unverified, not proven external
+
+       int match_count = 0;
+       string found_attempt_id = "";
+       ENUM_EXEC_ATTEMPT_STATE found_state = EXEC_STATE_NONE;
+       int found_schema = 0;
+       if(DatabaseRead(handle))
+         {
+          match_count++;
+          found_attempt_id = DatabaseColumnString(handle, 0);
+          found_state = (ENUM_EXEC_ATTEMPT_STATE)DatabaseColumnLong2(handle, 1);
+          found_schema = (int)DatabaseColumnLong2(handle, 2);
+         }
+       DatabaseFinalize(handle);
+
+       if(match_count == 0)
+         return MAGIC_OWNERSHIP_EXTERNAL; // no mapping found - proven not ours
+
+       if(match_count > 1)
+         return MAGIC_OWNERSHIP_AMBIGUOUS; // duplicate mappings - ambiguous
+
+       // 5. Verify attempt is valid and not legacy/unverified fabrications
+       if(found_schema < 4 || found_state == EXEC_STATE_NONE)
+         return MAGIC_OWNERSHIP_AMBIGUOUS; // legacy/unverified schema or invalid state
+
+       return MAGIC_OWNERSHIP_EXACT_ATTEMPT;
+      }
+
+   //+------------------------------------------------------------------+
+   //| F-005.2: Check if Magic is in reserved attempt_magic namespace   |
+   //+------------------------------------------------------------------+
+   bool CExecutionLedger::IsAttemptMagicRange(const ulong magic) const
+     {
+      return (magic >= MAGIC_ATTEMPT_BASE && magic <= MAGIC_ATTEMPT_MAX);
+     }
+
+//+------------------------------------------------------------------+
+    //| F-005.2: Diagnostic reason for ownership classification        |
+    //+------------------------------------------------------------------+
+    string CExecutionLedger::GetOwnershipReason(const ulong magic, const string account_key)
+      {
+       // Legacy strategy Magic - always verifiable
+       if(magic==MAGIC_TREND ||
+          magic==MAGIC_BREAKOUT ||
+          magic==MAGIC_MOMENTUM ||
+          magic==MAGIC_MEAN_REVERSION ||
+          magic==MAGIC_RELATIVE_VALUE ||
+          magic==MAGIC_HYBRID_SCALP ||
+          magic==MAGIC_HYBRID_DAY ||
+          magic==MAGIC_HYBRID_SWING)
+         {
+          return "LEGACY_STRATEGY_MAGIC";
+         }
+
+       // Out of attempt_magic range - proven external
+       if(!IsAttemptMagicRange(magic))
+         return "OUT_OF_ATTEMPT_MAGIC_RANGE";
+
+       // In attempt_magic range but ledger unavailable
+       if(!m_db_available || m_db_handle == INVALID_HANDLE)
+         return "LEDGER_UNAVAILABLE";
+
+       // Look up in ledger
+       string sql = "SELECT attempt_id, state, schema_version FROM execution_attempts "
+                    "WHERE attempt_magic = " + IntegerToString((long)magic) +
+                    " AND account_key = '" + EscapeSQL(account_key) + "';";
+       int handle = DatabasePrepare(m_db_handle, sql);
+       if(handle == INVALID_HANDLE)
+         return "DB_PREPARE_FAILED";
+
+       int match_count = 0;
+       string found_attempt_id = "";
+       ENUM_EXEC_ATTEMPT_STATE found_state = EXEC_STATE_NONE;
+       int found_schema = 0;
+       if(DatabaseRead(handle))
+         {
+          match_count++;
+          found_attempt_id = DatabaseColumnString(handle, 0);
+          found_state = (ENUM_EXEC_ATTEMPT_STATE)DatabaseColumnLong2(handle, 1);
+          found_schema = (int)DatabaseColumnLong2(handle, 2);
+         }
+       DatabaseFinalize(handle);
+
+       if(match_count == 0)
+         return "NO_MAPPING_FOUND";
+
+       if(match_count > 1)
+         return "DUPLICATE_MAPPINGS";
+
+       if(found_schema < 4 || found_state == EXEC_STATE_NONE)
+         return "LEGACY_OR_INVALID_ATTEMPT";
+
+return "EXACT_ATTEMPT_MATCH";
+       }
+
+    //+------------------------------------------------------------------+
+    //| F-005.2: Validate exact attempt_magic binding                    |
+    //| Verifies attempt_id + attempt_magic + account_key match exactly  |
+    //+------------------------------------------------------------------+
+    bool CExecutionLedger::ValidateAttemptMagicBinding(const string attempt_id, const ulong attempt_magic, const string account_key)
+      {
+       if(!m_db_available || m_db_handle == INVALID_HANDLE)
+         return false;
+       if(attempt_id == "" || attempt_magic == 0)
+         return false;
+
+       string sql = "SELECT attempt_id FROM execution_attempts "
+                    "WHERE attempt_id = '" + EscapeSQL(attempt_id) + "' "
+                    "AND attempt_magic = " + IntegerToString((long)attempt_magic) + " "
+                    "AND account_key = '" + EscapeSQL(account_key) + "';";
+       int handle = DatabasePrepare(m_db_handle, sql);
+       if(handle == INVALID_HANDLE)
+         return false;
+
+       bool found = DatabaseRead(handle);
+       DatabaseFinalize(handle);
+       return found;
+      }
+
+   #endif

@@ -7,6 +7,15 @@
 #include "ExecutionLedger.mqh"
 
 //+------------------------------------------------------------------+
+//| Minimal CTrade wrapper exposing configured Magic getter          |
+//+------------------------------------------------------------------+
+class CTradeExt : public CTrade
+  {
+public:
+   ulong GetConfiguredMagic(void) const { return m_magic; }
+  };
+
+//+------------------------------------------------------------------+
 //| Trade Executor                                                   |
 //|                                                                  |
 //| The ONLY module in V1 allowed to execute trading operations.     |
@@ -15,7 +24,7 @@ class CTradeExecutor : public ITradeExecutor
   {
 private:
 
-   CTrade m_trade;
+   CTradeExt m_trade;
 
    ulong m_deviation_points;
 
@@ -279,10 +288,20 @@ private:
 
       if(request.intent==ORDER_INTENT_OPEN_LONG)
          order_type=ORDER_TYPE_BUY;
-      else if(request.intent==ORDER_INTENT_OPEN_SHORT)
-         order_type=ORDER_TYPE_SELL;
-      else
-         return RejectOpenValidation(reason,"Unsupported order intent");
+else if(request.intent==ORDER_INTENT_OPEN_SHORT)
+          order_type=ORDER_TYPE_SELL;
+       else
+          return RejectOpenValidation(reason,"Unsupported order intent");
+
+       // F-005.2.2: Require valid attempt_magic for new supported Entry operations.
+       // Legacy fallback to strategy Magic is not permitted for new submissions.
+       if(request.intent==ORDER_INTENT_OPEN_LONG || request.intent==ORDER_INTENT_OPEN_SHORT)
+         {
+          if(request.attempt_magic == 0)
+            return RejectOpenValidation(reason,"Missing durable attempt_magic (F-005.2.2: new Entry requires per-Attempt broker token)");
+          if(request.attempt_magic < 28000000 || request.attempt_magic > 28999999)
+            return RejectOpenValidation(reason,"attempt_magic out of reserved range [28000000..28999999]");
+         }
 
       if(!IsOpenDirectionAllowed(
             request.symbol,
@@ -796,47 +815,74 @@ public:
          else
             order_type=ORDER_TYPE_SELL;
 
-         m_trade.SetExpertMagicNumber(
-            (ulong)request.magic);
+// F-005.2.2: Use attempt_magic directly for new supported Entries.
+        // ValidateOpen already ensures attempt_magic is valid and in range.
+        m_trade.SetExpertMagicNumber(request.attempt_magic);
 
-         m_trade.SetDeviationInPoints(
-            m_deviation_points);
+        // F-005.2.4: Pre-flight verify configured Magic matches intent before broker submission
+        ulong configured_magic = m_trade.GetConfiguredMagic();
+        if(configured_magic != request.attempt_magic)
+          {
+           result.message = "Magic mismatch pre-flight: expected " + IntegerToString((long)request.attempt_magic) +
+                            " got " + IntegerToString((long)configured_magic);
+           // Preserve reconciliation safeguards on pre-flight mismatch
+           result.success = false;
+           result.reconciliation_required = true;
+           result.failure_class = "MAGIC_MISMATCH";
+           return false;
+          }
 
-         m_trade.SetTypeFillingBySymbol(
-            request.symbol);
+        m_trade.SetDeviationInPoints(
+           m_deviation_points);
 
-         MqlTick tick;
+        m_trade.SetTypeFillingBySymbol(
+           request.symbol);
 
-         if(!SymbolInfoTick(
-               request.symbol,
-               tick))
-           {
-            result.message=
-               "SymbolInfoTick failed";
+        MqlTick tick;
 
-            return false;
-           }
+        if(!SymbolInfoTick(
+              request.symbol,
+              tick))
+          {
+           result.message=
+              "SymbolInfoTick failed";
 
-         double price;
+           return false;
+          }
 
-         if(order_type==ORDER_TYPE_BUY)
-            price=tick.ask;
-         else
-            price=tick.bid;
+        double price;
 
-         ResetLastError();
+        if(order_type==ORDER_TYPE_BUY)
+           price=tick.ask;
+        else
+           price=tick.bid;
 
-         bool request_result=
-            m_trade.PositionOpen(
-               request.symbol,
-               order_type,
-               request.volume,
-               price,
-               request.stop_loss,
-               request.take_profit,
-               request.comment);
+        ResetLastError();
 
-         FillExecutionResult(result, request.volume);
+        bool request_result=
+           m_trade.PositionOpen(
+              request.symbol,
+              order_type,
+              request.volume,
+              price,
+              request.stop_loss,
+              request.take_profit,
+              request.comment);
+
+        FillExecutionResult(result, request.volume);
+
+        // F-005.2.4: Post-operation verify actual request Magic matches intent
+        ulong actual_magic = m_trade.RequestMagic();
+        if(actual_magic != request.attempt_magic)
+          {
+           result.message = "Magic mismatch post-operation: expected " + IntegerToString((long)request.attempt_magic) +
+                            " got " + IntegerToString((long)actual_magic);
+           // Do not classify as definitive failure; preserve reconciliation safeguards
+           result.success = false;
+           result.reconciliation_required = true;
+           result.failure_class = "MAGIC_MISMATCH";
+           return false;
+          }
 
          if(!request_result &&
             result.retcode==0)
@@ -847,13 +893,16 @@ public:
             return false;
            }
 
-         // Try to resolve position ticket for durable correlation if not present
-         if(result.position_ticket == 0 && result.success)
-           {
-            // Prefer strong correlation via order/deal if possible
-            if(result.order_ticket > 0 || result.deal_ticket > 0)
-              {
-               // Try to get position identifier from history
+          // Try to resolve position ticket for durable correlation if not present
+          if(result.position_ticket == 0 && result.success)
+            {
+             ulong correlation_magic = (request.intent==ORDER_INTENT_OPEN_LONG || request.intent==ORDER_INTENT_OPEN_SHORT)
+                                       ? request.attempt_magic : request.magic;
+
+             // Prefer strong correlation via order/deal if possible
+             if(result.order_ticket > 0 || result.deal_ticket > 0)
+               {
+                // Try to get position identifier from history
                 if(result.deal_ticket > 0 && HistoryDealSelect(result.deal_ticket))
                   {
                    long pos_id = HistoryDealGetInteger(result.deal_ticket, DEAL_POSITION_ID);
@@ -869,8 +918,8 @@ public:
                          if(!PositionSelectByTicket(pt)) continue;
                          string psym = PositionGetString(POSITION_SYMBOL);
                          if(psym != request.symbol) continue;
-                         long pmagic = PositionGetInteger(POSITION_MAGIC);
-                         if((ulong)pmagic != request.magic) continue;
+long pmagic = PositionGetInteger(POSITION_MAGIC);
+                          if((ulong)pmagic != correlation_magic) continue;
                          long pident = PositionGetInteger(POSITION_IDENTIFIER);
                          if((ulong)pident != (ulong)pos_id) continue;
                          match_count++;
@@ -896,8 +945,8 @@ public:
                          if(!PositionSelectByTicket(pt)) continue;
                          string psym = PositionGetString(POSITION_SYMBOL);
                          if(psym != request.symbol) continue;
-                         long pmagic = PositionGetInteger(POSITION_MAGIC);
-                         if((ulong)pmagic != request.magic) continue;
+long pmagic = PositionGetInteger(POSITION_MAGIC);
+                          if((ulong)pmagic != correlation_magic) continue;
                          long pident = PositionGetInteger(POSITION_IDENTIFIER);
                          if((ulong)pident != (ulong)pos_id) continue;
                          match_count++;
@@ -910,39 +959,81 @@ public:
                   }
               }
 
-           }
+}
 
-        return result.success;
-        }
+           // F-005.2.4: Successful execution with unresolved position correlation → reconciliation-eligible
+           if(result.success && result.position_ticket == 0)
+             {
+              result.reconciliation_required = true;
+              result.failure_class = "CORRELATION_UNRESOLVED";
+             }
 
-      //--- close
+         return result.success;
+         }
+
+//--- close
       if(request.intent==ORDER_INTENT_CLOSE)
         {
          ResetLastError();
 
-       bool request_result=
-          m_trade.PositionClose(
-             request.position_ticket,
-             m_deviation_points);
+         // F-005.2.4: Explicitly set Magic from position's actual Magic before Close
+         if(!PositionSelectByTicket(request.position_ticket))
+           {
+            result.message = "PositionSelectByTicket failed for Close";
+            return false;
+           }
+         long position_magic = PositionGetInteger(POSITION_MAGIC);
+         m_trade.SetExpertMagicNumber((ulong)position_magic);
 
-       FillExecutionResult(result, 0.0);
+         // F-005.2.4: Pre-flight verify configured Magic matches position
+         ulong configured_magic = m_trade.GetConfiguredMagic();
+         if(configured_magic != (ulong)position_magic)
+           {
+            result.message = "Magic mismatch pre-flight Close: expected " + IntegerToString(position_magic) +
+                             " got " + IntegerToString((long)configured_magic);
+            // Preserve reconciliation safeguards on pre-flight mismatch
+            result.success = false;
+            result.reconciliation_required = true;
+            result.failure_class = "MAGIC_MISMATCH";
+            return false;
+           }
 
-       if(!request_result &&
-          result.retcode==0)
-         {
-          result.message=
-             "PositionClose failed before server execution";
+         bool request_result=
+            m_trade.PositionClose(
+               request.position_ticket,
+               m_deviation_points);
 
-          return false;
-         }
+         FillExecutionResult(result, 0.0);
 
-       result.position_ticket=
-          request.position_ticket;
+         // F-005.2.4: Post-operation verify actual request Magic matches position
+         ulong actual_magic = m_trade.RequestMagic();
+         if(actual_magic != (ulong)position_magic)
+           {
+            result.message = "Magic mismatch post-operation Close: expected " + IntegerToString(position_magic) +
+                             " got " + IntegerToString((long)actual_magic);
+            // Do not classify as definitive failure; preserve reconciliation safeguards
+            result.success = false;
+            result.reconciliation_required = true;
+            result.failure_class = "MAGIC_MISMATCH";
+            return false;
+           }
 
-       return result.success;
+         if(!request_result &&
+            result.retcode==0)
+           {
+            result.message=
+               "PositionClose failed before server execution";
+
+            return false;
+           }
+
+         result.position_ticket=
+            request.position_ticket;
+
+         return result.success;
         }
 
-      //--- modify
+//--- modify
       if(request.intent==ORDER_INTENT_MODIFY_SL ||
          request.intent==ORDER_INTENT_MODIFY_TP)
         {
@@ -972,29 +1063,59 @@ public:
          if(request.intent==ORDER_INTENT_MODIFY_TP)
             tp=request.take_profit;
 
+         // F-005.2.4: Explicitly set Magic from position's actual Magic before Modify
+         long position_magic = PositionGetInteger(POSITION_MAGIC);
+         m_trade.SetExpertMagicNumber((ulong)position_magic);
+
+         // F-005.2.4: Pre-flight verify configured Magic matches position
+         ulong configured_magic = m_trade.GetConfiguredMagic();
+         if(configured_magic != (ulong)position_magic)
+           {
+            result.message = "Magic mismatch pre-flight Modify: expected " + IntegerToString(position_magic) +
+                             " got " + IntegerToString((long)configured_magic);
+            // Preserve reconciliation safeguards on pre-flight mismatch
+            result.success = false;
+            result.reconciliation_required = true;
+            result.failure_class = "MAGIC_MISMATCH";
+            return false;
+           }
+
          ResetLastError();
 
-       bool request_result=
-          m_trade.PositionModify(
-             request.position_ticket,
-             sl,
-             tp);
+        bool request_result=
+           m_trade.PositionModify(
+              request.position_ticket,
+              sl,
+              tp);
 
-       FillExecutionResult(result, 0.0);
+        FillExecutionResult(result, 0.0);
 
-       result.position_ticket=
-          request.position_ticket;
+        // F-005.2.4: Post-operation verify actual request Magic matches position
+        ulong actual_magic = m_trade.RequestMagic();
+        if(actual_magic != (ulong)position_magic)
+          {
+           result.message = "Magic mismatch post-operation Modify: expected " + IntegerToString(position_magic) +
+                            " got " + IntegerToString((long)actual_magic);
+           // Do not classify as definitive failure; preserve reconciliation safeguards
+           result.success = false;
+           result.reconciliation_required = true;
+           result.failure_class = "MAGIC_MISMATCH";
+           return false;
+          }
 
-       if(!request_result &&
-          result.retcode==0)
-         {
-          result.message=
-             "PositionModify failed before server execution";
+        result.position_ticket=
+           request.position_ticket;
 
-          return false;
-         }
+        if(!request_result &&
+           result.retcode==0)
+          {
+           result.message=
+              "PositionModify failed before server execution";
 
-       return result.success;
+           return false;
+          }
+
+        return result.success;
         }
 
       result.message=

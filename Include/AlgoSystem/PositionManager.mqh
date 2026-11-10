@@ -3,6 +3,7 @@
 
 #include "Interfaces.mqh"
 #include "TradeExecutor.mqh"
+#include "ExecutionLedger.mqh"
 
 //+------------------------------------------------------------------+
 //| Position Manager                                                 |
@@ -23,9 +24,11 @@ class CPositionManager : public IPositionManager
   {
 private:
 
-   ITradeExecutor *m_executor;
+    ITradeExecutor *m_executor;
+    CExecutionLedger *m_execution_ledger;
+    string          m_account_key;
 
-   bool   m_initialized;
+    bool   m_initialized;
 
    bool   m_use_break_even;
    bool   m_use_trailing;
@@ -45,19 +48,29 @@ private:
    //+----------------------------------------------------------------+
    //| Check whether magic belongs to this EA                        |
    //+----------------------------------------------------------------+
-   bool IsManagedMagic(const long magic) const
+bool IsManagedMagic(const long magic) const
+  {
+   // Strategy/style Magic (legacy ownership)
+   if(magic==MAGIC_TREND ||
+      magic==MAGIC_BREAKOUT ||
+      magic==MAGIC_MOMENTUM ||
+      magic==MAGIC_MEAN_REVERSION ||
+      magic==MAGIC_RELATIVE_VALUE ||
+      magic==MAGIC_HYBRID_SCALP ||
+      magic==MAGIC_HYBRID_DAY ||
+      magic==MAGIC_HYBRID_SWING)
+      return true;
+   // F-005.2.2: Per-Attempt Magic range requires durable ledger lookup.
+   // Range membership alone is not ownership proof.
+   if(m_execution_ledger != NULL && m_account_key != "")
      {
-      return
-          magic==MAGIC_TREND ||
-          magic==MAGIC_BREAKOUT ||
-          magic==MAGIC_MOMENTUM ||
-          magic==MAGIC_MEAN_REVERSION ||
-          magic==MAGIC_RELATIVE_VALUE ||
-          magic==MAGIC_HYBRID_SCALP ||
-          magic==MAGIC_HYBRID_DAY ||
-          magic==MAGIC_HYBRID_SWING;
-
+      CExecutionLedger::ENUM_MAGIC_OWNERSHIP ownership = m_execution_ledger.ResolveMagicOwnership((ulong)magic, m_account_key);
+      return (ownership == CExecutionLedger::MAGIC_OWNERSHIP_EXACT_ATTEMPT ||
+              ownership == CExecutionLedger::MAGIC_OWNERSHIP_LEGACY_STRATEGY);
      }
+   // Fallback: if ledger unavailable, reject attempt_magic range (fail closed)
+   return false;
+  }
    
    bool NormalizeSLToTick(
    const string symbol,
@@ -587,13 +600,22 @@ public:
       m_emergency_close=false;
      }
 
-   //+----------------------------------------------------------------+
-   //| Attach executor                                                |
-   //+----------------------------------------------------------------+
-   void SetExecutor(ITradeExecutor *executor)
-     {
-      m_executor=executor;
-     }
+//+----------------------------------------------------------------+
+    //| Attach executor                                                |
+    //+----------------------------------------------------------------+
+    void SetExecutor(ITradeExecutor *executor)
+      {
+       m_executor=executor;
+      }
+
+    //+----------------------------------------------------------------+
+    //| Attach execution ledger for ownership resolution               |
+    //+----------------------------------------------------------------+
+    void SetExecutionLedger(CExecutionLedger *ledger, const string account_key)
+      {
+       m_execution_ledger=ledger;
+       m_account_key=account_key;
+      }
 
    //+----------------------------------------------------------------+
    //| Configure break-even                                           |

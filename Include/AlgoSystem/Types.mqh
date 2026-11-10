@@ -159,6 +159,10 @@ struct ExecutionRequest
 
    ulong magic;
 
+   // F-005.2: durable broker-visible per-Attempt Magic token (non-overlapping with strategy/style Magic).
+   // Allocated atomically with Intent/reservation; never reused; NULL/0 in legacy rows.
+   ulong attempt_magic;
+
    string comment;
 
    string signal_id;

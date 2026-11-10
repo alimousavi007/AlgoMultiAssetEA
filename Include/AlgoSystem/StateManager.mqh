@@ -2,6 +2,7 @@
 #define __ALGOSYSTEM_STATEMANAGER_MQH__
 
 #include "Interfaces.mqh"
+#include "ExecutionLedger.mqh"
 
 class CAlgoStateManager : public IStateManager
   {
@@ -10,33 +11,55 @@ private:
    datetime       m_last_reconstruct;
    bool           m_state_valid;
 
-   void Reset()
-     {
-      m_state.equity=0.0;
-      m_state.balance=0.0;
-      m_state.daily_start_equity=0.0;
-      m_state.monthly_start_equity=0.0;
-      m_state.daily_loss_percent=0.0;
-      m_state.monthly_loss_percent=0.0;
-      m_state.total_open_risk_percent=0.0;
-      m_state.total_positions=0;
-      m_state.consecutive_losses=0;
-      m_state.daily_lock=false;
-      m_state.monthly_lock=false;
-      m_state.trading_locked=false;
-      m_state_valid=false;
-     }
+   CExecutionLedger *m_execution_ledger;
+   string          m_account_key;
+
+   // F-005.2.4: Track unknown/ambiguous ownership for diagnostic purposes
+   int            m_unknown_positions;
+   int            m_ambiguous_positions;
+
+void Reset()
+      {
+       m_state.equity=0.0;
+       m_state.balance=0.0;
+       m_state.daily_start_equity=0.0;
+       m_state.monthly_start_equity=0.0;
+       m_state.daily_loss_percent=0.0;
+       m_state.monthly_loss_percent=0.0;
+       m_state.total_open_risk_percent=0.0;
+       m_state.total_positions=0;
+       m_state.consecutive_losses=0;
+       m_state.daily_lock=false;
+       m_state.monthly_lock=false;
+       m_state.trading_locked=false;
+       m_state_valid=false;
+       m_unknown_positions=0;
+       m_ambiguous_positions=0;
+      }
       bool IsManagedMagic(const long magic) const
         {
-         return
-            magic==MAGIC_TREND ||
+         // Strategy/style Magic (legacy ownership)
+         if(magic==MAGIC_TREND ||
             magic==MAGIC_BREAKOUT ||
             magic==MAGIC_MOMENTUM ||
             magic==MAGIC_MEAN_REVERSION ||
             magic==MAGIC_RELATIVE_VALUE ||
             magic==MAGIC_HYBRID_SCALP ||
             magic==MAGIC_HYBRID_DAY ||
-            magic==MAGIC_HYBRID_SWING;
+            magic==MAGIC_HYBRID_SWING)
+            return true;
+         // F-005.2.2: Per-Attempt Magic range requires durable ledger lookup.
+         // Range membership alone is not ownership proof.
+         if(m_execution_ledger != NULL && m_account_key != "")
+           {
+            CExecutionLedger::ENUM_MAGIC_OWNERSHIP ownership = m_execution_ledger.ResolveMagicOwnership((ulong)magic, m_account_key);
+            // For state reconstruction: EXACT_ATTEMPT and LEGACY_STRATEGY are managed.
+            // AMBIGUOUS and EXTERNAL are not managed (fail closed).
+            return (ownership == CExecutionLedger::MAGIC_OWNERSHIP_EXACT_ATTEMPT ||
+                    ownership == CExecutionLedger::MAGIC_OWNERSHIP_LEGACY_STRATEGY);
+           }
+         // Fallback: if ledger unavailable, reject attempt_magic range (fail closed)
+         return false;
         }
    datetime DayStart(const datetime t) const
      {
@@ -168,7 +191,16 @@ private:
      }
 
 public:
-   CAlgoStateManager()
+   //+------------------------------------------------------------------+
+   //| Attach execution ledger for ownership resolution                 |
+   //+------------------------------------------------------------------+
+   void SetExecutionLedger(CExecutionLedger *ledger, const string account_key)
+     {
+      m_execution_ledger=ledger;
+m_account_key=account_key;
+      }
+
+    CAlgoStateManager()
      {
       Reset();
       m_last_reconstruct=0;
@@ -235,22 +267,25 @@ public:
 
    bool RefreshCurrentMetrics()
      {
-      m_state.equity=AccountInfoDouble(ACCOUNT_EQUITY);
-      m_state.balance=AccountInfoDouble(ACCOUNT_BALANCE);
+m_state.equity=AccountInfoDouble(ACCOUNT_EQUITY);
+       m_state.balance=AccountInfoDouble(ACCOUNT_BALANCE);
 
-      if(!MathIsValidNumber(m_state.equity) ||
-         !MathIsValidNumber(m_state.balance) ||
-         m_state.equity<=0.0 ||
-         m_state.balance<=0.0 ||
-         m_state.daily_start_equity<=0.0 ||
-         m_state.monthly_start_equity<=0.0)
-        {
-         m_state_valid=false;
-         m_state.trading_locked=true;
-         return false;
-        }
+       if(!MathIsValidNumber(m_state.equity) ||
+          !MathIsValidNumber(m_state.balance) ||
+          m_state.equity<=0.0 ||
+          m_state.balance<=0.0 ||
+          m_state.daily_start_equity<=0.0 ||
+          m_state.monthly_start_equity<=0.0)
+         {
+          m_state_valid=false;
+          m_state.trading_locked=true;
+          return false;
+         }
 
-      m_state.total_positions=ManagedPositions();
+       int unk=0, amb=0;
+       m_state.total_positions=CountPositions(unk, amb);
+       m_unknown_positions=unk;
+       m_ambiguous_positions=amb;
 
       m_state.daily_loss_percent=
          MathMax(0.0,
@@ -316,34 +351,75 @@ public:
       return Reconstruct();
      }
 
-   datetime LastReconstruct() const
-     {
-      return m_last_reconstruct;
-     }
-     int ManagedPositions() const
-  {
-   int count=0;
+datetime LastReconstruct() const
+      {
+       return m_last_reconstruct;
+      }
+      // F-005.2.4: Count managed positions and track unknown/ambiguous for diagnostics
+      int CountPositions(int &out_unknown, int &out_ambiguous) const
+        {
+         out_unknown = 0;
+         out_ambiguous = 0;
+         int managed = 0;
 
-   for(int i=0;
-       i<PositionsTotal();
-       i++)
-     {
-      ulong ticket=
-         PositionGetTicket(i);
+         for(int i=0; i<PositionsTotal(); i++)
+           {
+            ulong ticket = PositionGetTicket(i);
+            if(ticket==0) continue;
 
-      if(ticket==0)
-         continue;
+            long magic = PositionGetInteger(POSITION_MAGIC);
 
-      long magic=
-         PositionGetInteger(
-            POSITION_MAGIC);
+            if(m_execution_ledger != NULL && m_account_key != "" && magic >= MAGIC_ATTEMPT_BASE && magic <= MAGIC_ATTEMPT_MAX)
+              {
+               // For attempt_magic range, check resolver for exact classification
+               CExecutionLedger::ENUM_MAGIC_OWNERSHIP ownership = m_execution_ledger.ResolveMagicOwnership((ulong)magic, m_account_key);
+               if(ownership == CExecutionLedger::MAGIC_OWNERSHIP_EXACT_ATTEMPT)
+                 managed++;
+               else if(ownership == CExecutionLedger::MAGIC_OWNERSHIP_AMBIGUOUS)
+                 out_ambiguous++;
+               else
+                 out_unknown++; // EXTERNAL or LEDGER_ERROR for attempt_magic
+              }
+            else if(magic==MAGIC_TREND ||
+                    magic==MAGIC_BREAKOUT ||
+                    magic==MAGIC_MOMENTUM ||
+                    magic==MAGIC_MEAN_REVERSION ||
+                    magic==MAGIC_RELATIVE_VALUE ||
+                    magic==MAGIC_HYBRID_SCALP ||
+                    magic==MAGIC_HYBRID_DAY ||
+                    magic==MAGIC_HYBRID_SWING)
+              {
+               managed++; // Legacy strategy Magic
+              }
+            else
+              {
+               out_unknown++; // External/unknown
+              }
+           }
 
-      if(IsManagedMagic(magic))
-         count++;
-     }
+         return managed;
+        }
 
-   return count;
-  }
+      int ManagedPositions() const
+        {
+         int unk=0, amb=0;
+         return CountPositions(unk, amb);
+        }
+
+      // Diagnostic accessors
+      int UnknownPositions() const
+        {
+         int unk=0, amb=0;
+         CountPositions(unk, amb);
+         return unk;
+        }
+
+      int AmbiguousPositions() const
+        {
+         int unk=0, amb=0;
+         CountPositions(unk, amb);
+         return amb;
+        }
   };
 
 #endif

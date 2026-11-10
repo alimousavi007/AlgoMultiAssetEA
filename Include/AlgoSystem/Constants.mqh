@@ -123,6 +123,12 @@ enum ENUM_REJECTION_REASON
 #define MAGIC_HYBRID_DAY 27100000
 #define MAGIC_HYBRID_SWING 27200000
 
+// F-005.2: Per-attempt Magic namespace (non-overlapping with strategy/style Magic).
+// Range: 28000000..28999999 reserved for durable broker-visible attempt_magic tokens.
+// Allocated sequentially per attempt; never reused; collision/overflow fails closed.
+#define MAGIC_ATTEMPT_BASE 28000000
+#define MAGIC_ATTEMPT_MAX  28999999
+
 #define DEFAULT_SIGNAL_SCORE_THRESHOLD 70.0
 #define DEFAULT_MIN_RR 1.50
 #define DEFAULT_RISK_PERCENT 1.00
