@@ -333,14 +333,16 @@ function Test-FreshEx5Artifact {
                          $null -ne $AfterWriteTimeUtc -and
                          $AfterWriteTimeUtc -gt $BeforeWriteTimeUtc)
 
-    $isFresh = ($Length -gt 0 -and $timestampAfterCompile -and
-                (($null -eq $BeforeHash) -or $hashChanged -or $timestampUpdated))
+    $hasPriorArtifact = ($null -ne $BeforeWriteTimeUtc)
+    $artifactChanged = (-not $hasPriorArtifact -or $hashChanged -or $timestampUpdated)
+    $isFresh = ($Length -gt 0 -and $timestampAfterCompile -and $artifactChanged)
 
     return [pscustomobject]@{
         IsFresh = [bool]$isFresh
         HashChanged = [bool]$hashChanged
         TimestampUpdated = [bool]$timestampUpdated
         TimestampAfterCompile = [bool]$timestampAfterCompile
+        ArtifactChanged = [bool]$artifactChanged
     }
 }
 
