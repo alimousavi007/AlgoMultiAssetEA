@@ -974,7 +974,10 @@ Run-TestSuite 'Integration: Full Harness Run' {
         Set-Content -LiteralPath (Join-Path $terminalTrade 'HistoryOrderInfo.mqh') -Value $headerContent -Encoding UTF8
 
         # Environment resolution reads file metadata only when -SkipCompile is set.
-        Set-Content -LiteralPath (Join-Path $terminalRoot 'metaeditor64.exe') -Value 'fixture-only' -Encoding ASCII
+        # These inert sentinels satisfy path checks only; none is launched or treated as a real MT5 binary.
+        foreach ($binaryName in @('metaeditor64.exe','terminal64.exe','metatester64.exe')) {
+            Set-Content -LiteralPath (Join-Path $terminalRoot $binaryName) -Value 'fixture-only; never execute' -Encoding ASCII
+        }
 
         return [pscustomobject]@{
             Root = $fixtureRoot
