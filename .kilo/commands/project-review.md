@@ -8,7 +8,7 @@ description: Read-only, scope-limited review of code, configuration, architectur
 - Establish the exact target: diff, files, workflow, configuration, document, or behavior.
 - Inspect current branch/HEAD/status and the complete relevant diff when repository changes are under review.
 - Separate pre-existing user changes from the reviewed change.
-- Read `AGENTS.md` and only applicable rules/Skills.
+- Read `AGENTS.MD` and only applicable rules/Skills.
 
 ## 2. Review method
 - Review correctness against the stated requirement and observable behavior.

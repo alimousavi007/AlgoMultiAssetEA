@@ -34,6 +34,10 @@ param(
     [string]$ArchiveDirectoryRelativePath = 'tools\compile-logs',
 
     [Parameter()]
+    [ValidateRange(1, 3600)]
+    [int]$CompileTimeoutSeconds = 120,
+
+    [Parameter()]
     [switch]$SyntaxCheckOnly
 )
 
@@ -69,36 +73,46 @@ function Get-CompileSummary {
     $warnings = $null
     $summaryFound = $false
 
-    # Current MetaEditor logs commonly include: "Result: N errors, M warnings, ...".
-    $resultMatch = [regex]::Match($text, '(?im)\b(\d+)\s+errors?\s*,\s*(\d+)\s+warnings?\b')
+    $resultMatch = [regex]::Match($text, '(?im)\bResult\s*:\s*(\d+)\s+errors?\s*,\s*(\d+)\s+warnings?\b')
     if ($resultMatch.Success) {
         $errors = [int]$resultMatch.Groups[1].Value
         $warnings = [int]$resultMatch.Groups[2].Value
         $summaryFound = $true
     }
     else {
-        $errorMatch = [regex]::Match($text, '(?im)^\s*Errors?\s*:\s*(\d+)\s*$')
-        $warningMatch = [regex]::Match($text, '(?im)^\s*Warnings?\s*:\s*(\d+)\s*$')
-        if ($errorMatch.Success -and $warningMatch.Success) {
-            $errors = [int]$errorMatch.Groups[1].Value
-            $warnings = [int]$warningMatch.Groups[1].Value
+        $combinedMatch = [regex]::Match($text, '(?im)^\s*Errors?\s*:\s*(\d+)\s*,\s*Warnings?\s*:\s*(\d+)\s*$')
+        if ($combinedMatch.Success) {
+            $errors = [int]$combinedMatch.Groups[1].Value
+            $warnings = [int]$combinedMatch.Groups[2].Value
             $summaryFound = $true
+        }
+        else {
+            $errorMatch = [regex]::Match($text, '(?im)^\s*Errors?\s*:\s*(\d+)\s*$')
+            $warningMatch = [regex]::Match($text, '(?im)^\s*Warnings?\s*:\s*(\d+)\s*$')
+            if ($errorMatch.Success -and $warningMatch.Success) {
+                $errors = [int]$errorMatch.Groups[1].Value
+                $warnings = [int]$warningMatch.Groups[1].Value
+                $summaryFound = $true
+            }
         }
     }
 
-    $errorLines = @($Lines | Where-Object { $_ -match '(?i)\berror\s*\d+\b|\berrors?\s*:' })
-    $warningLines = @($Lines | Where-Object { $_ -match '(?i)\bwarning\s*\d+\b|\bwarnings?\s*:' })
+    $diagnosticLines = @($Lines | Where-Object {
+        $_ -notmatch '(?i)^\s*(?:Result\s*:\s*)?\d+\s+errors?\s*,\s*\d+\s+warnings?\b' -and
+        $_ -notmatch '(?i)^\s*Errors?\s*:\s*\d+\s*(?:,\s*Warnings?\s*:\s*\d+\s*)?$' -and
+        $_ -notmatch '(?i)^\s*Warnings?\s*:\s*\d+\s*$'
+    })
+    $errorLines = @($diagnosticLines | Where-Object { $_ -match '(?i)(?:\berror\s*\d+\b|:\s*error\s*:|^\s*error\s*:|:\s*error\s+[^:])' })
+    $warningLines = @($diagnosticLines | Where-Object { $_ -match '(?i)(?:\bwarning\s*\d+\b|:\s*warning\s*:|^\s*warning\s*:|:\s*warning\s+[^:])' })
 
-    # If no summary exists, do not invent a zero-error result. Individual diagnostics
-    # provide a lower bound, but the build remains unverified until the summary is found.
     if ($null -eq $errors) { $errors = $errorLines.Count }
     if ($null -eq $warnings) { $warnings = $warningLines.Count }
 
     return [pscustomobject]@{
-        SummaryFound = $summaryFound
-        Errors       = [int]$errors
-        Warnings     = [int]$warnings
-        ErrorLines   = $errorLines
+        SummaryFound = [bool]$summaryFound
+        Errors = [int]$errors
+        Warnings = [int]$warnings
+        ErrorLines = $errorLines
         WarningLines = $warningLines
     }
 }
@@ -229,16 +243,60 @@ try {
     Write-Host "Arguments    : $argumentLine"
     Write-Host ''
 
-    $process = Start-Process -FilePath $metaEditor -ArgumentList $argumentLine -WorkingDirectory $TerminalInstallRoot -Wait -PassThru -ErrorAction Stop
+    $process = Start-Process -FilePath $metaEditor -ArgumentList $argumentLine -WorkingDirectory $TerminalInstallRoot -PassThru -ErrorAction Stop
+    $processExited = $process.WaitForExit($CompileTimeoutSeconds * 1000)
+    if (-not $processExited) {
+        $timedOutProcessId = $process.Id
+        $taskkillPath = Join-Path $env:SystemRoot 'System32\taskkill.exe'
+        $taskkillSucceeded = $false
+
+        # Terminate the process tree first; Process.Kill() alone is not a tree kill
+        # on the Windows PowerShell/.NET Framework runtime used by the project.
+        if (Test-Path -LiteralPath $taskkillPath -PathType Leaf) {
+            try {
+                & $taskkillPath /PID $timedOutProcessId /T /F | Out-Null
+                $taskkillExitCode = $LASTEXITCODE
+                $null = $process.WaitForExit(10000)
+                $taskkillSucceeded = ($taskkillExitCode -eq 0 -and $process.HasExited)
+                if (-not $taskkillSucceeded) {
+                    Write-Warning "Could not verify full process-tree termination for MetaEditor PID $timedOutProcessId (taskkill exit=$taskkillExitCode)."
+                }
+            }
+            catch {
+                Write-Warning "taskkill process-tree termination failed for MetaEditor PID ${timedOutProcessId}: $($_.Exception.Message)"
+            }
+        }
+        else {
+            Write-Warning "taskkill.exe is unavailable; process-tree termination cannot be guaranteed for MetaEditor PID $timedOutProcessId."
+        }
+
+        # Fall back to terminating the exact process started by this script.
+        if (-not $process.HasExited) {
+            try {
+                $process.Kill()
+                $null = $process.WaitForExit(5000)
+            }
+            catch {
+                Write-Warning "Could not terminate MetaEditor PID ${timedOutProcessId}: $($_.Exception.Message)"
+            }
+        }
+        $partialLogArchive = $null
+        if (Test-Path -LiteralPath $sourceLog -PathType Leaf) {
+            $timeoutStamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
+            $partialLogArchive = Join-Path $archiveDirectory ("AlgoMultiAssetEA.timeout-$timeoutStamp.log")
+            Copy-Item -LiteralPath $sourceLog -Destination $partialLogArchive
+        }
+        throw [System.TimeoutException]::new("MetaEditor compilation exceeded ${CompileTimeoutSeconds}s (PID ${timedOutProcessId}). Partial log: $(if ($partialLogArchive) { $partialLogArchive } else { 'not produced' })")
+    }
     $processExitCode = $process.ExitCode
 
     if (-not (Test-Path -LiteralPath $sourceLog -PathType Leaf)) {
-        throw "MetaEditor did not create the expected fresh source log: $sourceLog (process exit code: $processExitCode)"
+        throw [System.IO.InvalidDataException]::new("MetaEditor did not create the expected fresh source log: $sourceLog (process exit code: $processExitCode)")
     }
 
     $logItem = Get-Item -LiteralPath $sourceLog
     if ($logItem.LastWriteTimeUtc -lt $compileStartUtc.AddSeconds(-2)) {
-        throw "The source log is older than this build attempt; refusing to parse a stale log: $sourceLog"
+        throw [System.IO.InvalidDataException]::new("The source log is older than this build attempt; refusing to parse a stale log: $sourceLog")
     }
 
     $logLines = @(Get-Content -LiteralPath $sourceLog)
@@ -255,7 +313,11 @@ try {
         $ex5Item = Get-Item -LiteralPath $ex5Path
         $ex5AfterTime = $ex5Item.LastWriteTimeUtc
         $ex5AfterHash = (Get-FileHash -LiteralPath $ex5Path -Algorithm SHA256).Hash
-        $ex5Generated = ($ex5Item.Length -gt 0 -and $ex5AfterTime -ge $compileStartUtc.AddSeconds(-2))
+        $ex5TimestampAfterCompile = ($ex5AfterTime -ge $compileStartUtc.AddSeconds(-2))
+        $ex5HashChanged = ($null -ne $ex5BeforeHash -and $ex5BeforeHash -ne $ex5AfterHash)
+        $ex5TimestampUpdated = ($null -ne $ex5BeforeTime -and $ex5AfterTime -gt $ex5BeforeTime)
+        $ex5ArtifactChanged = ($null -eq $ex5BeforeTime -or $ex5HashChanged -or $ex5TimestampUpdated)
+        $ex5Generated = ($ex5Item.Length -gt 0 -and $ex5TimestampAfterCompile -and $ex5ArtifactChanged)
     }
 
     Write-Host ''
@@ -276,16 +338,14 @@ try {
         $summary.WarningLines | ForEach-Object { Write-Host "  $_" }
     }
 
-    if ($processExitCode -ne 0 -and -not $summary.SummaryFound) {
-        throw "MetaEditor returned non-zero exit code $processExitCode and no compiler summary was found. Inspect the fresh source log: $sourceLog"
-    }
     if ($processExitCode -ne 0) {
-        Write-Warning "MetaEditor returned exit code $processExitCode, but the compiler summary reports $($summary.Errors) errors and $($summary.Warnings) warnings. Continuing based on the parsed summary."
+        Write-Host "COMPILE: FAILED (MetaEditor process exit code $processExitCode; diagnostics preserved at $archivedCurrentLog)"
+        exit 1
     }
 
     if ($SyntaxCheckOnly) {
         if (-not $summary.SummaryFound) {
-            throw 'Syntax-check log has no recognized compiler summary. Result is UNKNOWN, not PASSED.'
+            throw [System.IO.InvalidDataException]::new('Syntax-check log has no recognized compiler summary. Result is UNKNOWN, not PASSED.')
         }
         if ($summary.Errors -gt 0) { exit 1 }
         if ($summary.Warnings -gt 0) { exit 2 }
@@ -294,7 +354,7 @@ try {
     }
 
     if (-not $summary.SummaryFound) {
-        throw 'Compile log has no recognized errors/warnings summary. Refusing to infer success from MetaEditor process exit code.'
+        throw [System.IO.InvalidDataException]::new('Compile log has no recognized errors/warnings summary. Refusing to infer success from MetaEditor process exit code.')
     }
     if ($summary.Errors -gt 0) {
         Write-Host "`nEX5 existing hash before: $ex5BeforeHash"
@@ -308,7 +368,7 @@ try {
         exit 2
     }
     if (-not $ex5Generated) {
-        throw "Compiler log reports zero errors/warnings, but a fresh non-empty EX5 was not verified: $ex5Path"
+        throw [System.InvalidOperationException]::new("Compiler log reports zero errors/warnings, but a fresh non-empty EX5 was not verified: $ex5Path")
     }
 
     Write-Host "EX5 path             : $ex5Path"
@@ -320,5 +380,8 @@ try {
 }
 catch {
     Write-Error $_
+    if ($_.Exception -is [System.TimeoutException]) { exit 12 }
+    if ($_.Exception -is [System.IO.InvalidDataException]) { exit 13 }
+    if ($_.Exception -is [System.InvalidOperationException]) { exit 14 }
     exit 10
 }

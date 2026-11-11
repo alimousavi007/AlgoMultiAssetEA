@@ -5,7 +5,7 @@ description: Independent read-only review of Hybrid setup, attempt, execution, a
 # Hybrid Lifecycle Review — Read Only
 
 ## 1. Baseline
-Establish the exact diff, branch, HEAD, and pre-existing user changes. Read `AGENTS.md`, `.kilo/rules/mql5.md`, `.agents/skills/algo-multiasset-ea/SKILL.md`, and `.agents/skills/hybrid-strategy-lifecycle/SKILL.md`.
+Establish the exact diff, branch, HEAD, and pre-existing user changes. Read `AGENTS.MD`, `.kilo/rules/mql5.md`, `.agents/skills/algo-multiasset-ea/SKILL.md`, and `.agents/skills/hybrid-strategy-lifecycle/SKILL.md`.
 
 ## 2. Invoke relevant resources
 Load through Kilo's actual Skill tool:

@@ -7,8 +7,9 @@
   Validates compilation, project structure, configuration integrity, critical invariants,
   and Strategy Tester readiness without launching the terminal or submitting orders.
 
-  This script does not mutate persistent state, connect to a broker, or execute trades.
-  It is safe to run in CI/CD and local development workflows.
+  This script may create validation-log archives and the optional JSON report.
+  It does not launch the terminal/tester, mutate trading databases, connect to a broker,
+  or execute trades. Compilation invokes MetaEditor only when -SkipCompile is not supplied.
 
   Exit codes:
     0  - All validations PASSED
@@ -312,11 +313,63 @@ function Get-FileHashSafe {
     }
 }
 
-# Parses MetaEditor compilation log and returns structured result
+# Verifies the freshness of a generated EX5 artifact.
+function Test-FreshEx5Artifact {
+    param(
+        [AllowNull()][string]$BeforeHash,
+        [switch]$BeforeArtifactExists,
+        [datetime]$BeforeWriteTimeUtc = [datetime]::MinValue,
+        [AllowNull()][string]$AfterHash,
+        [Parameter(Mandatory)][datetime]$AfterWriteTimeUtc,
+        [Parameter(Mandatory)][datetime]$CompileStartUtc,
+        [Parameter(Mandatory)][long]$Length
+    )
+    $timestampAfterCompile = ($AfterWriteTimeUtc -ge $CompileStartUtc.AddSeconds(-2))
+    $hashChanged = ($BeforeArtifactExists -and -not [string]::IsNullOrWhiteSpace($BeforeHash) -and -not [string]::IsNullOrWhiteSpace($AfterHash) -and $BeforeHash -ne $AfterHash)
+    $timestampUpdated = ($BeforeArtifactExists -and $AfterWriteTimeUtc -gt $BeforeWriteTimeUtc)
+    $artifactChanged = (-not $BeforeArtifactExists -or $hashChanged -or $timestampUpdated)
+    return [pscustomobject]@{
+        IsFresh = [bool]($Length -gt 0 -and $timestampAfterCompile -and $artifactChanged)
+        HashChanged = [bool]$hashChanged
+        TimestampUpdated = [bool]$timestampUpdated
+        TimestampAfterCompile = [bool]$timestampAfterCompile
+        ArtifactChanged = [bool]$artifactChanged
+    }
+}
+
+function Get-StandardLibraryConsistency {
+    param(
+        [Parameter(Mandatory)][string]$ProjectFilePath,
+        [Parameter(Mandatory)][string]$InstallFilePath
+    )
+    $projectExists = Test-Path -LiteralPath $ProjectFilePath -PathType Leaf
+    $installExists = Test-Path -LiteralPath $InstallFilePath -PathType Leaf
+    $projectHash = if ($projectExists) { Get-FileHashSafe -Path $ProjectFilePath } else { $null }
+    $installHash = if ($installExists) { Get-FileHashSafe -Path $InstallFilePath } else { $null }
+    if (-not $projectExists) {
+        $status='FAILED'
+        $message=if ($installExists) { 'Project Standard Library copy not found (mandatory)' } else { 'Both Standard Library copies missing' }
+        $failureReason='Project Standard Library copy missing'
+    }
+    elseif (-not $installExists) {
+        $status='WARNING'; $message='Installation Standard Library copy not found'; $failureReason='Installation copy missing'
+    }
+    elseif ($projectHash -eq $installHash) {
+        $status='PASSED'; $message='Standard Library copies match'; $failureReason=''
+    }
+    else {
+        $status='WARNING'; $message='Standard Library copies differ'; $failureReason='Hash mismatch between project and installation copies'
+    }
+    return [pscustomobject]@{
+        Status=$status; Message=$message; FailureReason=$failureReason
+        ProjectExists=$projectExists; InstallExists=$installExists
+        ProjectHash=$projectHash; InstallHash=$installHash
+    }
+}
+
 function Parse-CompileLog {
     param([Parameter(Mandatory)][string[]]$Lines)
 
-    # Filter out empty lines and trim
     $cleanLines = @($Lines | Where-Object { $_ -and $_.Trim() })
     $text = $cleanLines -join "`n"
     $errors = $null
@@ -324,7 +377,6 @@ function Parse-CompileLog {
     $summaryFound = $false
     $rawSummary = ''
 
-    # Pattern 1: "Result: N errors, M warnings, ..."
     $resultMatch = [regex]::Match($text, '(?im)\bResult\s*:\s*(\d+)\s+errors?\s*,\s*(\d+)\s+warnings?\b')
     if ($resultMatch.Success) {
         $errors = [int]$resultMatch.Groups[1].Value
@@ -333,33 +385,43 @@ function Parse-CompileLog {
         $rawSummary = $resultMatch.Value
     }
     else {
-        # Pattern 2: Separate "Errors: N" and "Warnings: M" lines
-        $errorMatch = [regex]::Match($text, '(?im)^\s*Errors?\s*:\s*(\d+)\s*$')
-        $warningMatch = [regex]::Match($text, '(?im)^\s*Warnings?\s*:\s*(\d+)\s*$')
-        if ($errorMatch.Success -and $warningMatch.Success) {
-            $errors = [int]$errorMatch.Groups[1].Value
-            $warnings = [int]$warningMatch.Groups[1].Value
+        $combinedMatch = [regex]::Match($text, '(?im)^\s*Errors?\s*:\s*(\d+)\s*,\s*Warnings?\s*:\s*(\d+)\s*$')
+        if ($combinedMatch.Success) {
+            $errors = [int]$combinedMatch.Groups[1].Value
+            $warnings = [int]$combinedMatch.Groups[2].Value
             $summaryFound = $true
-            $rawSummary = "Errors: $errors, Warnings: $warnings"
+            $rawSummary = $combinedMatch.Value.Trim()
+        }
+        else {
+            $errorMatch = [regex]::Match($text, '(?im)^\s*Errors?\s*:\s*(\d+)\s*$')
+            $warningMatch = [regex]::Match($text, '(?im)^\s*Warnings?\s*:\s*(\d+)\s*$')
+            if ($errorMatch.Success -and $warningMatch.Success) {
+                $errors = [int]$errorMatch.Groups[1].Value
+                $warnings = [int]$warningMatch.Groups[1].Value
+                $summaryFound = $true
+                $rawSummary = "Errors: $errors, Warnings: $warnings"
+            }
         }
     }
 
-    # Extract individual error/warning lines for diagnostics
-    # MetaEditor format: "file:line:col: error/warning: message" or "Error: N" / "Warning: N" or "Error: message"
-    $errorLines = @($cleanLines | Where-Object { $_ -match '(?i)(?:\berror\b\s*\d+\b|\berrors?\s*:\s*\d+|:\s*error\s*:|^\s*error\s*:|:\s*error\s+[^:])' })
-    $warningLines = @($cleanLines | Where-Object { $_ -match '(?i)(?:\bwarning\b\s*\d+\b|\bwarnings?\s*:\s*\d+|:\s*warning\s*:|^\s*warning\s*:|:\s*warning\s+[^:])' })
+    $diagnosticLines = @($cleanLines | Where-Object {
+        $_ -notmatch '(?i)^\s*(?:Result\s*:\s*)?\d+\s+errors?\s*,\s*\d+\s+warnings?\b' -and
+        $_ -notmatch '(?i)^\s*Errors?\s*:\s*\d+\s*(?:,\s*Warnings?\s*:\s*\d+\s*)?$' -and
+        $_ -notmatch '(?i)^\s*Warnings?\s*:\s*\d+\s*$'
+    })
+    $errorLines = @($diagnosticLines | Where-Object { $_ -match '(?i)(?:\berror\b\s*\d+\b|:\s*error\s*:|^\s*error\s*:|:\s*error\s+[^:])' })
+    $warningLines = @($diagnosticLines | Where-Object { $_ -match '(?i)(?:\bwarning\b\s*\d+\b|:\s*warning\s*:|^\s*warning\s*:|:\s*warning\s+[^:])' })
 
-    # If no summary found, use line counts as lower bound but mark unverified
     if ($null -eq $errors) { $errors = $errorLines.Count }
     if ($null -eq $warnings) { $warnings = $warningLines.Count }
 
     return [pscustomobject]@{
-        SummaryFound   = $summaryFound
-        RawSummary     = $rawSummary
-        Errors         = [int]$errors
-        Warnings       = [int]$warnings
-        ErrorLines     = $errorLines
-        WarningLines   = $warningLines
+        SummaryFound = [bool]$summaryFound
+        RawSummary = $rawSummary
+        Errors = [int]$errors
+        Warnings = [int]$warnings
+        ErrorLines = $errorLines
+        WarningLines = $warningLines
     }
 }
 
@@ -495,7 +557,7 @@ function Validate-TesterIni {
 # Validates SET file structure (supports both constant and optimization formats)
 function Validate-SetFile {
     param(
-        [Parameter(Mandatory)][string]$Content,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Content,
         [Parameter(Mandatory)][string]$FilePath
     )
 
@@ -1025,10 +1087,6 @@ try {
                 if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
                     Update-ValidationResult -Index ($validationResults.Count - 1) -Status 'FAILED' -Message "Main MQ5 source was not found: $sourcePath" -FailureReason 'Source file missing' -Severity 'CRITICAL' -ExitCode $ExitCodes.SCRIPT_ERROR
                 }
-                $sourcePath = Join-Path $ProjectMql5Root $SourceRelativePath
-                if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
-                    Update-ValidationResult -Index ($validationResults.Count - 1) -Status 'FAILED' -Message "Main MQ5 source was not found: $sourcePath" -FailureReason 'Source file missing' -Severity 'CRITICAL' -ExitCode $ExitCodes.SCRIPT_ERROR
-                }
                 else {
                     $sourcePath = (Resolve-Path -LiteralPath $sourcePath).Path
 
@@ -1062,47 +1120,30 @@ catch {
 
     $expectedHistoryHeader = Join-Path $IncludeMql5Root 'Include\Trade\HistoryOrderInfo.mqh'
     $installHistoryHeader = Join-Path (Join-Path $TerminalInstallRoot 'MQL5') 'Include\Trade\HistoryOrderInfo.mqh'
-
-    $projectExists = Test-Path -LiteralPath $expectedHistoryHeader -PathType Leaf
-    $installExists = Test-Path -LiteralPath $installHistoryHeader -PathType Leaf
-
-    $projectHash = if ($projectExists) { Get-FileHashSafe $expectedHistoryHeader } else { $null }
-    $installHash = if ($installExists) { Get-FileHashSafe $installHistoryHeader } else { $null }
-
+    $libraryCheck = Get-StandardLibraryConsistency -ProjectFilePath $expectedHistoryHeader -InstallFilePath $installHistoryHeader
     $evidence = @(
-        "Project file: $expectedHistoryHeader (Exists: $projectExists, Hash: $(if ($projectHash) { $projectHash } else { 'N/A' }))",
-        "Install file: $installHistoryHeader (Exists: $installExists, Hash: $(if ($installHash) { $installHash } else { 'N/A' }))"
+        "Project file: $expectedHistoryHeader (Exists: $($libraryCheck.ProjectExists), Hash: $(if ($libraryCheck.ProjectHash) { $libraryCheck.ProjectHash } else { 'N/A' }))",
+        "Install file: $installHistoryHeader (Exists: $($libraryCheck.InstallExists), Hash: $(if ($libraryCheck.InstallHash) { $libraryCheck.InstallHash } else { 'N/A' }))"
     )
 
-    if ($projectExists -and $installExists) {
-        if ($projectHash -eq $installHash) {
-            Write-ValidationStep 'Standard Library Consistency' 'PASS' "HistoryOrderInfo.mqh matches (hash: $projectHash)"
-            Update-ValidationResult -Index ($validationResults.Count - 1) -Status 'PASSED' -Message 'Standard Library copies match' -Evidence $evidence
+    switch ($libraryCheck.Status) {
+        'PASSED' {
+            Write-ValidationStep 'Standard Library Consistency' 'PASS' $libraryCheck.Message
+            Update-ValidationResult -Index ($validationResults.Count - 1) -Status 'PASSED' -Message $libraryCheck.Message -Evidence $evidence
         }
-        else {
-            Write-ValidationStep 'Standard Library Consistency' 'WARN' "HistoryOrderInfo.mqh differs (project: $projectHash, install: $installHash)"
+        'WARNING' {
+            Write-ValidationStep 'Standard Library Consistency' 'WARN' $libraryCheck.Message
             $status = if ($WarningsAsErrors) { 'FAILED' } else { 'WARNING' }
             $exitCode = if ($WarningsAsErrors) { $ExitCodes.STDLIB_FAILED } else { 0 }
-            Update-ValidationResult -Index ($validationResults.Count - 1) -Status $status -Message 'Standard Library copies differ' -Evidence $evidence -FailureReason 'Hash mismatch between project and installation copies' -ExitCode $exitCode
-            # Do not throw - let aggregation handle exit code
+            Update-ValidationResult -Index ($validationResults.Count - 1) -Status $status -Message $libraryCheck.Message -Evidence $evidence -FailureReason $libraryCheck.FailureReason -ExitCode $exitCode
         }
-    }
-    elseif ($projectExists -and -not $installExists) {
-        Write-ValidationStep 'Standard Library Consistency' 'WARN' "Installation copy missing: $installHistoryHeader"
-        Update-ValidationResult -Index ($validationResults.Count - 1) -Status 'WARNING' -Message 'Installation Standard Library copy not found' -Evidence $evidence -FailureReason 'Installation copy missing'
-    }
-    elseif (-not $projectExists -and $installExists) {
-        Write-ValidationStep 'Standard Library Consistency' 'FAIL' "Project copy missing: $expectedHistoryHeader"
-        Update-ValidationResult -Index ($validationResults.Count - 1) -Status 'FAILED' -Message 'Project Standard Library copy not found (mandatory)' -Evidence $evidence -FailureReason 'Project copy missing (mandatory reference)' -ExitCode $ExitCodes.STDLIB_FAILED
-        # Do not throw - let aggregation handle exit code
-    }
-    else {
-        Write-ValidationStep 'Standard Library Consistency' 'FAIL' 'Both project and installation copies missing'
-        Update-ValidationResult -Index ($validationResults.Count - 1) -Status 'FAILED' -Message 'Both Standard Library copies missing' -Evidence $evidence -FailureReason 'Both copies missing' -ExitCode $ExitCodes.STDLIB_FAILED
-        # Do not throw - let aggregation handle exit code
+        'FAILED' {
+            Write-ValidationStep 'Standard Library Consistency' 'FAIL' $libraryCheck.Message
+            Update-ValidationResult -Index ($validationResults.Count - 1) -Status 'FAILED' -Message $libraryCheck.Message -Evidence $evidence -FailureReason $libraryCheck.FailureReason -ExitCode $ExitCodes.STDLIB_FAILED
+        }
+        default { throw "Unexpected Standard Library check status: $($libraryCheck.Status)" }
     }
 
-    # =========================================================================
     # STEP 3: Terminal Data Folder Origin Verification
     # =========================================================================
     $result = New-ValidationResult -Id 'ORG-001' -Name 'TerminalDataFolderOrigin' -Status 'NOT_VERIFIED' -Severity 'MEDIUM' -Message 'Verifying terminal data folder origin'
@@ -1440,7 +1481,8 @@ Write-Host '=== AlgoMultiAssetEA Compilation (Validation) ==='
                         $ex5Item = Get-Item -LiteralPath $ex5Path
                         $ex5AfterTime = $ex5Item.LastWriteTimeUtc
                         $ex5AfterHash = Get-FileHashSafe $ex5Path
-                        $ex5Generated = ($ex5Item.Length -gt 0 -and $ex5AfterTime -ge $compileStartUtc.AddSeconds(-2))
+                        $freshness = Test-FreshEx5Artifact -BeforeHash $ex5BeforeHash -BeforeArtifactExists:($null -ne $ex5BeforeTime) -BeforeWriteTimeUtc $ex5BeforeTime -AfterHash $ex5AfterHash -AfterWriteTimeUtc $ex5AfterTime -CompileStartUtc $compileStartUtc.UtcDateTime -Length $ex5Item.Length
+                        $ex5Generated = $freshness.IsFresh
                     }
 
                     Write-Host ''

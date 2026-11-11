@@ -1,0 +1,41 @@
+name: PowerShell tooling validation
+
+on:
+  push:
+    branches:
+      - main
+      - workflows/ea-quality-cycle-2026-11-11
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  powershell-validation:
+    name: Windows PowerShell 5.1 regression suite
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Verify Windows PowerShell version
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1) {
+            throw "Expected Windows PowerShell 5.1, found $($PSVersionTable.PSVersion)"
+          }
+          $PSVersionTable.PSVersion.ToString()
+
+      - name: Run PowerShell tooling regression tests
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & .\tools\ValidationHarness.Tests.ps1
+          if ($LASTEXITCODE -ne 0) {
+            throw "ValidationHarness.Tests.ps1 failed with exit code $LASTEXITCODE"
+          }
