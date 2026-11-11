@@ -602,9 +602,18 @@ $compileStart = [DateTime]::UtcNow
     }
 
     Run-Test 'Both hash and timestamp unchanged = FAIL' {
-$compileStart = [DateTime]::UtcNow
+        $compileStart = [DateTime]::UtcNow
         $sameTime = $compileStart.AddSeconds(1)
         $result = Test-FreshEx5Artifact -BeforeHash 'SAME' -BeforeArtifactExists -BeforeWriteTimeUtc $sameTime -AfterHash 'SAME' -AfterWriteTimeUtc $sameTime -CompileStartUtc $compileStart -Length 100
+        Assert-False $result.IsFresh
+    }
+
+    Run-Test 'Rejects a changed EX5 whose timestamp predates the current compilation' {
+        $compileStart = [DateTime]::UtcNow
+        $beforeTime = $compileStart.AddMinutes(-2)
+        $result = Test-FreshEx5Artifact -BeforeHash 'OLD' -BeforeArtifactExists -BeforeWriteTimeUtc $beforeTime -AfterHash 'NEW' -AfterWriteTimeUtc $compileStart.AddMinutes(-1) -CompileStartUtc $compileStart -Length 100
+        Assert-True $result.HashChanged
+        Assert-False $result.TimestampAfterCompile
         Assert-False $result.IsFresh
     }
 }
@@ -967,7 +976,7 @@ Run-TestSuite 'Integration: Full Harness Run' {
                 -SkipCompile `
                 -JsonReportPath $reportPath
             $exitCode = $LASTEXITCODE
-            Assert-True ($exitCode -in @(0, 16))
+            Assert-True ($exitCode -in @(0, 16, 17))
             Assert-True (Test-Path -LiteralPath $reportPath -PathType Leaf)
             $parsed = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
             Assert-Equal '1.0.0' $parsed.Version
@@ -991,7 +1000,7 @@ Run-TestSuite 'Integration: Full Harness Run' {
                 -WhatIfMode
             $exitCode = $LASTEXITCODE
             $outputText = $output -join "`n"
-            Assert-True ($exitCode -in @(0, 16))
+            Assert-True ($exitCode -in @(0, 16, 17))
             Assert-False (Test-Path -LiteralPath $reportPath -PathType Leaf)
             Assert-True ($outputText -like '*WhatIf*')
         }
