@@ -140,6 +140,24 @@ $harnessContent = Get-Content -LiteralPath $harnessPath -Raw
 $functionRegion = $harnessContent -split '#region Main Execution' | Select-Object -First 1
 Invoke-Expression $functionRegion
 
+# Load only the pure compiler-log parser from Compile-MT5.ps1. The compiler script's
+# main execution block is deliberately not invoked by this regression test.
+$compileScriptPath = Join-Path $script:ScriptDir 'Compile-MT5.ps1'
+$compileTokens = $null
+$compileParseErrors = $null
+$compileAst = [System.Management.Automation.Language.Parser]::ParseFile($compileScriptPath, [ref]$compileTokens, [ref]$compileParseErrors)
+if ($compileParseErrors.Count -gt 0) {
+    throw "Compile-MT5.ps1 has PowerShell parse errors: $($compileParseErrors -join '; ')"
+}
+$compileFunctionAst = $compileAst.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-CompileSummary'
+}, $true)
+if ($null -eq $compileFunctionAst) {
+    throw 'Get-CompileSummary function was not found in Compile-MT5.ps1'
+}
+Invoke-Expression $compileFunctionAst.Extent.Text
+
 # Debug: Verify key functions are loaded
 $loadedFunctions = Get-Command -CommandType Function | Where-Object { $_.ModuleName -eq $null -and $_.Name -in @('Get-UtcTimestamp', 'Parse-IniContent', 'Validate-TesterIni', 'Parse-CompileLog', 'Get-AggregatedExitCode', 'Scan-BrokerMutations', 'Remove-CommentsAndStrings', 'Find-VariableTypes', 'Write-JsonReport') } | Select-Object -ExpandProperty Name
 # Write-Host "DEBUG: Loaded functions: $($loadedFunctions -join ', ')" -ForegroundColor Gray
@@ -320,6 +338,25 @@ $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("EA-StdLib-" + [guid]::
 }
 
 Run-TestSuite 'VH-04: MetaEditor Compilation Hardening' {
+    Run-Test 'Compile-MT5 parser recognizes combined Error/Warning summary and individual diagnostics' {
+        $summary = Get-CompileSummary -Lines @(
+            "Compiling AlgoMultiAssetEA.mq5..."
+            "Include\AlgoSystem\Types.mqh(45) : warning: unused variable 'x'"
+            "Include\AlgoSystem\ExecutionLedger.mqh(120) : error: ';' expected"
+            "Errors: 1, Warnings: 1"
+        )
+        Assert-True $summary.SummaryFound
+        Assert-Equal 1 $summary.Errors
+        Assert-Equal 1 $summary.Warnings
+        Assert-Equal 1 $summary.ErrorLines.Count
+        Assert-Equal 1 $summary.WarningLines.Count
+    }
+
+    Run-Test 'Compile-MT5 parser marks unrecognized output as NOT VERIFIED' {
+        $summary = Get-CompileSummary -Lines @('MetaEditor unexpected output')
+        Assert-False $summary.SummaryFound
+    }
+
     Run-Test 'Parses compilation summary with Errors/Warnings' {
         # Combined summary values are parsed as the actual numeric compiler counts.
         $log = @(
@@ -768,10 +805,13 @@ $tempFile = [System.IO.Path]::GetTempFileName()
 }
 
 Run-TestSuite 'F-01: PowerShell Syntax/Parser Errors Fixed' {
-    Run-Test 'Harness parses with 0 errors' {
-        $ast = [System.Management.Automation.Language.Parser]::ParseFile($harnessPath, [ref]$null, [ref]$null)
-        $errors = $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.ErrorExpressionAst] }, $true)
-        Assert-Equal 0 ($errors.Count)
+    Run-Test 'All three project PowerShell tools parse with 0 errors' {
+        foreach ($path in @($harnessPath, $compileScriptPath, $script:ScriptPath)) {
+            $tokens = $null
+            $parseErrors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$parseErrors)
+            Assert-Equal 0 $parseErrors.Count "PowerShell parse errors in $path"
+        }
     }
 
     Run-Test 'No ?? null-coalescing operator (PS 7+) used' {
