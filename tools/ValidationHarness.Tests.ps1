@@ -302,7 +302,7 @@ $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("EA-StdLib-" + [guid]::
         }
     }
 
-    Run-Test 'Reports FAILED when install copy missing (not UNVERIFIED)' {
+    Run-Test 'Reports WARNING when installation copy is missing' {
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("EA-StdLib-" + [guid]::NewGuid().ToString('N'))
         $projectFile = Join-Path $tempRoot 'Project\HistoryOrderInfo.mqh'
         $installFile = Join-Path $tempRoot 'Install\HistoryOrderInfo.mqh'
@@ -321,17 +321,16 @@ $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("EA-StdLib-" + [guid]::
 
 Run-TestSuite 'VH-04: MetaEditor Compilation Hardening' {
     Run-Test 'Parses compilation summary with Errors/Warnings' {
-        # Note: Function counts error/warning lines when no "Result:" summary found
+        # Combined summary values are parsed as the actual numeric compiler counts.
         $log = @(
             "Compiling AlgoMultiAssetEA.mq5..."
             "Errors: 0, Warnings: 2"
             "Compilation successful"
         )
         $summary = Parse-CompileLog -Lines $log
-        # "Errors:" line matches error pattern, "Warnings:" matches warning pattern
-        Assert-Equal 1 $summary.Errors
-        Assert-Equal 1 $summary.Warnings
-        Assert-Equal $false $summary.SummaryFound
+        Assert-Equal 0 $summary.Errors
+        Assert-Equal 2 $summary.Warnings
+        Assert-Equal $true $summary.SummaryFound
     }
 
     Run-Test 'Detects compilation failure' {
@@ -341,16 +340,17 @@ Run-TestSuite 'VH-04: MetaEditor Compilation Hardening' {
             "Error: ';' expected"
         )
         $summary = Parse-CompileLog -Lines $log
-        # "Errors:" line + "Error: ';' expected" line = 2 errors
-        Assert-Equal 2 $summary.Errors
-        Assert-Equal 1 $summary.Warnings
-        Assert-Equal $false $summary.SummaryFound
+        Assert-Equal 3 $summary.Errors
+        Assert-Equal 0 $summary.Warnings
+        Assert-Equal $true $summary.SummaryFound
     }
 
     Run-Test 'Handles missing summary gracefully (Unrecognized=true equivalent)' {
         $log = @("Some random output without summary")
         $summary = Parse-CompileLog -Lines $log
         Assert-Equal $false $summary.SummaryFound
+        Assert-Equal 0 $summary.Errors
+        Assert-Equal 0 $summary.Warnings
     }
 
     Run-Test 'Parses multi-line compilation output correctly' {
@@ -361,10 +361,11 @@ Run-TestSuite 'VH-04: MetaEditor Compilation Hardening' {
             "Errors: 1, Warnings: 1"
         )
         $summary = Parse-CompileLog -Lines $log
-        # warning line + error line + "Errors:" line + "Warnings:" line = 2 errors, 2 warnings
-        Assert-Equal 2 $summary.Errors
-        Assert-Equal 2 $summary.Warnings
-        Assert-Equal $false $summary.SummaryFound
+        Assert-Equal 1 $summary.Errors
+        Assert-Equal 1 $summary.Warnings
+        Assert-Equal $true $summary.SummaryFound
+        Assert-Equal 1 $summary.ErrorLines.Count
+        Assert-Equal 1 $summary.WarningLines.Count
     }
 }
 
@@ -872,7 +873,7 @@ Run-TestSuite 'P3: Exit Code Contract & WhatIf' {
         Assert-Equal 18 $code
     }
 
-    Run-Test 'All exit codes distinct: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18' {
+    Run-Test 'All configured exit codes are unique and include success and strict-failure codes' {
 $values = @($ExitCodes.Values | ForEach-Object { [int]$_ })
         $unique = @($values | Select-Object -Unique)
         Assert-Equal $values.Count $unique.Count
