@@ -149,6 +149,9 @@ Use current, version-relevant sources:
 - MetaEditor compilation behavior: https://www.metatrader5.com/en/metaeditor/help/development/compile
 - MQL5 compiler errors: https://www.mql5.com/en/docs/constants/errorswarnings/errorscompile
 - Microsoft PowerShell 5.1 `Start-Process`: https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.management/start-process?view=powershell-5.1
+- .NET Framework `Process.WaitForExit(Int32)`: https://learn.microsoft.com/en-us/dotnet/api/system.diagnostics.process.waitforexit?view=netframework-4.8.1
+- .NET Framework `Process.Kill()`: https://learn.microsoft.com/en-us/dotnet/api/system.diagnostics.process.kill?view=netframework-4.8.1
+- Windows `taskkill /T /F` process-tree termination: https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/taskkill
 
 Use reputable secondary sources only to investigate details not settled by these primary sources; label them secondary and never treat them as platform guarantees.
 

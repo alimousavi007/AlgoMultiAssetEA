@@ -98,14 +98,14 @@ function Run-Test {
         Write-Host "  [PASS] $Name" -ForegroundColor Green
         $script:TestPassed++
         $script:TestResults += [pscustomobject]@{ Name = $Name; Status = 'PASS'; Error = $null }
-        return $true
+
     }
     catch {
         Write-Host "  [FAIL] $Name" -ForegroundColor Red
         Write-Host "    Error: $($_.Exception.Message)" -ForegroundColor Red
         $script:TestFailed++
         $script:TestResults += [pscustomobject]@{ Name = $Name; Status = 'FAIL'; Error = $_.Exception.Message }
-        return $false
+
     }
 }
 
@@ -133,12 +133,6 @@ $harnessPath = Join-Path $script:ScriptDir 'AlgoMultiAssetEA-ValidationHarness.p
 $script:WhatIfMode = $false
 $script:Confirm = $false
 
-Write-Host "DEBUG: ScriptPath=$script:ScriptPath" -ForegroundColor Gray
-Write-Host "DEBUG: ScriptDir=$script:ScriptDir" -ForegroundColor Gray
-Write-Host "DEBUG: ProjectRoot=$script:ProjectRoot" -ForegroundColor Gray
-Write-Host "DEBUG: harnessPath=$harnessPath" -ForegroundColor Gray
-Write-Host "DEBUG: Test-Path harnessPath=$(Test-Path $harnessPath)" -ForegroundColor Gray
-Write-Host "DEBUG: Test-Path ProjectRoot=$(Test-Path $script:ProjectRoot)" -ForegroundColor Gray
 
 $harnessContent = Get-Content -LiteralPath $harnessPath -Raw
 $functionRegion = $harnessContent -split '#region Main Execution' | Select-Object -First 1
@@ -163,13 +157,9 @@ if ($null -eq $compileFunctionAst) {
 Invoke-Expression $compileFunctionAst.Extent.Text
 
 # Debug: Verify key functions are loaded
-$loadedFunctions = Get-Command -CommandType Function | Where-Object { $_.ModuleName -eq $null -and $_.Name -in @('Get-UtcTimestamp', 'Parse-IniContent', 'Validate-TesterIni', 'Parse-CompileLog', 'Get-AggregatedExitCode', 'Scan-BrokerMutations', 'Remove-CommentsAndStrings', 'Find-VariableTypes', 'Write-JsonReport') } | Select-Object -ExpandProperty Name
-# Write-Host "DEBUG: Loaded functions: $($loadedFunctions -join ', ')" -ForegroundColor Gray
 
 # Debug: Test Get-UtcTimestamp directly
 # $ts = Get-UtcTimestamp
-# Write-Host "DEBUG: Get-UtcTimestamp result: '$ts'" -ForegroundColor Gray
-# Write-Host "DEBUG: Get-UtcTimestamp type: $($ts.GetType().Name)" -ForegroundColor Gray
 
 # ----------------------------------------------------------------------------
 # Test Suites
@@ -761,16 +751,12 @@ $tempPath = Join-Path ([System.IO.Path]::GetTempPath()) ("EA-Atomic-" + [guid]::
 }
 
 Run-TestSuite 'VH-11: UTC Timestamp Handling' {
-    Write-Host "DEBUG: Before VH-11 test, Get-UtcTimestamp = '$(Get-UtcTimestamp)'" -ForegroundColor Gray
     
     Run-Test 'Produces ISO 8601 with offset' {
-        Write-Host "DEBUG: Inside test, Get-UtcTimestamp = '$(Get-UtcTimestamp)'" -ForegroundColor Gray
         $ts = Get-UtcTimestamp
-        Write-Host "DEBUG: ts variable = '$ts'" -ForegroundColor Gray
         if (-not $ts -or $ts -eq '') {
             throw "Get-UtcTimestamp returned empty string"
         }
-        Write-Host "DEBUG: About to Assert-Match with ts='$ts'" -ForegroundColor Gray
         Assert-Match $ts '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$'
     }
 
@@ -968,6 +954,16 @@ Run-TestSuite 'Integration: Full Harness Run' {
             Copy-Item -LiteralPath $sourceDirectory -Destination $projectRoot -Recurse -Force
         }
 
+        # Supply the required SET file and terminal origin mapping for a clean validation result.
+        $requiredSetPath = Join-Path $projectRoot 'Experts\AlgoMultiAssetEA.set'
+        Set-Content -LiteralPath $requiredSetPath -Value @(
+            'TesterSet=AlgoMultiAssetEA'
+            'Symbol=EURUSD'
+            'Period=H1'
+        ) -Encoding UTF8
+        $originPath = Join-Path (Split-Path -Parent $projectRoot) 'origin.txt'
+        Set-Content -LiteralPath $originPath -Value $terminalRoot -Encoding UTF8
+
         # The harness checks Standard Library parity but never compiles or executes
         # this fixture. Create a matching inert header only inside the temp fixture.
         $projectTrade = Join-Path $projectRoot 'Include\Trade'
@@ -995,14 +991,19 @@ Run-TestSuite 'Integration: Full Harness Run' {
                 -TerminalInstallRoot $fixture.TerminalInstallRoot `
                 -ProjectMql5Root $fixture.ProjectMql5Root `
                 -SkipCompile `
+                -WarningsAsErrors `
+                -StrictMode `
                 -JsonReportPath $reportPath
             $exitCode = $LASTEXITCODE
-            Assert-True ($exitCode -in @(0, 16, 17))
+            Assert-Equal 0 $exitCode
             Assert-True (Test-Path -LiteralPath $reportPath -PathType Leaf)
             $parsed = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
             Assert-Equal '1.0.0' $parsed.Version
             Assert-True ($parsed.Results.Count -gt 0)
             Assert-Equal $exitCode $parsed.OverallExitCode
+            Assert-Equal 0 $parsed.Summary.Failed
+            Assert-Equal 0 $parsed.Summary.Warning
+            Assert-Equal 0 $parsed.Summary.NotVerified
         }
         finally {
             if (Test-Path -LiteralPath $fixture.Root) { Remove-Item -LiteralPath $fixture.Root -Recurse -Force }
@@ -1017,11 +1018,13 @@ Run-TestSuite 'Integration: Full Harness Run' {
                 -TerminalInstallRoot $fixture.TerminalInstallRoot `
                 -ProjectMql5Root $fixture.ProjectMql5Root `
                 -SkipCompile `
+                -WarningsAsErrors `
+                -StrictMode `
                 -JsonReportPath $reportPath `
                 -WhatIfMode
             $exitCode = $LASTEXITCODE
             $outputText = $output -join "`n"
-            Assert-True ($exitCode -in @(0, 16, 17))
+            Assert-Equal 0 $exitCode
             Assert-False (Test-Path -LiteralPath $reportPath -PathType Leaf)
             Assert-True ($outputText -like '*WhatIf*')
         }
