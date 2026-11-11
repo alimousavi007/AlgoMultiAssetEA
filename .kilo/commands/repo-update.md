@@ -96,8 +96,8 @@ After fetch, verify the exact remote-tracking ref exists and resolves. A fetch e
 For an explicitly named target branch, activate it now, before calculating ahead/behind counts:
 
 - If it is already the current branch, do not switch.
-- If the local branch exists, re-verify that its upstream is exactly the selected remote/branch and then switch to it.
-- If it does not exist locally, create it and set tracking to the exact verified remote-tracking ref with Git's tracking-branch switch operation.
+- If the local branch exists, re-verify that its upstream is exactly the selected remote/branch and then switch with **git switch <target-branch>**.
+- If it does not exist locally, create it as a tracking branch with **git switch --track -c <target-branch> <remote-name>/<target-branch>**.
 - The working tree must still be clean immediately before switching. If it is not clean, stop.
 - Never reset, overwrite, delete, or repoint a local branch to make the switch succeed.
 
