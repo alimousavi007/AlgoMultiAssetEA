@@ -31,7 +31,7 @@ function Assert-Equal {
         [Parameter(Mandatory)][object]$Actual,
         [string]$Message = ''
     )
-    if (-not [Object]::Equals($Expected, $Actual)) {
+    if (-not ($Expected -eq $Actual)) {
         throw "Assert-Equal failed: Expected '$Expected', got '$Actual'. $Message"
     }
 }
