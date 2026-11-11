@@ -551,14 +551,14 @@ $result = Validate-SetFile -Content 'LotSize=' -FilePath 'optional.set'
 Run-TestSuite 'VH-08: Fresh EX5 Verification (F-03)' {
     Run-Test 'Requires EX5 timestamp after compilation (OR hash change)' {
 $compileStart = [DateTime]::UtcNow
-        $result = Test-FreshEx5Artifact -BeforeHash 'OLD' -BeforeWriteTimeUtc $compileStart.AddMinutes(-1) -AfterHash 'NEW' -AfterWriteTimeUtc $compileStart.AddSeconds(1) -CompileStartUtc $compileStart -Length 100
+        $result = Test-FreshEx5Artifact -BeforeHash 'OLD' -BeforeArtifactExists -BeforeWriteTimeUtc $compileStart.AddMinutes(-1) -AfterHash 'NEW' -AfterWriteTimeUtc $compileStart.AddSeconds(1) -CompileStartUtc $compileStart -Length 100
         Assert-True $result.IsFresh
         Assert-True $result.HashChanged
     }
 
     Run-Test 'Deterministic compilation producing identical hash but updated timestamp = PASS' {
 $compileStart = [DateTime]::UtcNow
-        $result = Test-FreshEx5Artifact -BeforeHash 'SAME' -BeforeWriteTimeUtc $compileStart.AddMinutes(-1) -AfterHash 'SAME' -AfterWriteTimeUtc $compileStart.AddSeconds(2) -CompileStartUtc $compileStart -Length 100
+        $result = Test-FreshEx5Artifact -BeforeHash 'SAME' -BeforeArtifactExists -BeforeWriteTimeUtc $compileStart.AddMinutes(-1) -AfterHash 'SAME' -AfterWriteTimeUtc $compileStart.AddSeconds(2) -CompileStartUtc $compileStart -Length 100
         Assert-True $result.IsFresh
         Assert-False $result.HashChanged
         Assert-True $result.TimestampUpdated
@@ -567,7 +567,7 @@ $compileStart = [DateTime]::UtcNow
     Run-Test 'Both hash and timestamp unchanged = FAIL' {
 $compileStart = [DateTime]::UtcNow
         $sameTime = $compileStart.AddSeconds(1)
-        $result = Test-FreshEx5Artifact -BeforeHash 'SAME' -BeforeWriteTimeUtc $sameTime -AfterHash 'SAME' -AfterWriteTimeUtc $sameTime -CompileStartUtc $compileStart -Length 100
+        $result = Test-FreshEx5Artifact -BeforeHash 'SAME' -BeforeArtifactExists -BeforeWriteTimeUtc $sameTime -AfterHash 'SAME' -AfterWriteTimeUtc $sameTime -CompileStartUtc $compileStart -Length 100
         Assert-False $result.IsFresh
     }
 }
@@ -851,14 +851,14 @@ Run-TestSuite 'F-03: EX5 Freshness Semantics Corrected' {
     Run-Test 'Fresh = hash change OR timestamp update' {
 $compileStart = [DateTime]::UtcNow
         $sameTime = $compileStart.AddSeconds(1)
-        $result = Test-FreshEx5Artifact -BeforeHash 'OLD' -BeforeWriteTimeUtc $sameTime -AfterHash 'NEW' -AfterWriteTimeUtc $sameTime -CompileStartUtc $compileStart -Length 8
+        $result = Test-FreshEx5Artifact -BeforeHash 'OLD' -BeforeArtifactExists -BeforeWriteTimeUtc $sameTime -AfterHash 'NEW' -AfterWriteTimeUtc $sameTime -CompileStartUtc $compileStart -Length 8
         Assert-True $result.IsFresh
         Assert-True $result.HashChanged
     }
 
     Run-Test 'Deterministic compilation (same hash, new timestamp) = PASS' {
 $compileStart = [DateTime]::UtcNow
-        $result = Test-FreshEx5Artifact -BeforeHash 'SAME' -BeforeWriteTimeUtc $compileStart -AfterHash 'SAME' -AfterWriteTimeUtc $compileStart.AddSeconds(1) -CompileStartUtc $compileStart -Length 8
+        $result = Test-FreshEx5Artifact -BeforeHash 'SAME' -BeforeArtifactExists -BeforeWriteTimeUtc $compileStart -AfterHash 'SAME' -AfterWriteTimeUtc $compileStart.AddSeconds(1) -CompileStartUtc $compileStart -Length 8
         Assert-True $result.IsFresh
         Assert-True $result.TimestampUpdated
     }
@@ -884,66 +884,82 @@ $values = @($ExitCodes.Values | ForEach-Object { [int]$_ })
 }
 
 Run-TestSuite 'Integration: Full Harness Run' {
-    Write-Host "DEBUG: ProjectRoot=$script:ProjectRoot" -ForegroundColor Gray
-    Write-Host "DEBUG: harnessPath=$harnessPath" -ForegroundColor Gray
-    
-    Run-Test 'Runs with -SkipCompile and produces valid JSON' {
-        Write-Host "DEBUG: Inside test, ProjectRoot=$script:ProjectRoot" -ForegroundColor Gray
-        Write-Host "DEBUG: Inside test, harnessPath=$harnessPath" -ForegroundColor Gray
-        
-        $tempJson = [System.IO.Path]::GetTempFileName()
-        try {
-            & powershell -NoProfile -ExecutionPolicy Bypass -File $harnessPath `
-                -TerminalInstallRoot "C:\Program Files\AMarkets - MetaTrader 5" `
-                -ProjectMql5Root $script:ProjectRoot `
-                -SkipCompile `
-                -JsonReportPath $tempJson
-            $exitCode = $LASTEXITCODE
-            Write-Host "DEBUG: exitCode=$exitCode" -ForegroundColor Gray
-            
-            Assert-True ($exitCode -in @(0, 2, 16))
-            
-            $content = Get-Content -LiteralPath $tempJson -Raw
-            Write-Host "DEBUG: content length=$($content.Length)" -ForegroundColor Gray
-            $parsed = $content | ConvertFrom-Json
-            Write-Host "DEBUG: parsed type=$($parsed.GetType().Name)" -ForegroundColor Gray
-            Write-Host "DEBUG: parsed.Results type=$($parsed.Results.GetType().Name)" -ForegroundColor Gray
-            Assert-Equal '1.0.0' $parsed.Version
-            Assert-True ($parsed.Results.Count -gt 0)
+    function New-ValidationFixture {
+        $fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("EA-Harness-" + [guid]::NewGuid().ToString('N'))
+        $projectRoot = Join-Path $fixtureRoot 'Project\MQL5'
+        $terminalRoot = Join-Path $fixtureRoot 'Terminal'
+        New-Item -ItemType Directory -Path $projectRoot,$terminalRoot -Force | Out-Null
+
+        foreach ($directory in @('Experts','Include')) {
+            $sourceDirectory = Join-Path $script:ProjectRoot $directory
+            if (-not (Test-Path -LiteralPath $sourceDirectory -PathType Container)) {
+                throw "Required repository fixture directory missing: $sourceDirectory"
+            }
+            Copy-Item -LiteralPath $sourceDirectory -Destination $projectRoot -Recurse -Force
         }
-        finally {
-            if (Test-Path $tempJson) { Remove-Item $tempJson -Force }
+
+        # The harness checks Standard Library parity but never compiles or executes
+        # this fixture. Create a matching inert header only inside the temp fixture.
+        $projectTrade = Join-Path $projectRoot 'Include\Trade'
+        $terminalTrade = Join-Path $terminalRoot 'MQL5\Include\Trade'
+        New-Item -ItemType Directory -Path $projectTrade,$terminalTrade -Force | Out-Null
+        $headerContent = '// isolated validation fixture; no MT5 API behavior is simulated'
+        Set-Content -LiteralPath (Join-Path $projectTrade 'HistoryOrderInfo.mqh') -Value $headerContent -Encoding UTF8
+        Set-Content -LiteralPath (Join-Path $terminalTrade 'HistoryOrderInfo.mqh') -Value $headerContent -Encoding UTF8
+
+        # Environment resolution reads file metadata only when -SkipCompile is set.
+        Set-Content -LiteralPath (Join-Path $terminalRoot 'metaeditor64.exe') -Value 'fixture-only' -Encoding ASCII
+
+        return [pscustomobject]@{
+            Root = $fixtureRoot
+            ProjectMql5Root = $projectRoot
+            TerminalInstallRoot = $terminalRoot
         }
     }
 
-    Run-Test 'Runs with -WhatIfMode and produces valid output (no actual JSON write)' {
-        Write-Host "DEBUG: ProjectRoot=$script:ProjectRoot" -ForegroundColor Gray
-        Write-Host "DEBUG: harnessPath=$harnessPath" -ForegroundColor Gray
-        
-        $tempJson = [System.IO.Path]::GetTempFileName()
+    Run-Test 'Runs with -SkipCompile and writes a valid JSON report in an isolated fixture' {
+        $fixture = New-ValidationFixture
+        $reportPath = Join-Path $fixture.Root 'validation-report.json'
         try {
-            $output = & powershell -NoProfile -ExecutionPolicy Bypass -File $harnessPath `
-                -TerminalInstallRoot "C:\Program Files\AMarkets - MetaTrader 5" `
-                -ProjectMql5Root $script:ProjectRoot `
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $harnessPath `
+                -TerminalInstallRoot $fixture.TerminalInstallRoot `
+                -ProjectMql5Root $fixture.ProjectMql5Root `
                 -SkipCompile `
-                -JsonReportPath $tempJson `
-                -WhatIfMode
+                -JsonReportPath $reportPath
             $exitCode = $LASTEXITCODE
-            Write-Host "DEBUG: exitCode=$exitCode" -ForegroundColor Gray
-            Write-Host "DEBUG: output type=$($output.GetType().Name)" -ForegroundColor Gray
-            $outputStr = $output -join "`n"
-            Write-Host "DEBUG: output length=$($outputStr.Length)" -ForegroundColor Gray
-            
-            Assert-True ($exitCode -in @(0, 2, 16))
-            # In WhatIfMode, JSON file is not actually written, but WhatIf messages are shown
-            Assert-True ($outputStr -like '*WhatIf*')
+            Assert-True ($exitCode -in @(0, 16))
+            Assert-True (Test-Path -LiteralPath $reportPath -PathType Leaf)
+            $parsed = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+            Assert-Equal '1.0.0' $parsed.Version
+            Assert-True ($parsed.Results.Count -gt 0)
+            Assert-Equal $exitCode $parsed.OverallExitCode
         }
         finally {
-            if (Test-Path $tempJson) { Remove-Item $tempJson -Force }
+            if (Test-Path -LiteralPath $fixture.Root) { Remove-Item -LiteralPath $fixture.Root -Recurse -Force }
+        }
+    }
+
+    Run-Test 'WhatIf mode does not create a JSON report in an isolated fixture' {
+        $fixture = New-ValidationFixture
+        $reportPath = Join-Path $fixture.Root 'whatif-report.json'
+        try {
+            $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $harnessPath `
+                -TerminalInstallRoot $fixture.TerminalInstallRoot `
+                -ProjectMql5Root $fixture.ProjectMql5Root `
+                -SkipCompile `
+                -JsonReportPath $reportPath `
+                -WhatIfMode
+            $exitCode = $LASTEXITCODE
+            $outputText = $output -join "`n"
+            Assert-True ($exitCode -in @(0, 16))
+            Assert-False (Test-Path -LiteralPath $reportPath -PathType Leaf)
+            Assert-True ($outputText -like '*WhatIf*')
+        }
+        finally {
+            if (Test-Path -LiteralPath $fixture.Root) { Remove-Item -LiteralPath $fixture.Root -Recurse -Force }
         }
     }
 }
-
 # ----------------------------------------------------------------------------
 # Summary
 # ----------------------------------------------------------------------------
