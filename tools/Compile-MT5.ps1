@@ -34,6 +34,10 @@ param(
     [string]$ArchiveDirectoryRelativePath = 'tools\compile-logs',
 
     [Parameter()]
+    [ValidateRange(1, 3600)]
+    [int]$CompileTimeoutSeconds = 120,
+
+    [Parameter()]
     [switch]$SyntaxCheckOnly
 )
 
@@ -229,7 +233,28 @@ try {
     Write-Host "Arguments    : $argumentLine"
     Write-Host ''
 
-    $process = Start-Process -FilePath $metaEditor -ArgumentList $argumentLine -WorkingDirectory $TerminalInstallRoot -Wait -PassThru -ErrorAction Stop
+    $process = Start-Process -FilePath $metaEditor -ArgumentList $argumentLine -WorkingDirectory $TerminalInstallRoot -PassThru -ErrorAction Stop
+    $processExited = $process.WaitForExit($CompileTimeoutSeconds * 1000)
+    if (-not $processExited) {
+        $timedOutProcessId = $process.Id
+        try {
+            # Terminate only the exact MetaEditor process started by this invocation.
+            $process.Kill()
+            $null = $process.WaitForExit(10000)
+        }
+        catch {
+            Write-Warning "Could not confirm termination of timed-out MetaEditor PID ${timedOutProcessId}: $($_.Exception.Message)"
+        }
+
+        $partialLogArchive = $null
+        if (Test-Path -LiteralPath $sourceLog -PathType Leaf) {
+            $timeoutStamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
+            $partialLogArchive = Join-Path $archiveDirectory ("AlgoMultiAssetEA.timeout-$timeoutStamp.log")
+            Copy-Item -LiteralPath $sourceLog -Destination $partialLogArchive
+        }
+
+        throw [System.TimeoutException]::new("MetaEditor compilation exceeded ${CompileTimeoutSeconds}s (PID ${timedOutProcessId}). Partial log: $(if ($partialLogArchive) { $partialLogArchive } else { 'not produced' })")
+    }
     $processExitCode = $process.ExitCode
 
     if (-not (Test-Path -LiteralPath $sourceLog -PathType Leaf)) {
@@ -255,7 +280,11 @@ try {
         $ex5Item = Get-Item -LiteralPath $ex5Path
         $ex5AfterTime = $ex5Item.LastWriteTimeUtc
         $ex5AfterHash = (Get-FileHash -LiteralPath $ex5Path -Algorithm SHA256).Hash
-        $ex5Generated = ($ex5Item.Length -gt 0 -and $ex5AfterTime -ge $compileStartUtc.AddSeconds(-2))
+        $ex5TimestampAfterCompile = ($ex5AfterTime -ge $compileStartUtc.AddSeconds(-2))
+        $ex5HashChanged = ($null -ne $ex5BeforeHash -and $ex5BeforeHash -ne $ex5AfterHash)
+        $ex5TimestampUpdated = ($null -ne $ex5BeforeTime -and $ex5AfterTime -gt $ex5BeforeTime)
+        $ex5ArtifactChanged = ($null -eq $ex5BeforeTime -or $ex5HashChanged -or $ex5TimestampUpdated)
+        $ex5Generated = ($ex5Item.Length -gt 0 -and $ex5TimestampAfterCompile -and $ex5ArtifactChanged)
     }
 
     Write-Host ''
@@ -276,11 +305,9 @@ try {
         $summary.WarningLines | ForEach-Object { Write-Host "  $_" }
     }
 
-    if ($processExitCode -ne 0 -and -not $summary.SummaryFound) {
-        throw "MetaEditor returned non-zero exit code $processExitCode and no compiler summary was found. Inspect the fresh source log: $sourceLog"
-    }
     if ($processExitCode -ne 0) {
-        Write-Warning "MetaEditor returned exit code $processExitCode, but the compiler summary reports $($summary.Errors) errors and $($summary.Warnings) warnings. Continuing based on the parsed summary."
+        Write-Host "COMPILE: FAILED (MetaEditor process exit code $processExitCode; diagnostics preserved at $archivedCurrentLog)"
+        exit 1
     }
 
     if ($SyntaxCheckOnly) {
@@ -320,5 +347,8 @@ try {
 }
 catch {
     Write-Error $_
+    if ($_.Exception -is [System.TimeoutException]) {
+        exit 12
+    }
     exit 10
 }
