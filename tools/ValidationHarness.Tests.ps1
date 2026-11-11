@@ -129,6 +129,10 @@ $script:ProjectRoot = Split-Path -Parent $script:ScriptDir
 
 $harnessPath = Join-Path $script:ScriptDir 'AlgoMultiAssetEA-ValidationHarness.ps1'
 
+# The harness functions are imported without executing the harness param block.
+$script:WhatIfMode = $false
+$script:Confirm = $false
+
 Write-Host "DEBUG: ScriptPath=$script:ScriptPath" -ForegroundColor Gray
 Write-Host "DEBUG: ScriptDir=$script:ScriptDir" -ForegroundColor Gray
 Write-Host "DEBUG: ProjectRoot=$script:ProjectRoot" -ForegroundColor Gray
@@ -770,10 +774,10 @@ Run-TestSuite 'VH-11: UTC Timestamp Handling' {
         Assert-Match $ts '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$'
     }
 
-    Run-Test 'Uses DateTimeOffset.UtcNow not DateTime.UtcNow' {
-$ts = Get-UtcTimestamp
+    Run-Test 'Returns an ISO timestamp with a zero UTC offset' {
+        $ts = Get-UtcTimestamp
         $parsed = [DateTimeOffset]::Parse($ts)
-        Assert-Equal 0 $parsed.Offset.TotalMinutes
+        Assert-True ($parsed.Offset.TotalMinutes -eq 0)
         Assert-Match $ts '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}\+00:00$'
     }
 }

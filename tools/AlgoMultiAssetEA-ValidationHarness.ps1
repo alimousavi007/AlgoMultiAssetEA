@@ -557,7 +557,7 @@ function Validate-TesterIni {
 # Validates SET file structure (supports both constant and optimization formats)
 function Validate-SetFile {
     param(
-        [Parameter(Mandatory)][string]$Content,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Content,
         [Parameter(Mandatory)][string]$FilePath
     )
 
