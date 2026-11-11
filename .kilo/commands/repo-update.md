@@ -60,27 +60,38 @@ Allow the optional trailing .git and URL scheme/SSH syntax differences only. Do 
 
 ### B. An explicit remote branch argument is supplied
 
-- Treat the argument as a branch name, not a URL, refspec, commit SHA, or shell fragment. Reject ambiguous or invalid names.
-- Verify the canonical remote and that the exact remote branch exists.
-- If the current branch is already tracking that exact branch, remain on it.
+- Treat the argument as a branch name, not a URL, refspec, commit SHA, or shell fragment. Validate it with Git's branch/ref format checker; reject ambiguous or invalid names.
+- Determine the remote without guessing: prefer the current branch's configured remote only if its fetch URL resolves to the canonical repository. If that is unavailable, require exactly one configured remote whose fetch URL resolves to the canonical repository. If zero or multiple candidates remain, stop and report the ambiguity.
+- Do not decide whether the remote branch exists from a possibly stale remote-tracking ref. Fetch the selected remote first (Section 4), then verify the exact fetched ref exists.
+- If the current branch is already tracking that exact remote branch, remain on it.
 - Otherwise, switching is permitted only because the user explicitly named the target branch and only after the clean-tree gate has passed.
-- If the local branch exists, inspect its upstream and local commits before switching. Do not silently change its upstream.
-- If the local branch does not exist, create it as a tracking branch from the verified remote-tracking branch.
-- Never overwrite an existing local branch or repoint its upstream automatically.
+- If the local target branch already exists, require its configured upstream to be exactly the selected remote and target branch. If no upstream exists or it points elsewhere, stop; do not repoint it automatically. Inspect its local commits before switching.
+- If the local target branch does not exist, create it as a tracking branch from the exact verified remote-tracking ref after fetch.
+- Never overwrite an existing local branch or change branch tracking configuration implicitly.
 
-If the exact remote branch does not exist, stop. Do not substitute main or another branch.
+If the exact remote branch does not exist after fetch, stop. Do not substitute main or another branch.
 
 ## 4. Fetch without changing working files
 
-After all preceding gates pass, fetch from the verified remote:
+After the repository, clean-tree, canonical-remote, and target-selection gates pass, fetch from the verified remote.
+
+For the current branch's configured upstream:
 
 ~~~~powershell
 git fetch <remote-name>
 ~~~~
 
+For an explicitly named branch, fetch that exact branch into its corresponding remote-tracking ref so the check cannot rely on stale local metadata:
+
+~~~~powershell
+git fetch <remote-name> refs/heads/<target-branch>:refs/remotes/<remote-name>/<target-branch>
+~~~~
+
+The remote name and target branch must already have been validated as separate Git ref/name components. Do not build or execute a shell command from unchecked user text.
+
 Do not use pull as the first operation. Fetch first so the incoming state can be inspected before changing the checked-out files.
 
-After fetching, re-verify that the configured remote-tracking upstream exists and resolves. A fetch error, authentication failure, missing ref, or unexpected remote state is a blocker; do not fall back to another remote.
+After fetch, verify the exact remote-tracking ref exists and resolves. A fetch error, authentication failure, missing ref, or unexpected remote state is a blocker; do not fall back to another remote.
 
 ## 5. Inspect the incoming update before applying it
 
