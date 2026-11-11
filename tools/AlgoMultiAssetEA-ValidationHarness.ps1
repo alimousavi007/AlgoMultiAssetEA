@@ -7,8 +7,9 @@
   Validates compilation, project structure, configuration integrity, critical invariants,
   and Strategy Tester readiness without launching the terminal or submitting orders.
 
-  This script does not mutate persistent state, connect to a broker, or execute trades.
-  It is safe to run in CI/CD and local development workflows.
+  This script may create validation-log archives and the optional JSON report.
+  It does not launch the terminal/tester, mutate trading databases, connect to a broker,
+  or execute trades. Compilation invokes MetaEditor only when -SkipCompile is not supplied.
 
   Exit codes:
     0  - All validations PASSED
@@ -1077,10 +1078,6 @@ try {
                 Update-ValidationResult -Index ($validationResults.Count - 1) -Status 'FAILED' -Message "The /include root must contain an Include directory. Expected: $includeDirectory" -FailureReason 'Include directory missing' -Severity 'CRITICAL' -ExitCode $ExitCodes.SCRIPT_ERROR
             }
             else {
-                $sourcePath = Join-Path $ProjectMql5Root $SourceRelativePath
-                if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
-                    Update-ValidationResult -Index ($validationResults.Count - 1) -Status 'FAILED' -Message "Main MQ5 source was not found: $sourcePath" -FailureReason 'Source file missing' -Severity 'CRITICAL' -ExitCode $ExitCodes.SCRIPT_ERROR
-                }
                 $sourcePath = Join-Path $ProjectMql5Root $SourceRelativePath
                 if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
                     Update-ValidationResult -Index ($validationResults.Count - 1) -Status 'FAILED' -Message "Main MQ5 source was not found: $sourcePath" -FailureReason 'Source file missing' -Severity 'CRITICAL' -ExitCode $ExitCodes.SCRIPT_ERROR
