@@ -263,7 +263,7 @@ try {
                 }
             }
             catch {
-                Write-Warning "taskkill process-tree termination failed for MetaEditor PID $timedOutProcessId: $($_.Exception.Message)"
+                Write-Warning "taskkill process-tree termination failed for MetaEditor PID ${timedOutProcessId}: $($_.Exception.Message)"
             }
         }
         else {
@@ -277,7 +277,7 @@ try {
                 $null = $process.WaitForExit(5000)
             }
             catch {
-                Write-Warning "Could not terminate MetaEditor PID $timedOutProcessId: $($_.Exception.Message)"
+                Write-Warning "Could not terminate MetaEditor PID ${timedOutProcessId}: $($_.Exception.Message)"
             }
         }
         $partialLogArchive = $null
