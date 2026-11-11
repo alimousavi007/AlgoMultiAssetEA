@@ -313,7 +313,7 @@ function Get-FileHashSafe {
     }
 }
 
-# Parses MetaEditor compilation log and returns structured result
+# Verifies the freshness of a generated EX5 artifact.
 function Test-FreshEx5Artifact {
     param(
         [AllowNull()][string]$BeforeHash,

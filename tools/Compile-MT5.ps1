@@ -247,31 +247,38 @@ try {
     $processExited = $process.WaitForExit($CompileTimeoutSeconds * 1000)
     if (-not $processExited) {
         $timedOutProcessId = $process.Id
-        try {
-            $process.Kill()
-            $null = $process.WaitForExit(5000)
-        }
-        catch {
-            Write-Warning "Initial termination attempt failed for MetaEditor PID ${timedOutProcessId}: $($_.Exception.Message)"
-        }
-        try {
-            if (-not $process.HasExited) {
-                $taskkillPath = Join-Path $env:SystemRoot 'System32\taskkill.exe'
-                if (Test-Path -LiteralPath $taskkillPath -PathType Leaf) {
-                    & $taskkillPath /PID $timedOutProcessId /T /F | Out-Null
-                    $taskkillExitCode = $LASTEXITCODE
-                    $null = $process.WaitForExit(10000)
-                    if ($taskkillExitCode -ne 0 -or -not $process.HasExited) {
-                        Write-Warning "Could not confirm termination of MetaEditor process tree PID $timedOutProcessId (taskkill exit=$taskkillExitCode)."
-                    }
-                }
-                else {
-                    Write-Warning "taskkill.exe was not found; process-tree termination cannot be verified for PID $timedOutProcessId."
+        $taskkillPath = Join-Path $env:SystemRoot 'System32\taskkill.exe'
+        $taskkillSucceeded = $false
+
+        # Terminate the process tree first; Process.Kill() alone is not a tree kill
+        # on the Windows PowerShell/.NET Framework runtime used by the project.
+        if (Test-Path -LiteralPath $taskkillPath -PathType Leaf) {
+            try {
+                & $taskkillPath /PID $timedOutProcessId /T /F | Out-Null
+                $taskkillExitCode = $LASTEXITCODE
+                $null = $process.WaitForExit(10000)
+                $taskkillSucceeded = ($taskkillExitCode -eq 0 -and $process.HasExited)
+                if (-not $taskkillSucceeded) {
+                    Write-Warning "Could not verify full process-tree termination for MetaEditor PID $timedOutProcessId (taskkill exit=$taskkillExitCode)."
                 }
             }
+            catch {
+                Write-Warning "taskkill process-tree termination failed for MetaEditor PID $timedOutProcessId: $($_.Exception.Message)"
+            }
         }
-        catch {
-            Write-Warning "Process-tree termination fallback failed for MetaEditor PID $timedOutProcessId: $($_.Exception.Message)"
+        else {
+            Write-Warning "taskkill.exe is unavailable; process-tree termination cannot be guaranteed for MetaEditor PID $timedOutProcessId."
+        }
+
+        # Fall back to terminating the exact process started by this script.
+        if (-not $process.HasExited) {
+            try {
+                $process.Kill()
+                $null = $process.WaitForExit(5000)
+            }
+            catch {
+                Write-Warning "Could not terminate MetaEditor PID $timedOutProcessId: $($_.Exception.Message)"
+            }
         }
         $partialLogArchive = $null
         if (Test-Path -LiteralPath $sourceLog -PathType Leaf) {

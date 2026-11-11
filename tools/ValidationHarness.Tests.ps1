@@ -357,6 +357,15 @@ Run-TestSuite 'VH-04: MetaEditor Compilation Hardening' {
         Assert-False $summary.SummaryFound
     }
 
+    Run-Test 'Compile-MT5 parser recognizes Result summary without double-counting diagnostics' {
+        $summary = Get-CompileSummary -Lines @('Result: 0 errors, 0 warnings, 123 msec elapsed')
+        Assert-True $summary.SummaryFound
+        Assert-Equal 0 $summary.Errors
+        Assert-Equal 0 $summary.Warnings
+        Assert-Equal 0 $summary.ErrorLines.Count
+        Assert-Equal 0 $summary.WarningLines.Count
+    }
+
     Run-Test 'Parses compilation summary with Errors/Warnings' {
         # Combined summary values are parsed as the actual numeric compiler counts.
         $log = @(
@@ -586,6 +595,14 @@ $result = Validate-SetFile -Content 'LotSize=' -FilePath 'optional.set'
 }
 
 Run-TestSuite 'VH-08: Fresh EX5 Verification (F-03)' {
+    Run-Test 'Accepts a fresh EX5 when no prior artifact exists' {
+        $compileStart = [DateTime]::UtcNow
+        $result = Test-FreshEx5Artifact -AfterWriteTimeUtc $compileStart.AddSeconds(1) -CompileStartUtc $compileStart -Length 100
+        Assert-True $result.IsFresh
+        Assert-False $result.HashChanged
+        Assert-True $result.ArtifactChanged
+    }
+
     Run-Test 'Requires EX5 timestamp after compilation (OR hash change)' {
 $compileStart = [DateTime]::UtcNow
         $result = Test-FreshEx5Artifact -BeforeHash 'OLD' -BeforeArtifactExists -BeforeWriteTimeUtc $compileStart.AddMinutes(-1) -AfterHash 'NEW' -AfterWriteTimeUtc $compileStart.AddSeconds(1) -CompileStartUtc $compileStart -Length 100
