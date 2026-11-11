@@ -27,17 +27,19 @@ A composite Workflow in this repository is a **single invoked command** that rea
 | `/project-task` | General task router | A task does not fit a specialist Workflow |
 | `/security-review` | Read-only security/privacy review | Review a changed trust, data, dependency, or execution boundary |
 
-## 3. Composite Workflows added
+## 3. Composite Workflows
 
 | Command | Composition | Intended use |
 |---|---|---|
 | `/ea-implement-validate` | `ea-implement` → scoped independent review → `mt5-validate` | Default end-to-end implementation and authorized validation for EA code changes |
 | `/ea-investigate-fix-validate` | `ea-investigate` → authorization/root-cause gate → `ea-implement` → `mt5-validate` | A reported EA defect where the user asks to diagnose and fix it |
 | `/hybrid-lifecycle-implement-validate` | `ea-implement` + `hybrid-lifecycle` → Hybrid/risk review → `mt5-validate` | Setup/Attempt/authority/durable intent/reconciliation lifecycle changes |
+| `/ea-quality-cycle` | `ea-implement` + `mt5-validate` → baseline compile → scoped audit → repair → justified refactor → regression repair → final compile/tests | Complete the compile/audit/repair/refactor cycle in one Kilo session |
 
 ## 4. Which command should I use?
 
-- **Implement a normal EA feature/fix and verify it:** `/ea-implement-validate`
+- **Implement an EA change and complete the compile/audit/repair cycle:** `/ea-quality-cycle`
+- **Implement a normal EA feature/fix with the shorter implementation and validation pipeline:** `/ea-implement-validate`
 - **Diagnose a symptom only:** `/ea-investigate`
 - **Diagnose and fix a symptom in one task:** `/ea-investigate-fix-validate`
 - **Change Setup, Attempt, Coordinator, durable intent, or reconciliation behavior:** `/hybrid-lifecycle-implement-validate`
@@ -55,14 +57,19 @@ Do not invoke multiple slash commands in a single prompt and assume they will ex
 3. Use only the specialist reviews relevant to the changed paths. Do not run duplicate broad audits.
 4. Skills must be loaded through Kilo's actual Skill mechanism. Reading a Skill file is not equivalent to invoking the Skill.
 5. Agents must be delegated through the actual Task/subagent mechanism. Verify their IDs and report whether they truly ran.
-6. Compile, functional testing, Strategy Tester, terminal runtime, database mutation, and broker operations are distinct permissions. Apply `/mt5-validate` and do not infer authorization.
-7. Preserve user changes. Never reset, clean, stash, discard, amend, force-push, commit, or push without the required explicit authorization.
-8. Do not close or defer a known P0–P3 issue without a verified fix or an explicit approved architecture/policy disposition. A compile pass is not proof of runtime correctness.
-9. If a required component Workflow cannot be read, stop with a precise blocker rather than silently skipping it.
-10. `/repo-update` must preserve local changes and use fast-forward only. It stops on dirty worktrees, unverified upstreams, or divergent histories; it never commits, pushes, resets, cleans, or stashes.
+6. Use `todowrite` for multi-step work and update it at meaningful transitions; do not claim its use unless it actually ran.
+7. Inspect and reuse the appropriate tools under `tools/`; do not create duplicate compilers or validation harnesses.
+8. Compile, functional testing, Strategy Tester, terminal runtime, database mutation, and broker operations are distinct permissions. `/ea-quality-cycle` authorizes compilation only; apply `/mt5-validate` and do not infer authorization for other stages.
+9. Default compile acceptance is 0 errors and 0 warnings. An unrecognized summary, stale log, timeout, or unverified EX5 is not a pass.
+10. A no-op assertion such as `Assert-True $true` is not test coverage. Do not rely on a test count without inspecting assertion behavior.
+11. Preserve user changes. Never reset, clean, stash, discard, amend, force-push, commit, or push without the required explicit authorization.
+12. Do not close or defer a known P0–P3 issue without a verified fix or an explicit approved architecture/policy disposition. A compile pass is not proof of runtime correctness.
+13. If a required component Workflow cannot be read, stop with a precise blocker rather than silently skipping it.
+14. `/repo-update` must preserve local changes and use fast-forward only. It stops on dirty worktrees, unverified upstreams, or divergent histories; it never commits, pushes, resets, cleans, or stashes.
 
-## 6. Maintenance notes from the audit
+## 6. Maintenance notes
 
 - The repository uses `AGENTS.MD` (uppercase extension). Workflow references must preserve that exact casing for case-sensitive filesystems.
 - `hybrid-lifecycle.md` must reference the existing `/hybrid-lifecycle-review` Workflow rather than claim it does not exist.
-- New project Workflows belong in `.kilo/commands/`; no separate `.kilocode/workflows/` directory is required for the current Kilo command format.
+- Project Workflows belong in `.kilo/commands/`; the current Kilo command format does not require a separate `.kilocode/workflows/` directory.
+- The compile-quality process is centralized in `/ea-quality-cycle` and the universal project rules. Do not copy the entire cycle into every other Workflow.
