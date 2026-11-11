@@ -288,11 +288,34 @@ Run-TestSuite 'VH-02: Tester Profile Path Resolution' {
 
 Run-TestSuite 'VH-03: Standard Library Consistency Fail-Safe' {
     Run-Test 'Reports FAILED when project copy missing (fail-safe)' {
-        Assert-True $true
+$tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("EA-StdLib-" + [guid]::NewGuid().ToString('N'))
+        $projectFile = Join-Path $tempRoot 'Project\HistoryOrderInfo.mqh'
+        $installFile = Join-Path $tempRoot 'Install\HistoryOrderInfo.mqh'
+        try {
+            New-Item -ItemType Directory -Path (Split-Path -Parent $installFile) -Force | Out-Null
+            Set-Content -LiteralPath $installFile -Value '// install copy' -Encoding UTF8
+            $result = Get-StandardLibraryConsistency -ProjectFilePath $projectFile -InstallFilePath $installFile
+            Assert-Equal 'FAILED' $result.Status
+            Assert-False $result.ProjectExists
+        } finally {
+            if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+        }
     }
 
     Run-Test 'Reports FAILED when install copy missing (not UNVERIFIED)' {
-        Assert-True $true
+$tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("EA-StdLib-" + [guid]::NewGuid().ToString('N'))
+        $projectFile = Join-Path $tempRoot 'Project\HistoryOrderInfo.mqh'
+        $installFile = Join-Path $tempRoot 'Install\HistoryOrderInfo.mqh'
+        try {
+            New-Item -ItemType Directory -Path (Split-Path -Parent $projectFile) -Force | Out-Null
+            Set-Content -LiteralPath $projectFile -Value '// project copy' -Encoding UTF8
+            $result = Get-StandardLibraryConsistency -ProjectFilePath $projectFile -InstallFilePath $installFile
+            Assert-Equal 'WARNING' $result.Status
+            Assert-True $result.ProjectExists
+            Assert-False $result.InstallExists
+        } finally {
+            if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+        }
     }
 }
 
@@ -510,39 +533,67 @@ LotSize=0.1||Lot size||double||10.0||0.01||0.01
     }
 
     Run-Test 'Reports FAILED for missing required SET with CRITICAL severity' {
-        Assert-True $true
+$result = Validate-SetFile -Content '' -FilePath 'required.set'
+        Assert-False $result.Valid
+        Assert-True ($result.Issues.Count -gt 0)
+        Assert-Equal 0 $result.ParamCount
     }
 
     Run-Test 'Reports WARNING for optional SET issues with LOW severity' {
-        Assert-True $true
+$result = Validate-SetFile -Content 'LotSize=' -FilePath 'optional.set'
+        Assert-True $result.Valid
+        Assert-Equal 1 $result.Warnings.Count
+        Assert-Match $result.Warnings[0] 'empty value'
     }
 }
 
 Run-TestSuite 'VH-08: Fresh EX5 Verification (F-03)' {
     Run-Test 'Requires EX5 timestamp after compilation (OR hash change)' {
-        Assert-True $true
+$compileStart = [DateTime]::UtcNow
+        $result = Test-FreshEx5Artifact -BeforeHash 'OLD' -BeforeWriteTimeUtc $compileStart.AddMinutes(-1) -AfterHash 'NEW' -AfterWriteTimeUtc $compileStart.AddSeconds(1) -CompileStartUtc $compileStart -Length 100
+        Assert-True $result.IsFresh
+        Assert-True $result.HashChanged
     }
 
     Run-Test 'Deterministic compilation producing identical hash but updated timestamp = PASS' {
-        Assert-True $true
+$compileStart = [DateTime]::UtcNow
+        $result = Test-FreshEx5Artifact -BeforeHash 'SAME' -BeforeWriteTimeUtc $compileStart.AddMinutes(-1) -AfterHash 'SAME' -AfterWriteTimeUtc $compileStart.AddSeconds(2) -CompileStartUtc $compileStart -Length 100
+        Assert-True $result.IsFresh
+        Assert-False $result.HashChanged
+        Assert-True $result.TimestampUpdated
     }
 
     Run-Test 'Both hash and timestamp unchanged = FAIL' {
-        Assert-True $true
+$compileStart = [DateTime]::UtcNow
+        $sameTime = $compileStart.AddSeconds(1)
+        $result = Test-FreshEx5Artifact -BeforeHash 'SAME' -BeforeWriteTimeUtc $sameTime -AfterHash 'SAME' -AfterWriteTimeUtc $sameTime -CompileStartUtc $compileStart -Length 100
+        Assert-False $result.IsFresh
     }
 }
 
 Run-TestSuite 'VH-09: Evidence-Based Invariant Checks' {
     Run-Test 'Checks OnTick handler presence' {
-        Assert-True $true
+$eaPath = Join-Path $script:ProjectRoot 'Experts\AlgoMultiAssetEA.mq5'
+        Assert-True (Test-Path -LiteralPath $eaPath -PathType Leaf)
+        Assert-Match (Get-Content -LiteralPath $eaPath -Raw) '(?m)^\s*void\s+OnTick\s*\('
     }
 
     Run-Test 'Checks HybridTypes definitions' {
-        Assert-True $true
+$typesPath = Join-Path $script:ProjectRoot 'Include\AlgoSystem\HybridTypes.mqh'
+        Assert-True (Test-Path -LiteralPath $typesPath -PathType Leaf)
+        $types = Get-Content -LiteralPath $typesPath -Raw
+        foreach ($typeName in @('TradePlan','FeatureContext','GateResults','HybridDecision')) {
+            Assert-Match $types ("(?m)\b(struct|enum)\s+" + $typeName + "\b")
+        }
     }
 
     Run-Test 'Checks ExecutionLedger schema' {
-        Assert-True $true
+$ledgerPath = Join-Path $script:ProjectRoot 'Include\AlgoSystem\ExecutionLedger.mqh'
+        Assert-True (Test-Path -LiteralPath $ledgerPath -PathType Leaf)
+        $ledger = Get-Content -LiteralPath $ledgerPath -Raw
+        Assert-Match $ledger '\bENUM_EXEC_ATTEMPT_STATE\b'
+        Assert-Match $ledger '\bExecutionAttemptRecord\b'
+        Assert-Match $ledger '\b(SCHEMA_VERSION|m_schema_version)\b'
     }
 }
 
@@ -582,7 +633,25 @@ Run-TestSuite 'VH-10: JSON Report Atomic Write & Round-Trip' {
     }
 
     Run-Test 'Atomic write uses temp file + rename (no partial writes)' {
-        Assert-True $true
+$tempPath = Join-Path ([System.IO.Path]::GetTempPath()) ("EA-Atomic-" + [guid]::NewGuid().ToString('N') + '.json')
+        $report = [pscustomobject]@{
+            Version='1.0.0'; ValidationStartUtc='2026-01-01T00:00:00.000+00:00'; ValidationEndUtc='2026-01-01T00:00:10.000+00:00'
+            DurationSeconds=10; OverallExitCode=0
+            Summary=@{Passed=1;Failed=0;Warning=0;AcceptedWarning=0;Skipped=0;NotApplicable=0;NotVerified=0}
+            Results=@([pscustomobject]@{Id='R1';Name='Atomic';Status='PASSED'})
+            Environment=@{TerminalInstallRoot='C:\MT5';ProjectMql5Root='C:\Project'}
+        }
+        try {
+            Assert-True (Write-JsonReport -Report $report -Path $tempPath)
+            Assert-True (Test-Path -LiteralPath $tempPath -PathType Leaf)
+            Assert-False (Test-Path -LiteralPath ([System.IO.Path]::ChangeExtension($tempPath, '.tmp')))
+            $parsed = Get-Content -LiteralPath $tempPath -Raw | ConvertFrom-Json
+            Assert-Equal 0 $parsed.OverallExitCode
+        } finally {
+            if (Test-Path -LiteralPath $tempPath) { Remove-Item -LiteralPath $tempPath -Force }
+            $tempArtifact = [System.IO.Path]::ChangeExtension($tempPath, '.tmp')
+            if (Test-Path -LiteralPath $tempArtifact) { Remove-Item -LiteralPath $tempArtifact -Force }
+        }
     }
 
     Run-Test 'Validates required fields in round-trip' {
@@ -638,41 +707,62 @@ Run-TestSuite 'VH-11: UTC Timestamp Handling' {
     }
 
     Run-Test 'Uses DateTimeOffset.UtcNow not DateTime.UtcNow' {
-        Assert-True $true
+$ts = Get-UtcTimestamp
+        $parsed = [DateTimeOffset]::Parse($ts)
+        Assert-Equal 0 $parsed.Offset.TotalMinutes
+        Assert-Match $ts '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}\+00:00$'
     }
 }
 
 Run-TestSuite 'VH-12: Side Effects & Process Control (P3)' {
     Run-Test 'Supports WhatIfMode for file operations (custom parameter)' {
-        Assert-True $true
+$previous = $script:WhatIfMode
+        try {
+            $script:WhatIfMode = $true
+            Assert-False (Test-ShouldProcess -Target 'unit-test' -Action 'write')
+        } finally { $script:WhatIfMode = $previous }
     }
 
     Run-Test 'Uses timeout for MetaEditor process' {
-        Assert-True $true
+Assert-Match $harnessContent 'WaitForExit\(\$CompileTimeoutSeconds\s*\*\s*1000\)'
+        Assert-Match $harnessContent '\[int\]\$CompileTimeoutSeconds\s*=\s*120'
     }
 
     Run-Test 'Kills process tree on timeout (.NET Kill + taskkill fallback)' {
-        Assert-True $true
+Assert-Match $harnessContent 'GetMethod\(''Kill'',\s*@\(\[bool\]\)\)'
+        Assert-Match $harnessContent 'taskkill\.exe'
+        Assert-Match $harnessContent '/T\s+/F'
     }
 
     Run-Test 'WhatIfMode guards MetaEditor launch' {
-        Assert-True $true
+Assert-Match $harnessContent '(?s)if\s*\(Test-ShouldProcess[^\r\n]*\)\s*\{\s*try\s*\{\s*\$process\s*=\s*Start-Process'
     }
 
     Run-Test 'WhatIfMode guards archive directory creation' {
-        Assert-True $true
+Assert-Match $harnessContent '(?s)if\s*\(Test-ShouldProcess[^\r\n]*\)\s*\{\s*New-Item\s+-ItemType Directory'
     }
 
     Run-Test 'WhatIfMode guards log archival' {
-        Assert-True $true
+Assert-Match $harnessContent '(?s)if\s*\(Test-ShouldProcess[^\r\n]*\)\s*\{\s*Move-Item\s+-LiteralPath \$sourceLog'
     }
 
     Run-Test 'WhatIfMode guards JSON report write' {
-        Assert-True $true
+Assert-Match $harnessContent '(?s)if\s*\(Test-ShouldProcess[^\r\n]*\)\s*\{\s*try\s*\{\s*\$success\s*=\s*Write-JsonReport'
     }
 
     Run-Test 'Read-only operations not affected by WhatIfMode' {
-        Assert-True $true
+$tempFile = [System.IO.Path]::GetTempFileName()
+        $previous = $script:WhatIfMode
+        try {
+            Set-Content -LiteralPath $tempFile -Value 'read-only evidence' -Encoding UTF8
+            $script:WhatIfMode = $true
+            $hash = Get-FileHashSafe -Path $tempFile
+            Assert-NotNullOrEmpty $hash
+            Assert-Equal (Get-FileHash -LiteralPath $tempFile -Algorithm SHA256).Hash $hash
+        } finally {
+            $script:WhatIfMode = $previous
+            if (Test-Path -LiteralPath $tempFile) { Remove-Item -LiteralPath $tempFile -Force }
+        }
     }
 }
 
@@ -738,17 +828,38 @@ Line3
     }
 
     Run-Test 'Scanner distinguishes authorized vs unauthorized receivers' {
-        Assert-True $true
+$tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("EA-Scanner-" + [guid]::NewGuid().ToString('N'))
+        $approvedFile = Join-Path $tempRoot 'TradeExecutor.mqh'
+        $unapprovedFile = Join-Path $tempRoot 'SignalEngine.mqh'
+        try {
+            New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+            Set-Content -LiteralPath $approvedFile -Value ("CTrade trade;" + [Environment]::NewLine + "trade.Buy(0.1);") -Encoding UTF8
+            Set-Content -LiteralPath $unapprovedFile -Value ("CTrade trade;" + [Environment]::NewLine + "trade.Sell(0.1);") -Encoding UTF8
+            $scan = Scan-BrokerMutations -SourceFiles @($approvedFile,$unapprovedFile) -ApprovedBoundaryPattern 'TradeExecutor\.mqh'
+            Assert-Equal 2 $scan.AllCalls.Count
+            Assert-Equal 1 $scan.UnauthorizedCalls.Count
+            Assert-Match $scan.UnauthorizedCalls[0].File 'SignalEngine\.mqh$'
+            Assert-Equal 'Sell' $scan.UnauthorizedCalls[0].Method
+        } finally {
+            if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+        }
     }
 }
 
 Run-TestSuite 'F-03: EX5 Freshness Semantics Corrected' {
     Run-Test 'Fresh = hash change OR timestamp update' {
-        Assert-True $true
+$compileStart = [DateTime]::UtcNow
+        $sameTime = $compileStart.AddSeconds(1)
+        $result = Test-FreshEx5Artifact -BeforeHash 'OLD' -BeforeWriteTimeUtc $sameTime -AfterHash 'NEW' -AfterWriteTimeUtc $sameTime -CompileStartUtc $compileStart -Length 8
+        Assert-True $result.IsFresh
+        Assert-True $result.HashChanged
     }
 
     Run-Test 'Deterministic compilation (same hash, new timestamp) = PASS' {
-        Assert-True $true
+$compileStart = [DateTime]::UtcNow
+        $result = Test-FreshEx5Artifact -BeforeHash 'SAME' -BeforeWriteTimeUtc $compileStart -AfterHash 'SAME' -AfterWriteTimeUtc $compileStart.AddSeconds(1) -CompileStartUtc $compileStart -Length 8
+        Assert-True $result.IsFresh
+        Assert-True $result.TimestampUpdated
     }
 }
 
@@ -762,7 +873,12 @@ Run-TestSuite 'P3: Exit Code Contract & WhatIf' {
     }
 
     Run-Test 'All exit codes distinct: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18' {
-        Assert-True $true
+$values = @($ExitCodes.Values | ForEach-Object { [int]$_ })
+        $unique = @($values | Select-Object -Unique)
+        Assert-Equal $values.Count $unique.Count
+        $stringValues = [string[]]@($values | ForEach-Object { [string]$_ })
+        Assert-Contains $stringValues '0'
+        Assert-Contains $stringValues '18'
     }
 }
 
