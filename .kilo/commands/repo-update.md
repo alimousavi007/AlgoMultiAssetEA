@@ -93,6 +93,16 @@ Do not use pull as the first operation. Fetch first so the incoming state can be
 
 After fetch, verify the exact remote-tracking ref exists and resolves. A fetch error, authentication failure, missing ref, or unexpected remote state is a blocker; do not fall back to another remote.
 
+For an explicitly named target branch, activate it now, before calculating ahead/behind counts:
+
+- If it is already the current branch, do not switch.
+- If the local branch exists, re-verify that its upstream is exactly the selected remote/branch and then switch to it.
+- If it does not exist locally, create it and set tracking to the exact verified remote-tracking ref with Git's tracking-branch switch operation.
+- The working tree must still be clean immediately before switching. If it is not clean, stop.
+- Never reset, overwrite, delete, or repoint a local branch to make the switch succeed.
+
+Only after this step is the selected local branch the comparison base for Section 5.
+
 ## 5. Inspect the incoming update before applying it
 
 Calculate ahead/behind counts between local HEAD and the exact verified upstream:
@@ -119,7 +129,11 @@ git diff --stat HEAD..<verified-upstream>
 git diff --name-status HEAD..<verified-upstream>
 ~~~~
 
-Review the incoming commit list and changed paths for unexpected scope, deletion/rename of important files, submodule pointer changes, generated/binary artifacts, sensitive data, and repository configuration changes. If the incoming change is suspicious, materially broader than the requested update, or cannot be safely understood, stop and report the exact paths/commits rather than applying it blindly.
+Review the incoming commit list and changed paths for unexpected scope, deletion/rename of important files, submodule pointer changes, generated/binary artifacts, sensitive data, and repository configuration changes.
+
+Also inspect ignored local paths with **git status --short --ignored --untracked-files=all**. Compare ignored files/directories against every incoming changed path, accounting for parent/child path collisions and case-insensitive path matching on Windows. If an incoming file could replace or conflict with an ignored local file/directory, stop and report both paths. Do not delete or move the ignored item. If the collision analysis cannot be completed reliably, stop before applying the update.
+
+If the incoming change is suspicious, materially broader than the requested update, or cannot be safely understood, stop and report the exact paths/commits rather than applying it blindly.
 
 ## 6. Apply fast-forward only
 
