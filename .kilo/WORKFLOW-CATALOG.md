@@ -2,7 +2,7 @@
 
 Repository: `alimousavi007/AlgoMultiAssetEA`
 Workflow directory: `.kilo/commands/`
-Last reviewed against `main`: `40fd267fd2ad8c7104eab700ed7770d45fda4a8f` (2026-11-11).
+Last reviewed against `main`: `6b8e4bfa9bbe682a7b29b8494381af39cf0f803f` (2026-11-12); unified workflow branch: `workflows/project-engineering-unified-2026-11-12`.
 
 ## 1. How Kilo loads project Workflows
 
@@ -14,7 +14,7 @@ A composite Workflow in this repository is a **single invoked command** that rea
 
 | Command | Purpose | Use when |
 |---|---|---|
-| `/docs-review` | Documentation review and improvement | Documentation is the primary deliverable |
+| `/project-engineering` | Unified project task, security and documentation workflow | General work requiring one or more conditional modes |
 | `/ea-implement` | EA implementation | A scoped code change is needed without the full combined pipeline |
 | `/ea-investigate` | Read-only root-cause investigation | Diagnose a symptom without editing |
 | `/ea-risk-review` | Read-only execution, risk, authority, and lifecycle review | Inspect risk-sensitive changes or behavior |
@@ -24,8 +24,8 @@ A composite Workflow in this repository is a **single invoked command** that rea
 | `/hybrid-lifecycle-review` | Read-only Hybrid lifecycle review | Independently inspect Setup/Attempt/submission/reconciliation |
 | `/mt5-validate` | MT5 compile/test validation | Run only explicitly authorized validation stages |
 | `/project-review` | General read-only project review | Review a bounded code/configuration/documentation scope |
-| `/project-task` | General task router | A task does not fit a specialist Workflow |
-| `/security-review` | Read-only security/privacy review | Review a changed trust, data, dependency, or execution boundary |
+| `/project-task` | Compatibility alias → `/project-engineering` | Legacy prompts only |
+| `/security-review` | Compatibility alias → `/project-engineering` Security mode | Legacy prompts only |
 
 ## 3. Composite Workflows
 
@@ -43,7 +43,8 @@ A composite Workflow in this repository is a **single invoked command** that rea
 - **Diagnose a symptom only:** `/ea-investigate`
 - **Diagnose and fix a symptom in one task:** `/ea-investigate-fix-validate`
 - **Change Setup, Attempt, Coordinator, durable intent, or reconciliation behavior:** `/hybrid-lifecycle-implement-validate`
-- **Review only:** choose `/project-review`, `/ea-risk-review`, `/hybrid-lifecycle-review`, or `/security-review` according to scope
+- **General investigation/implementation/review/security/docs:** `/project-engineering`, selecting only the required mode(s).
+- **Review only:** choose `/project-review`, `/ea-risk-review`, or `/hybrid-lifecycle-review` for narrower specialist scopes
 - **Compile/test only:** `/mt5-validate`
 - **Safely update the local project from GitHub:** `/repo-update`. By default it updates only the current branch's verified upstream; an explicitly named remote branch can be supplied as an argument.
 - **Prepare Git delivery:** `/git-delivery`; it does not grant commit/push permission.
@@ -52,7 +53,7 @@ Do not invoke multiple slash commands in a single prompt and assume they will ex
 
 ## 5. Composition and safety rules
 
-1. Component files are the source of truth. Composite commands read and apply them; avoid copying their entire text into every composite.
+1. `.kilo/commands/project-engineering.md` is the canonical owner of the former project-task, security-review and docs-review responsibilities; the old files are compatibility aliases. Avoid maintaining duplicate procedures.
 2. A component file read by a composite is `APPLIED AS COMPONENT INSTRUCTIONS`, not a separately `INVOKED` Workflow.
 3. Use only the specialist reviews relevant to the changed paths. Do not run duplicate broad audits.
 4. Skills must be loaded through Kilo's actual Skill mechanism. Reading a Skill file is not equivalent to invoking the Skill.
@@ -72,4 +73,4 @@ Do not invoke multiple slash commands in a single prompt and assume they will ex
 - The repository uses `AGENTS.MD` (uppercase extension). Workflow references must preserve that exact casing for case-sensitive filesystems.
 - `hybrid-lifecycle.md` must reference the existing `/hybrid-lifecycle-review` Workflow rather than claim it does not exist.
 - Project Workflows belong in `.kilo/commands/`; the current Kilo command format does not require a separate `.kilocode/workflows/` directory.
-- The compile-quality process is centralized in `/ea-quality-cycle` and the universal project rules. Do not copy the entire cycle into every other Workflow.
+- The compile-quality process is centralized in `/ea-quality-cycle` and the universal project rules. Do not copy the entire cycle into other Workflows.

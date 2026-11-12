@@ -1,32 +1,13 @@
 ---
-description: Read-only security and privacy review of a scoped code or configuration change
+description: Compatibility alias for security mode in the unified project engineering workflow
 ---
 
-# Security Review — Read Only
+# Security Review — Compatibility Alias
 
-## 1. Scope
-Identify the exact application surface, files, data flows, dependencies, and threat boundaries. Read `AGENTS.MD`, `.kilo/rules/core.md`, and `.agents/skills/security-review/SKILL.md`.
+This legacy command is retained temporarily for compatibility.
 
-## 2. Review
-Inspect only relevant risks:
-- secrets, credentials, tokens, and sensitive data exposure;
-- authentication, authorization, ownership, and permission boundaries;
-- input validation, parsing, serialization, and injection surfaces;
-- filesystem paths, unsafe file operations, and path traversal;
-- process execution, shell quoting, and command injection;
-- network destinations, TLS, trust boundaries, and data exfiltration;
-- dependency provenance, version pinning, maintenance, and license;
-- logging, telemetry, retention, and privacy;
-- concurrency, race conditions, and unsafe state transitions;
-- failure handling, fallback behavior, and privilege escalation.
+For new work, invoke `/project-engineering` and select **Security** mode. The canonical Workflow contains scoped threat-boundary review, evidence and severity requirements, read-only restrictions, trading-specific considerations and reporting formerly maintained here.
 
-For this trading system, also consider execution authorization, account identity, durable state, broker-side effects, and the risk of a security defect causing unintended orders. Do not confuse trading-risk review with a complete security review.
+Do not maintain a separate security-review procedure in this file. Apply `.kilo/commands/project-engineering.md` as the canonical instructions.
 
-## 3. Evidence
-For each finding include severity, confidence, exact file/line, threat precondition, attack/failure path, impact, evidence, and minimal mitigation. Separate confirmed vulnerabilities from hardening recommendations.
-
-## 4. Boundaries
-Read-only. Do not exploit, scan production, fuzz external systems, access secrets, submit broker requests, modify files, or install tools. Any active testing requires separate explicit authorization and a defined target.
-
-## 5. Output
-Return a concise threat summary, prioritized findings, reviewed scope, exclusions, sources, and actual Skills/Agents invoked. If no vulnerability is confirmed, say so without claiming the system is secure in general.
+Security mode remains read-only unless the user explicitly authorizes a defined remediation or test scope. Do not exploit, scan production, access secrets or perform broker operations.
