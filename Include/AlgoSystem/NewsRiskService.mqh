@@ -166,9 +166,18 @@ public:
 
    bool              SetProvider(INewsProvider* provider, bool take_ownership=false)
      {
+      // F4: never delete the pointer we are about to store. Self-assignment would
+      // free the object and leave m_provider dangling for the next Initialize().
+      if(provider==m_provider)
+        {
+         m_own_provider=take_ownership;
+         return m_provider != NULL;
+        }
+
       if(m_own_provider && m_provider!=NULL)
         {
          delete m_provider;
+         m_provider=NULL;
         }
 
       m_provider=provider;
@@ -197,6 +206,10 @@ public:
 
       if(!m_provider.Initialize())
         {
+         // F4: this provider is owned by us; release it before installing the
+         // NoOp fallback, otherwise the failed provider leaks on every retry.
+         if(m_own_provider && m_provider!=NULL)
+            delete m_provider;
          m_provider= new CNoOpNewsProvider();
          m_own_provider=true;
         }

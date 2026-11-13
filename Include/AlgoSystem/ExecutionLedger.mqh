@@ -252,6 +252,12 @@ bool               IsInitialized() const { return m_initialized && m_db_availabl
     // Resolve ownership for a candidate Magic value within the current account scope.
     // Returns AMBIGUOUS for DB/unavailable/unverified; EXTERNAL only for proven non-EA ownership.
     ENUM_MAGIC_OWNERSHIP ResolveMagicOwnership(const ulong magic, const string account_key);
+    // F6: resolve many Magic values with ONE durable lookup instead of one query per
+    // position. results[] receives one classification per input magic, same order.
+    // Mirrors ResolveMagicOwnership exactly; only the DB round-trips are batched.
+    bool                 ResolveMagicOwnershipBatch(const ulong &magics[],
+                                                    const string account_key,
+                                                    ENUM_MAGIC_OWNERSHIP &results[]);
     // Helper: check if Magic is in the reserved attempt_magic namespace.
     bool                 IsAttemptMagicRange(const ulong magic) const;
     // Helper: validate exact attempt_magic binding (attempt_id + magic + account).
@@ -537,7 +543,14 @@ bool CExecutionLedger::Initialize(const string db_name)
 
    m_db_available = true;
 
-   // Check schema
+    // F2: SQLite busy_timeout (per-connection; default is 0). Without it, a concurrent writer on
+    // the same DB file fails immediately with SQLITE_BUSY, which callers treat as a terminal write
+    // failure. A bounded wait lets proven transient lock contention resolve instead of aborting a
+    // durable state transition. Best-effort/non-fatal: the DB remains usable if the PRAGMA is rejected.
+    if(!DatabaseExecute(m_db_handle, "PRAGMA busy_timeout = 5000"))
+       Print("CExecutionLedger: PRAGMA busy_timeout rejected (non-fatal), error=", GetLastError());
+
+    // Check schema
     if(!CreateSchema())
       {
        if(m_last_init_stage == "")
@@ -584,19 +597,18 @@ void CExecutionLedger::Deinitialize()
 //+------------------------------------------------------------------+
 //| Escape SQL                                                        |
 //+------------------------------------------------------------------+
-string CExecutionLedger::EscapeSQL(const string s) const
+// F16: single authoritative escaping implementation (double the single quote; SQLite has no
+// backslash escapes). The const member delegates to the static helper to remove duplication.
+string CExecutionLedger::EscapeSQLStatic(const string s)
    {
     string result = s;
     StringReplace(result, "'", "''");
     return result;
    }
 
-// F-002: Static SQL escaping helper for external callers
-string CExecutionLedger::EscapeSQLStatic(const string s)
+string CExecutionLedger::EscapeSQL(const string s) const
    {
-    string result = s;
-    StringReplace(result, "'", "''");
-    return result;
+    return EscapeSQLStatic(s);
    }
 
 //+------------------------------------------------------------------+
@@ -4078,13 +4090,122 @@ detail = "RESOLVED claim=" + claim_id + " group=" + strategy_group_key + " lsk="
        if(found_schema < 4 || found_state == EXEC_STATE_NONE)
          return MAGIC_OWNERSHIP_AMBIGUOUS; // legacy/unverified schema or invalid state
 
-       return MAGIC_OWNERSHIP_EXACT_ATTEMPT;
-      }
+        return MAGIC_OWNERSHIP_EXACT_ATTEMPT;
+       }
 
-   //+------------------------------------------------------------------+
-   //| F-005.2: Check if Magic is in reserved attempt_magic namespace   |
-   //+------------------------------------------------------------------+
-   bool CExecutionLedger::IsAttemptMagicRange(const ulong magic) const
+//+------------------------------------------------------------------+
+//| F6: Batched ownership resolution                                  |
+//| One query for the whole position set instead of one per position. |
+//+------------------------------------------------------------------+
+bool CExecutionLedger::ResolveMagicOwnershipBatch(const ulong &magics[],
+                                                  const string account_key,
+                                                  ENUM_MAGIC_OWNERSHIP &results[])
+  {
+   int n = ArraySize(magics);
+   ArrayResize(results, n);
+
+   // Classify everything that needs no DB access first. Attempt-range entries
+   // stay provisional AMBIGUOUS until the single lookup proves otherwise.
+   int attempt_needed = 0;
+   for(int i = 0; i < n; i++)
+     {
+      ulong magic = magics[i];
+
+      if(magic==MAGIC_TREND ||
+         magic==MAGIC_BREAKOUT ||
+         magic==MAGIC_MOMENTUM ||
+         magic==MAGIC_MEAN_REVERSION ||
+         magic==MAGIC_RELATIVE_VALUE ||
+         magic==MAGIC_HYBRID_SCALP ||
+         magic==MAGIC_HYBRID_DAY ||
+         magic==MAGIC_HYBRID_SWING)
+        {
+         results[i] = MAGIC_OWNERSHIP_LEGACY_STRATEGY;
+         continue;
+        }
+
+      if(!IsAttemptMagicRange(magic))
+        {
+         results[i] = MAGIC_OWNERSHIP_EXTERNAL; // proven out of range
+         continue;
+        }
+
+      results[i] = MAGIC_OWNERSHIP_AMBIGUOUS;
+      attempt_needed++;
+     }
+
+   if(attempt_needed == 0)
+      return true;
+
+   if(!m_db_available || m_db_handle == INVALID_HANDLE)
+      return false; // unverified due to DB unavailable - stays AMBIGUOUS
+
+   string in_list = "";
+   for(int i = 0; i < n; i++)
+     {
+      if(!IsAttemptMagicRange(magics[i]))
+         continue;
+      if(in_list != "")
+         in_list += ",";
+      in_list += IntegerToString((long)magics[i]);
+     }
+
+   string sql = "SELECT attempt_magic, state, schema_version FROM execution_attempts "
+                "WHERE attempt_magic IN (" + in_list + ") AND account_key = '" +
+                EscapeSQL(account_key) + "';";
+
+   int handle = DatabasePrepare(m_db_handle, sql);
+   if(handle == INVALID_HANDLE)
+      return false; // DB error - stays AMBIGUOUS
+
+   int rows[];
+   ArrayResize(rows, n);
+   for(int i = 0; i < n; i++)
+      rows[i] = 0;
+
+   while(DatabaseRead(handle))
+     {
+      long db_magic = DatabaseColumnLong2(handle, 0);
+      int  db_state = (int)DatabaseColumnLong2(handle, 1);
+      int  db_schema = (int)DatabaseColumnLong2(handle, 2);
+
+      int idx = -1;
+      for(int i = 0; i < n; i++)
+         if((long)magics[i] == db_magic)
+           {
+            idx = i;
+            break;
+           }
+      if(idx < 0)
+         continue; // not requested by the caller
+
+      rows[idx]++;
+      if(rows[idx] == 1)
+         results[idx] = (db_schema < 4 || db_state == (int)EXEC_STATE_NONE)
+                        ? MAGIC_OWNERSHIP_AMBIGUOUS
+                        : MAGIC_OWNERSHIP_EXACT_ATTEMPT;
+     }
+   DatabaseFinalize(handle);
+
+   // Apply the same end-state rules as the single-value form:
+   // no mapping = proven external, duplicate mapping = ambiguous.
+   for(int i = 0; i < n; i++)
+     {
+      if(!IsAttemptMagicRange(magics[i]))
+         continue;
+      if(rows[i] == 0)
+         results[i] = MAGIC_OWNERSHIP_EXTERNAL;
+      else if(rows[i] > 1)
+         results[i] = MAGIC_OWNERSHIP_AMBIGUOUS;
+     }
+
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+    //| F-005.2: Check if Magic is in reserved attempt_magic namespace   |
+    //+------------------------------------------------------------------+
+    bool CExecutionLedger::IsAttemptMagicRange(const ulong magic) const
      {
       return (magic >= MAGIC_ATTEMPT_BASE && magic <= MAGIC_ATTEMPT_MAX);
      }

@@ -13,8 +13,13 @@
 !AGENTS.md
 
 # Never track local/editor/AI configuration
-.github/
 .vscode/
+
+# CI workflow
+!.github/workflows/powershell-tool-validation.yml
+
+# Project documentation
+!README.md
 
 # =========================================================
 # CASE A: Repository root = MT5 Data Folder

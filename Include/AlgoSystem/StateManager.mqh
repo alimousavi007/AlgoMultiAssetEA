@@ -356,29 +356,69 @@ datetime LastReconstruct() const
        return m_last_reconstruct;
       }
       // F-005.2.4: Count managed positions and track unknown/ambiguous for diagnostics
+      // F6: attempt-magic positions are resolved with ONE batched ledger query instead
+      // of one query per position; this runs on every tick via RefreshCurrentMetrics.
       int CountPositions(int &out_unknown, int &out_ambiguous) const
         {
          out_unknown = 0;
          out_ambiguous = 0;
          int managed = 0;
 
-         for(int i=0; i<PositionsTotal(); i++)
+         int total = PositionsTotal();
+
+         long position_magic[];
+         bool position_valid[];
+         ArrayResize(position_magic, total);
+         ArrayResize(position_valid, total);
+         for(int i = 0; i < total; i++)
+            position_valid[i] = false;
+
+         ulong attempt_magics[];
+         int   attempt_count = 0;
+
+         for(int i = 0; i < total; i++)
            {
             ulong ticket = PositionGetTicket(i);
-            if(ticket==0) continue;
+            if(ticket == 0) continue;
 
             long magic = PositionGetInteger(POSITION_MAGIC);
+            position_magic[i] = magic;
+            position_valid[i] = true;
 
             if(m_execution_ledger != NULL && m_account_key != "" && magic >= MAGIC_ATTEMPT_BASE && magic <= MAGIC_ATTEMPT_MAX)
               {
-               // For attempt_magic range, check resolver for exact classification
-               CExecutionLedger::ENUM_MAGIC_OWNERSHIP ownership = m_execution_ledger.ResolveMagicOwnership((ulong)magic, m_account_key);
-               if(ownership == CExecutionLedger::MAGIC_OWNERSHIP_EXACT_ATTEMPT)
-                 managed++;
-               else if(ownership == CExecutionLedger::MAGIC_OWNERSHIP_AMBIGUOUS)
-                 out_ambiguous++;
+               ArrayResize(attempt_magics, attempt_count + 1);
+               attempt_magics[attempt_count] = (ulong)magic;
+               attempt_count++;
+              }
+           }
+
+         CExecutionLedger::ENUM_MAGIC_OWNERSHIP ownership[];
+         bool ownership_ready = false;
+         if(attempt_count > 0)
+            ownership_ready = m_execution_ledger.ResolveMagicOwnershipBatch(attempt_magics, m_account_key, ownership);
+
+         int resolved_index = 0;
+
+         for(int i = 0; i < total; i++)
+           {
+            if(!position_valid[i]) continue; // no valid ticket at this index
+
+            long magic = position_magic[i];
+
+            if(magic >= MAGIC_ATTEMPT_BASE && magic <= MAGIC_ATTEMPT_MAX && m_execution_ledger != NULL && m_account_key != "")
+              {
+               CExecutionLedger::ENUM_MAGIC_OWNERSHIP own = CExecutionLedger::MAGIC_OWNERSHIP_AMBIGUOUS;
+               if(ownership_ready && resolved_index < ArraySize(ownership))
+                  own = ownership[resolved_index];
+               resolved_index++;
+
+               if(own == CExecutionLedger::MAGIC_OWNERSHIP_EXACT_ATTEMPT)
+                  managed++;
+               else if(own == CExecutionLedger::MAGIC_OWNERSHIP_AMBIGUOUS)
+                  out_ambiguous++;
                else
-                 out_unknown++; // EXTERNAL or LEDGER_ERROR for attempt_magic
+                  out_unknown++; // EXTERNAL or LEDGER_ERROR for attempt_magic
               }
             else if(magic==MAGIC_TREND ||
                     magic==MAGIC_BREAKOUT ||

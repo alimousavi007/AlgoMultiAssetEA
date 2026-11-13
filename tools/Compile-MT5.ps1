@@ -18,7 +18,9 @@ param(
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
-    [string]$ProjectMql5Root = 'C:\Users\Ali\AppData\Roaming\MetaQuotes\Terminal\D0694EE1816B0E3A2D24B3606A663CE8\MQL5',
+    # Default to this repository's MQL5 root (the parent of the tools folder) so the
+    # script works on any machine. Override only for a different terminal data folder.
+    [string]$ProjectMql5Root = (Split-Path -Parent $PSScriptRoot),
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
@@ -338,9 +340,11 @@ try {
         $summary.WarningLines | ForEach-Object { Write-Host "  $_" }
     }
 
+    # The compiler summary and the fresh EX5 are the authority for success. The
+    # MetaEditor process exit code is only a diagnostic: build 5370 returns 1 for a
+    # clean compile, so failing on it makes a zero-error build unverifiable.
     if ($processExitCode -ne 0) {
-        Write-Host "COMPILE: FAILED (MetaEditor process exit code $processExitCode; diagnostics preserved at $archivedCurrentLog)"
-        exit 1
+        Write-Warning "MetaEditor exited with code $processExitCode. The compile log and fresh EX5 decide the result below."
     }
 
     if ($SyntaxCheckOnly) {
@@ -379,7 +383,9 @@ try {
     exit 0
 }
 catch {
-    Write-Error $_
+    # Write-Error is terminating under $ErrorActionPreference='Stop', so the exit
+    # codes below would never run. Emit the message without terminating.
+    [Console]::Error.WriteLine($_.ToString())
     if ($_.Exception -is [System.TimeoutException]) { exit 12 }
     if ($_.Exception -is [System.IO.InvalidDataException]) { exit 13 }
     if ($_.Exception -is [System.InvalidOperationException]) { exit 14 }
