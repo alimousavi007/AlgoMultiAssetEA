@@ -709,6 +709,8 @@ CSymbolRuntime g_runtime[256];
 #define SNAPREG_NOTIFY 1005
 #define SNAPREG_ACK    1006
 long   g_snapshot_sequence = 0;
+// F3: process-local monotonic counter for collision-resistant attempt_id (restart-safe with GetTickCount).
+long   g_attempt_counter = 0;
 enum ENUM_COORDINATOR_MODE { COORD_MODE_UNINITIALIZED, COORD_MODE_COORDINATOR, COORD_MODE_CHART_CONTEXT, COORD_MODE_UNAVAILABLE };
 ENUM_COORDINATOR_MODE g_coordinator_mode = COORD_MODE_UNINITIALIZED;
 string g_owner_instance_token = "";
@@ -762,6 +764,44 @@ string g_last_runtime_dashboard_status="";
 //==================================================================
 // Dashboard helpers
 //==================================================================
+// F11: Snapshot sharing via Global Variables for multi-chart Dashboard
+string SnapshotGVKey(const string symbol, const string field)
+  {
+   return "ALGO_HYBRID_SNAPSHOT_" + g_strategy_group_key + "_" + symbol + "_" + field;
+  }
+
+void WriteSnapshotToGV(const string symbol,
+                       const int generation,
+                       const datetime snapshot_time,
+                       const datetime last_success_time,
+                       const string current_stage,
+                       const string last_block_reason,
+                       const int configured_style,
+                       const string regime_text,
+                       const string bias_text,
+                       const string long_text,
+                       const string short_text,
+                       const int regime_state,
+                       const int bias_state,
+                       const int long_state,
+                       const int short_state)
+  {
+   GlobalVariableSet(SnapshotGVKey(symbol, "generation"), generation);
+   GlobalVariableSet(SnapshotGVKey(symbol, "snapshot_time"), snapshot_time);
+   GlobalVariableSet(SnapshotGVKey(symbol, "last_success_time"), last_success_time);
+   GlobalVariableSet(SnapshotGVKey(symbol, "current_stage"), current_stage);
+   GlobalVariableSet(SnapshotGVKey(symbol, "last_block_reason"), last_block_reason);
+   GlobalVariableSet(SnapshotGVKey(symbol, "configured_style"), configured_style);
+   GlobalVariableSet(SnapshotGVKey(symbol, "regime_text"), regime_text);
+   GlobalVariableSet(SnapshotGVKey(symbol, "bias_text"), bias_text);
+   GlobalVariableSet(SnapshotGVKey(symbol, "long_text"), long_text);
+   GlobalVariableSet(SnapshotGVKey(symbol, "short_text"), short_text);
+   GlobalVariableSet(SnapshotGVKey(symbol, "regime_state"), regime_state);
+   GlobalVariableSet(SnapshotGVKey(symbol, "bias_state"), bias_state);
+   GlobalVariableSet(SnapshotGVKey(symbol, "long_state"), long_state);
+   GlobalVariableSet(SnapshotGVKey(symbol, "short_state"), short_state);
+  }
+
 void UpdateDashboardForChart()
   {
    if(!g_system_ready || !InpDashboard)
@@ -776,6 +816,29 @@ void UpdateDashboardForChart()
          g_runtime[i].symbol!=chart_symbol)
          continue;
 
+      // F11: If local snapshot not evaluated, try reading from Global Variables (shared by Coordinator)
+      if(g_runtime[i].snapshot.generation == 0)
+        {
+         string gen_key = SnapshotGVKey(chart_symbol, "generation");
+         if(GlobalVariableCheck(gen_key))
+           {
+            g_runtime[i].snapshot.generation = (int)GlobalVariableGet(gen_key);
+            g_runtime[i].snapshot.snapshot_time = (datetime)GlobalVariableGet(SnapshotGVKey(chart_symbol, "snapshot_time"));
+            g_runtime[i].snapshot.last_success_time = (datetime)GlobalVariableGet(SnapshotGVKey(chart_symbol, "last_success_time"));
+            g_runtime[i].snapshot.current_stage = GlobalVariableGet(SnapshotGVKey(chart_symbol, "current_stage"));
+            g_runtime[i].snapshot.last_block_reason = GlobalVariableGet(SnapshotGVKey(chart_symbol, "last_block_reason"));
+            g_runtime[i].snapshot.configured_style = (ENUM_TRADING_STYLE)(int)GlobalVariableGet(SnapshotGVKey(chart_symbol, "configured_style"));
+            g_runtime[i].snapshot.regime_text = GlobalVariableGet(SnapshotGVKey(chart_symbol, "regime_text"));
+            g_runtime[i].snapshot.bias_text = GlobalVariableGet(SnapshotGVKey(chart_symbol, "bias_text"));
+            g_runtime[i].snapshot.long_text = GlobalVariableGet(SnapshotGVKey(chart_symbol, "long_text"));
+            g_runtime[i].snapshot.short_text = GlobalVariableGet(SnapshotGVKey(chart_symbol, "short_text"));
+            g_runtime[i].snapshot.regime_state = (ESnapshotFieldState)(int)GlobalVariableGet(SnapshotGVKey(chart_symbol, "regime_state"));
+            g_runtime[i].snapshot.bias_state = (ESnapshotFieldState)(int)GlobalVariableGet(SnapshotGVKey(chart_symbol, "bias_state"));
+            g_runtime[i].snapshot.long_state = (ESnapshotFieldState)(int)GlobalVariableGet(SnapshotGVKey(chart_symbol, "long_state"));
+            g_runtime[i].snapshot.short_state = (ESnapshotFieldState)(int)GlobalVariableGet(SnapshotGVKey(chart_symbol, "short_state"));
+           }
+        }
+
       MarketSnapshot market;
       ResetLastError();
 
@@ -783,12 +846,12 @@ void UpdateDashboardForChart()
            g_runtime[i].symbol,
            g_runtime[i].context_tf,
            market))
-      {
-       g_dashboard.ShowStatus(
-            "WAITING FOR MARKET DATA | "+chart_symbol);
-         ResetLastError();
-         return;
-        }
+        {
+         g_dashboard.ShowStatus(
+              "WAITING FOR MARKET DATA | "+chart_symbol);
+          ResetLastError();
+          return;
+         }
 
       g_dashboard.SetRuntimeSnapshot(
          EnumToString(g_runtime[i].snapshot.configured_style),
@@ -1162,7 +1225,11 @@ g_dashboard.Update(decision, portfolio_state);
     request.magic=MagicForStyle(runtime.style);
     request.comment="AlgoMultiAssetEA_Hybrid";
     request.signal_id=normalized_plan.setup_id;
-    request.attempt_id = normalized_plan.setup_id + "_" + IntegerToString(TimeCurrent()) + "_" + IntegerToString((int)MathRand());
+    // F3: attempt_id must be collision-resistant across charts/instances/restart.
+    // Combine the logical setup id with second+ms time and a process-local monotonic counter;
+    // the ledger PRIMARY KEY rejects any residual collision (fail-closed).
+    request.attempt_id = normalized_plan.setup_id + "_" + IntegerToString((long)TimeCurrent()) + "_" +
+                         IntegerToString((long)GetTickCount()) + "_" + IntegerToString(++g_attempt_counter);
 
     // RS-01/E2.6: acquire durable claim + initial intent in ONE transaction (no claim-without-intent window).
     // On any failure, neither durable claim nor intent is committed. Legacy claim-only records remain fail-closed.
@@ -1774,9 +1841,27 @@ void ProcessRuntime(CSymbolRuntime& runtime)
    runtime.snapshot.short_text = (decision.short_score > 0 ? "SHORT CANDIDATE" : "NO SHORT");
    runtime.snapshot.regime_state = (decision.valid ? SNAP_VALID : SNAP_CALCULATION_FAILED);
    runtime.snapshot.bias_state = (decision.valid ? SNAP_VALID : SNAP_CALCULATION_FAILED);
-   runtime.snapshot.long_state = (decision.valid ? SNAP_VALID : SNAP_CALCULATION_FAILED);
-   runtime.snapshot.short_state = (decision.valid ? SNAP_VALID : SNAP_CALCULATION_FAILED);
-  }
+runtime.snapshot.long_state = (decision.valid ? SNAP_VALID : SNAP_CALCULATION_FAILED);
+    runtime.snapshot.short_state = (decision.valid ? SNAP_VALID : SNAP_CALCULATION_FAILED);
+
+    // F11: Share snapshot via Global Variables for multi-chart Dashboard
+    WriteSnapshotToGV(
+       runtime.symbol,
+       runtime.snapshot.generation,
+       runtime.snapshot.snapshot_time,
+       runtime.snapshot.last_success_time,
+       runtime.snapshot.current_stage,
+       runtime.snapshot.last_block_reason,
+       (int)runtime.snapshot.configured_style,
+       runtime.snapshot.regime_text,
+       runtime.snapshot.bias_text,
+       runtime.snapshot.long_text,
+       runtime.snapshot.short_text,
+       (int)runtime.snapshot.regime_state,
+       (int)runtime.snapshot.bias_state,
+       (int)runtime.snapshot.long_state,
+       (int)runtime.snapshot.short_state);
+   }
 
 //==================================================================
 // Initialization
@@ -2266,9 +2351,15 @@ string ComputeConfigFingerprint()
 int OnInit()
   {
    g_logger.StartRun();
-   // E2.4: Generate unique OwnerInstanceToken
-   g_owner_instance_token = "OI_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN)) + "_" +
-                            IntegerToString((long)TimeCurrent()) + "_" + IntegerToString(MathRand());
+   // F3: Set unique instance identifier for multi-chart log separation
+   g_logger.SetInstanceId(IntegerToString((long)ChartID()));
+   // E2.4: Generate unique OwnerInstanceToken.
+    // F3: MathSrand is mandatory (MQL5 MathRand is deterministic across runs without it);
+    // combine independently grounded instance data (login, chart id, tick count) with the RNG.
+    MathSrand((int)GetTickCount());
+    g_owner_instance_token = "OI_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN)) + "_" +
+                             IntegerToString((long)ChartID()) + "_" +
+                             IntegerToString((long)GetTickCount()) + "_" + IntegerToString(MathRand());
    g_logger.SetMinimumLevel(InpLogLevel);
    g_logger.SetSummaryInterval(InpLogSummarySeconds);
    g_logger.SetFlushEachWrite(InpLogFlushEachWrite);
@@ -2413,12 +2504,14 @@ void OnTimer()
 
     if(g_coordinator_mode == COORD_MODE_COORDINATOR)
       {
-       // Discovery: enumerate charts and send discovery probe
-       long chart = ChartFirst();
-       static datetime last_discovery = 0;
-       if(TimeCurrent() - last_discovery < 5)
-          return; // rate limit: 5 seconds
-       last_discovery = TimeCurrent();
+        // F8: Discovery is rate-limited to 5s; the throttle must NOT gate heartbeat/authority
+        // validation, reconciliation, retry handoff, position management or runtime processing.
+        static datetime last_discovery = 0;
+        if(TimeCurrent() - last_discovery >= 5)
+          {
+           last_discovery = TimeCurrent();
+           // Discovery: enumerate charts and send discovery probe
+           long chart = ChartFirst();
        string nonce = "N" + IntegerToString((long)TimeCurrent()) + IntegerToString((long)ChartID());
        g_pending_nonce = nonce;
        while(chart >= 0)
@@ -2466,8 +2559,9 @@ void OnTimer()
                    }
                 }
              }
-          }
-       string authority_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
+           }
+          } // end rate-limited discovery block (F8)
+        string authority_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
         if(!g_execution_ledger.HeartbeatAuthority(authority_key, g_owner_instance_token, g_authority_epoch) ||
            !g_execution_ledger.ValidateAuthority(authority_key, g_owner_instance_token, g_authority_epoch))
           {
@@ -3516,13 +3610,14 @@ void ProcessRetryPendingHandoff()
 
 void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
   {
-   // E2.6: invalidate local retry review on geometry/context-affecting events (no ledger/broker mutation).
-   RetryUIInvalidate("CHART_GEOMETRY_CHANGED");
-   if(id == CHARTEVENT_CHART_CHANGE)
-     {
-      g_dashboard.HandleChartGeometryChange();
-      RetryUIEnsureObjects();
-     }
+    // F1: invalidate the local retry review ONLY on a real chart geometry change.
+    // Unrelated custom events (CHARTREG_*, SNAPREG_*) must not reset an open retry review.
+    if(id == CHARTEVENT_CHART_CHANGE)
+      {
+       RetryUIInvalidate("CHART_GEOMETRY_CHANGED");
+       g_dashboard.HandleChartGeometryChange();
+       RetryUIEnsureObjects();
+      }
    // E2.6: local MT5 chart approval (OBJ_BUTTON). No broker calls. Only EA-owned objects.
    else if(id == CHARTEVENT_OBJECT_CLICK)
      {
@@ -3868,7 +3963,8 @@ bool IsForexSymbol(const string symbol)
       StringToUpper(c2);
       if(c1==c2) return false;
       bool ok1=false, ok2=false;
-      string fx[]={"EUR","USD","GBP","JPY","AUD","NZD","CAD","CHF","SEK","NOK","DKK","MXN","ZAR","TRY","SGD","HKD","PLN","HUF","CZK","RUB","CNH","THB"};
+       // F17: static so the constant currency list is built once, not per symbol per discovery scan.
+       static string fx[]={"EUR","USD","GBP","JPY","AUD","NZD","CAD","CHF","SEK","NOK","DKK","MXN","ZAR","TRY","SGD","HKD","PLN","HUF","CZK","RUB","CNH","THB"};
       for(int i=0;i<ArraySize(fx);i++) if(c1==fx[i]) { ok1=true; break; }
       for(int i=0;i<ArraySize(fx);i++) if(c2==fx[i]) { ok2=true; break; }
       if(ok1 && ok2) return true;

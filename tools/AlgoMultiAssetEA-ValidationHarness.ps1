@@ -1035,6 +1035,10 @@ $validationResults = @()
 $validationStartUtc = Get-UtcTimestamp
 $validationStartDt = [DateTimeOffset]::UtcNow
 $scriptError = $null
+# Pre-initialize so the crash-report path in finally is safe under Set-StrictMode
+# even when an unhandled error occurs before environment resolution assigns them.
+$metaEditorInfo = $null
+$sourcePath = $null
 
 #endregion
 
@@ -1202,8 +1206,6 @@ catch {
         @{ Path = 'Include\AlgoSystem\Logger.mqh'; Type = 'Leaf'; Label = 'Logging infrastructure' },
         @{ Path = 'Include\AlgoSystem\MarketData.mqh'; Type = 'Leaf'; Label = 'Market data layer' },
         @{ Path = 'Include\AlgoSystem\Indicators.mqh'; Type = 'Leaf'; Label = 'Indicator wrappers' },
-        @{ Path = 'Include\AlgoSystem\RegimeEngine.mqh'; Type = 'Leaf'; Label = 'Regime detection' },
-        @{ Path = 'Include\AlgoSystem\SignalEngine.mqh'; Type = 'Leaf'; Label = 'Signal generation' },
         @{ Path = 'Include\AlgoSystem\RiskEngine.mqh'; Type = 'Leaf'; Label = 'Risk evaluation' },
         @{ Path = 'Include\AlgoSystem\PortfolioRisk.mqh'; Type = 'Leaf'; Label = 'Portfolio risk' },
         @{ Path = 'Include\AlgoSystem\TradeExecutor.mqh'; Type = 'Leaf'; Label = 'Trade execution' },
@@ -1214,20 +1216,12 @@ catch {
         @{ Path = 'Include\AlgoSystem\HybridEngine.mqh'; Type = 'Leaf'; Label = 'Hybrid strategy engine' },
         @{ Path = 'Include\AlgoSystem\HybridDashboard.mqh'; Type = 'Leaf'; Label = 'Hybrid dashboard' },
         @{ Path = 'Include\AlgoSystem\NewsRiskService.mqh'; Type = 'Leaf'; Label = 'News risk service' },
-        @{ Path = 'Include\AlgoSystem\Dashboard.mqh'; Type = 'Leaf'; Label = 'Main dashboard' },
         @{ Path = 'Include\AlgoSystem\Statistics.mqh'; Type = 'Leaf'; Label = 'Statistics tracking' },
         @{ Path = 'Include\AlgoSystem\TesterFitness.mqh'; Type = 'Leaf'; Label = 'Tester fitness' },
         @{ Path = 'Include\AlgoSystem\Optimization.mqh'; Type = 'Leaf'; Label = 'Optimization support' },
-        @{ Path = 'Include\AlgoSystem\Robustness.mqh'; Type = 'Leaf'; Label = 'Robustness checks' },
-        @{ Path = 'Include\AlgoSystem\WalkForward.mqh'; Type = 'Leaf'; Label = 'Walk-forward analysis' },
         @{ Path = 'Include\AlgoSystem\VolumeProfile.mqh'; Type = 'Leaf'; Label = 'Volume profile' },
         @{ Path = 'Include\AlgoSystem\Utilities.mqh'; Type = 'Leaf'; Label = 'Utilities' },
-        @{ Path = 'Include\AlgoSystem\TrendStrategy.mqh'; Type = 'Leaf'; Label = 'Trend strategy' },
-        @{ Path = 'Include\AlgoSystem\BreakoutStrategy.mqh'; Type = 'Leaf'; Label = 'Breakout strategy' },
-        @{ Path = 'Include\AlgoSystem\MomentumStrategy.mqh'; Type = 'Leaf'; Label = 'Momentum strategy' },
         @{ Path = 'Include\AlgoSystem\MomentumEngine.mqh'; Type = 'Leaf'; Label = 'Momentum engine' },
-        @{ Path = 'Include\AlgoSystem\MeanReversionStrategy.mqh'; Type = 'Leaf'; Label = 'Mean reversion strategy' },
-        @{ Path = 'Include\AlgoSystem\RelativeValueStrategy.mqh'; Type = 'Leaf'; Label = 'Relative value strategy' },
         @{ Path = 'Include\AlgoSystem\BiasEngine.mqh'; Type = 'Leaf'; Label = 'Bias engine' },
         @{ Path = 'Include\AlgoSystem\DivergenceEngine.mqh'; Type = 'Leaf'; Label = 'Divergence engine' },
         @{ Path = 'Include\AlgoSystem\LiquidityEngine.mqh'; Type = 'Leaf'; Label = 'Liquidity engine' },
@@ -2007,7 +2001,25 @@ Write-Host '=== AlgoMultiAssetEA Compilation (Validation) ==='
 
     exit $overallExitCode
 }
+catch {
+    $scriptError = $_
+    $validationResults += New-ValidationResult -Id 'ERR-001' -Name 'ScriptExecution' -Status 'FAILED' -Severity 'CRITICAL' -Message $_.Exception.Message -FailureReason $_.Exception.Message -ExitCode $ExitCodes.SCRIPT_ERROR
+    # Record the original error first, then force Write-Error non-terminating: under
+    # $ErrorActionPreference='Stop' a bare Write-Error throws here (the 'throw' below would
+    # never run) and, if finally exits, the original message is lost. -ErrorAction Continue
+    # emits the original to the error stream; 'throw' rethrows the ORIGINAL error; the finally
+    # block then writes the crash report and exits with the semantic code (fail-closed).
+    Write-Error $_ -ErrorAction Continue
+    throw
+}
 finally {
+    # On unhandled script error, derive the semantic exit code from recorded results so the
+    # process exit code always equals the report OverallExitCode (never exit 0 on a crash).
+    if ($scriptError) {
+        $overallExitCode = Get-AggregatedExitCode -Results $validationResults -StrictMode:$StrictMode
+        if ($overallExitCode -eq 0) { $overallExitCode = $ExitCodes.SCRIPT_ERROR }
+    }
+
     # Ensure JSON report is written even on unhandled exceptions
     if ($JsonReportPath -and -not $scriptError) {
         # Already handled above
@@ -2017,8 +2029,7 @@ finally {
         $validationEndDt = [DateTimeOffset]::UtcNow
         $validationEndUtc = Get-UtcTimestamp
         $duration = $validationEndDt - $validationStartDt
-        $overallExitCode = Get-AggregatedExitCode -Results $validationResults -StrictMode:$StrictMode
-        
+
         $report = [pscustomobject]@{
             Version             = '1.0.0'
             ValidationStartUtc  = $validationStartUtc
@@ -2054,11 +2065,8 @@ finally {
             Write-Warning "Failed to write JSON report after script error: $($_.Exception.Message)"
         }
     }
-}
-catch {
-    $scriptError = $_
-    Write-Error $_
-    $validationResults += New-ValidationResult -Id 'ERR-001' -Name 'ScriptExecution' -Status 'FAILED' -Severity 'CRITICAL' -Message $_.Exception.Message -FailureReason $_.Exception.Message -ExitCode $ExitCodes.SCRIPT_ERROR
-    # Exit code handled in finally block
-    throw
+
+    # Contract: the process exit code must equal the JSON OverallExitCode.
+    # exit here overrides any pending exception and keeps a crash fail-closed.
+    exit $overallExitCode
 }
