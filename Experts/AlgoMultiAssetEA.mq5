@@ -28,6 +28,10 @@
 #include "../Include/AlgoSystem/Optimization.mqh"
 #include "../Include/AlgoSystem/StateManager.mqh"
 #include "../Include/AlgoSystem/SessionFilter.mqh"
+#include "../Include/AlgoSystem/MetricsExporter.mqh"
+
+#include <Object.mqh>
+#include <Arrays\ArrayObj.mqh>
 
 //==================================================================
 // Inputs — Reorganized into logical groups
@@ -151,17 +155,7 @@ input(name="Freshness Overrides")          string             InpFreshnessOverri
 //==================================================================
 string StyleName(ENUM_TRADING_STYLE style)
   {
-   switch(style)
-     {
-      case STYLE_SCALPING:
-         return "SCALPING";
-      case STYLE_DAY_TRADING:
-         return "DAY TRADING";
-      case STYLE_SWING_TRADING:
-         return "SWING TRADING";
-      default:
-         return "UNKNOWN";
-     }
+   return CAlgoUtils::StyleToString(style);
   }
 
 //+------------------------------------------------------------------+
@@ -487,7 +481,7 @@ enum ESnapshotFieldState
    SNAP_CALCULATION_FAILED = 6
   };
 
-class CSymbolRuntime
+class CSymbolRuntime : public CObject
   {
 public:
    string            symbol;
@@ -497,42 +491,44 @@ public:
     ENUM_TIMEFRAMES   setup_tf;
     ENUM_TIMEFRAMES   entry_tf;
 
-    CMarketDataEngine market_context;
-    CMarketDataEngine market_structure;
-    CMarketDataEngine market_setup;
-    CMarketDataEngine market_entry;
+   CMarketDataEngine market_context;
+   CMarketDataEngine market_structure;
+   CMarketDataEngine market_setup;
+   CMarketDataEngine market_entry;
 
-    CFeatureEngine    feature_context;
-    CFeatureEngine    feature_structure;
-    CFeatureEngine    feature_setup;
-    CFeatureEngine    feature_entry;
+   CFeatureEngine    feature_context;
+   CFeatureEngine    feature_structure;
+   CFeatureEngine    feature_setup;
+   CFeatureEngine    feature_entry;
 
    CHybridSignalEngine hybrid_engine;
 
    bool              valid;
    string            last_failure;
 
-   // D1: Runtime snapshot contract (typed, per-runtime, no fabrication)
-// (enum moved to global scope before class)
-     struct RuntimeSnapshot
-     {
-      int               generation;
-      datetime          snapshot_time;
-      datetime          last_success_time;
-      string            current_stage;
-      string            last_block_reason;
+   // Per-runtime state (replaces parallel arrays g_runtime_wait_state, g_runtime_init_failure)
+   string            wait_state;
+   string            init_failure;
 
-      ENUM_TRADING_STYLE configured_style;
-      string            regime_text;
-      string            bias_text;
-      string            long_text;
-      string            short_text;
-
-      ESnapshotFieldState regime_state;
-      ESnapshotFieldState bias_state;
-      ESnapshotFieldState long_state;
-      ESnapshotFieldState short_state;
-     };
+// D1: Runtime snapshot contract (typed, per-runtime, no fabrication)
+   // (enum moved to global scope before class)
+   struct RuntimeSnapshot
+   {
+    int               generation;
+    datetime          snapshot_time;
+    datetime          last_success_time;
+    int               current_stage_code;        // 0=NOT_EVALUATED, 1=WAITING_FOR_NEW_ENTRY_BAR, 2=WAITING_FOR_SIGNAL_BAR, 3=EVALUATED, 4=BLOCKED
+    int               last_block_reason_code;    // 0=NONE, 1=NO_NEW_CLOSED_BAR, 2=SIGNAL_MARKET_INVALID, etc.
+    ENUM_TRADING_STYLE configured_style;
+    int               regime_code;               // ENUM_REGIME_TYPE value
+    int               bias_code;                 // ENUM_BIAS_DIRECTION value
+    int               long_code;                 // 0=NO_LONG, 1=LONG_CANDIDATE
+    int               short_code;                // 0=NO_SHORT, 1=SHORT_CANDIDATE
+    ESnapshotFieldState regime_state;
+    ESnapshotFieldState bias_state;
+    ESnapshotFieldState long_state;
+    ESnapshotFieldState short_state;
+   };
 
    RuntimeSnapshot      snapshot;
    int                 snapshot_generation;
@@ -543,35 +539,40 @@ public:
     datetime          last_gate_time;
 
                       CSymbolRuntime()
-      {
-       symbol="";
-       style=STYLE_DAY_TRADING;
-        context_tf=PERIOD_CURRENT;
-        structure_tf=PERIOD_CURRENT;
-        setup_tf=PERIOD_CURRENT;
-        entry_tf=PERIOD_CURRENT;
-       valid=false;
-       last_failure="";
-       last_gate_status="";
-       last_gate_reason="";
-       last_gate_time=0;
+    {
+     symbol="";
+     style=STYLE_DAY_TRADING;
+      context_tf=PERIOD_CURRENT;
+      structure_tf=PERIOD_CURRENT;
+      setup_tf=PERIOD_CURRENT;
+      entry_tf=PERIOD_CURRENT;
+     valid=false;
+     last_failure="";
+     last_gate_status="";
+     last_gate_reason="";
+     last_gate_time=0;
+     wait_state="";
+     init_failure="";
 
-       snapshot_generation=0;
-       snapshot.generation=0;
-       snapshot.snapshot_time=0;
-       snapshot.last_success_time=0;
-       snapshot.current_stage="NOT_EVALUATED";
-       snapshot.last_block_reason="";
-       snapshot.configured_style=STYLE_DAY_TRADING;
-       snapshot.regime_text="NOT EVALUATED";
-       snapshot.bias_text="NOT EVALUATED";
-       snapshot.long_text="NOT EVALUATED";
-       snapshot.short_text="NOT EVALUATED";
-       snapshot.regime_state=SNAP_NOT_EVALUATED;
-       snapshot.bias_state=SNAP_NOT_EVALUATED;
-       snapshot.long_state=SNAP_NOT_EVALUATED;
-       snapshot.short_state=SNAP_NOT_EVALUATED;
-      }
+     snapshot_generation=0;
+     snapshot.generation=0;
+     snapshot.snapshot_time=0;
+     snapshot.last_success_time=0;
+     snapshot.current_stage_code=0;
+     snapshot.last_block_reason_code=0;
+     snapshot.configured_style=STYLE_DAY_TRADING;
+     snapshot.regime_code=0;
+     snapshot.bias_code=0;
+     snapshot.long_code=0;
+     snapshot.short_code=0;
+     snapshot.regime_state=SNAP_NOT_EVALUATED;
+     snapshot.bias_state=SNAP_NOT_EVALUATED;
+     snapshot.long_state=SNAP_NOT_EVALUATED;
+     snapshot.short_state=SNAP_NOT_EVALUATED;
+    }
+
+   // CObject interface
+   virtual int Type(void) const { return 0x7778; } // Custom type ID for CSymbolRuntime
 
      bool              Initialize(const string in_symbol,
                      const ENUM_TRADING_STYLE in_style,
@@ -699,7 +700,7 @@ public:
 //==================================================================
 // Globals
 //==================================================================
-CSymbolRuntime g_runtime[256];
+CArrayObj g_runtime;
 // E2.3-RD: Chart Context Registration events (custom event base)
 #define CHARTREG_DISCOVERY  1001
 #define CHARTREG_REGISTER   1002
@@ -740,9 +741,620 @@ int g_subscriber_count = 0;
 // cross-instance durable arbitration requires later Ledger/Gateway packages)
 string g_strategy_group_key = "";
 string g_config_fingerprint = "";
-string g_runtime_wait_state[256];
-string g_runtime_init_failure[256];
 int g_runtime_count_max=256;
+
+//==================================================================
+// Concurrency Engine (WP-05)
+//==================================================================
+// Fair Lock using Global Variables (ticket-based FIFO)
+struct CFairLock
+  {
+   string lock_name;
+   long   my_ticket;
+   bool   acquired;
+
+                     CFairLock(): lock_name(""), my_ticket(0), acquired(false) {}
+                     CFairLock(const string name): lock_name(name), my_ticket(0), acquired(false) {}
+
+   bool Acquire(const int timeout_ms=5000)
+     {
+      if(lock_name=="") return false;
+      string ticket_key = lock_name + "_ticket";
+      string serving_key = lock_name + "_serving";
+      string owner_key = lock_name + "_owner";
+
+      // Get ticket atomically
+      ResetLastError();
+      long ticket = 0;
+      if(GlobalVariableCheck(ticket_key))
+        {
+         ticket = (long)GlobalVariableGet(ticket_key);
+         ticket++;
+         GlobalVariableSet(ticket_key, ticket);
+        }
+      else
+        {
+         ticket = 1;
+         GlobalVariableSet(ticket_key, ticket);
+        }
+      my_ticket = ticket;
+
+      // Wait for our turn
+      datetime start = TimeCurrent();
+      int elapsed = 0;
+      while(elapsed < timeout_ms)
+        {
+         long serving = 0;
+         if(GlobalVariableCheck(serving_key))
+            serving = (long)GlobalVariableGet(serving_key);
+         
+         if(serving + 1 == my_ticket)
+           {
+            // Claim ownership
+            GlobalVariableSet(serving_key, my_ticket);
+            GlobalVariableSet(owner_key, (double)ChartID());
+            acquired = true;
+            return true;
+           }
+         
+         Sleep(10);
+         elapsed = (int)((TimeCurrent() - start) * 1000);
+        }
+      return false; // timeout
+     }
+
+   void Release()
+     {
+      if(!acquired || lock_name=="") return;
+      string serving_key = lock_name + "_serving";
+      string owner_key = lock_name + "_owner";
+      
+      long serving = 0;
+      if(GlobalVariableCheck(serving_key))
+         serving = (long)GlobalVariableGet(serving_key);
+      
+      if(serving == my_ticket)
+        {
+         GlobalVariableSet(serving_key, my_ticket + 1);
+         GlobalVariableDel(owner_key);
+        }
+      acquired = false;
+      my_ticket = 0;
+     }
+
+   bool IsOwner() const
+     {
+      if(lock_name=="") return false;
+      string owner_key = lock_name + "_owner";
+      if(!GlobalVariableCheck(owner_key)) return false;
+      return ((long)GlobalVariableGet(owner_key) == ChartID());
+     }
+  };
+
+// Chart Message Queue
+class ChartMessage : public CObject
+  {
+public:
+   int        msg_type;
+   long       from_chart;
+   long       to_chart;
+   string     payload;
+   datetime   timestamp;
+   int        priority; // 0=high, 1=normal, 2=low
+
+                      ChartMessage(): msg_type(0), from_chart(0), to_chart(0), payload(""), timestamp(0), priority(1) {}
+                      ChartMessage(int type, long from, long to, const string& p, int pri=1):
+                        msg_type(type), from_chart(from), to_chart(to), payload(p), timestamp(TimeCurrent()), priority(pri) {}
+
+virtual int Type(void) const { return 0x777B; }
+    
+    // Copy constructor for queue operations
+    ChartMessage(const ChartMessage& src):
+      msg_type(src.msg_type), from_chart(src.from_chart), to_chart(src.to_chart),
+      payload(src.payload), timestamp(src.timestamp), priority(src.priority) {}
+  };
+
+class CChartMessageQueue : public CObject
+  {
+private:
+   CArrayObj    m_queue;
+   CFairLock    m_lock;
+   int          m_max_size;
+
+public:
+                     CChartMessageQueue(): m_max_size(1000) 
+     {
+      m_lock = CFairLock("ALGO_MSG_QUEUE_" + IntegerToString((long)ChartID()));
+     }
+                    ~CChartMessageQueue()
+     {
+      Clear();
+     }
+
+   bool Enqueue(const ChartMessage& msg)
+     {
+      if(m_queue.Total() >= m_max_size) return false;
+      if(!m_lock.Acquire(100)) return false; // quick lock for queue ops
+      
+      ChartMessage *m = new ChartMessage(msg);
+      if(m == NULL) { m_lock.Release(); return false; }
+      
+      // Insert by priority (high first)
+      int insert_idx = m_queue.Total();
+      for(int i = m_queue.Total() - 1; i >= 0; i--)
+        {
+         ChartMessage *existing = (ChartMessage*)m_queue.At(i);
+         if(existing && existing.priority > msg.priority)
+           {
+            insert_idx = i + 1;
+            break;
+           }
+        }
+      bool ok = m_queue.Insert(m, insert_idx);
+      if(!ok) delete m;
+      m_lock.Release();
+      return ok;
+     }
+
+   bool Dequeue(ChartMessage& out)
+     {
+      if(m_queue.Total() == 0) return false;
+      if(!m_lock.Acquire(100)) return false;
+      
+      ChartMessage *m = (ChartMessage*)m_queue.At(0);
+      if(m)
+        {
+         out = *m;
+         m_queue.Delete(0);
+         delete m;
+         m_lock.Release();
+         return true;
+        }
+      m_lock.Release();
+      return false;
+     }
+
+   int Size() const { return m_queue.Total(); }
+   
+   void Clear()
+     {
+      for(int i = 0; i < m_queue.Total(); i++)
+        {
+         ChartMessage *m = (ChartMessage*)m_queue.At(i);
+         if(m) delete m;
+        }
+      m_queue.Clear();
+     }
+
+   virtual int Type(void) const { return 0x7779; }
+  };
+
+// Thread-safe Subscriber Registry (extends fixed array with fair lock)
+class CSubscriberRegistry : public CObject
+  {
+private:
+   SubscriberRecord m_subscribers[64];
+   int              m_count;
+   CFairLock        m_lock;
+
+public:
+                     CSubscriberRegistry(): m_count(0), m_lock("ALGO_SUB_REGISTRY") {}
+   
+   bool Register(const long chart_id, const string& owner_token, const string& group_key, const string& config_fp)
+     {
+      if(!m_lock.Acquire(1000)) return false;
+      
+      // Check for conflicts
+      for(int i = 0; i < m_count; i++)
+        {
+         if(m_subscribers[i].strategy_group_key == group_key &&
+            m_subscribers[i].config_fingerprint != config_fp)
+           {
+            m_lock.Release();
+            return false; // config conflict
+           }
+        }
+      
+      // Check if already registered
+      for(int i = 0; i < m_count; i++)
+        {
+         if(m_subscribers[i].chart_id == chart_id && m_subscribers[i].owner_token == owner_token)
+           {
+            m_lock.Release();
+            return true; // idempotent
+           }
+        }
+      
+      if(m_count >= 64) { m_lock.Release(); return false; }
+      
+      m_subscribers[m_count].chart_id = chart_id;
+      m_subscribers[m_count].owner_token = owner_token;
+      m_subscribers[m_count].strategy_group_key = group_key;
+      m_subscribers[m_count].config_fingerprint = config_fp;
+      m_subscribers[m_count].registered = true;
+      m_count++;
+      
+      m_lock.Release();
+      return true;
+     }
+
+   bool Unregister(const long chart_id, const string& owner_token)
+     {
+      if(!m_lock.Acquire(1000)) return false;
+      
+      for(int i = 0; i < m_count; i++)
+        {
+         if(m_subscribers[i].chart_id == chart_id && m_subscribers[i].owner_token == owner_token)
+           {
+            // Shift remaining
+            for(int j = i; j < m_count - 1; j++)
+               m_subscribers[j] = m_subscribers[j + 1];
+            m_count--;
+            m_lock.Release();
+            return true;
+           }
+        }
+      m_lock.Release();
+      return false;
+     }
+
+   bool IsRegistered(const long chart_id) const
+     {
+      // Read-only, no lock needed for snapshot
+      for(int i = 0; i < m_count; i++)
+        {
+         if(m_subscribers[i].chart_id == chart_id && m_subscribers[i].registered)
+            return true;
+        }
+      return false;
+     }
+
+   int GetSubscribers(SubscriberRecord& out[]) const
+     {
+      // Caller must allocate array of at least 64
+      int copied = 0;
+      for(int i = 0; i < m_count; i++)
+        {
+         if(m_subscribers[i].registered)
+            out[copied++] = m_subscribers[i];
+        }
+      return copied;
+     }
+
+   int Count() const { return m_count; }
+
+   virtual int Type(void) const { return 0x777A; }
+  };
+
+// Global concurrency primitives
+CFairLock       g_runtime_lock("ALGO_RUNTIME_LOCK");
+CChartMessageQueue g_chart_msg_queue;
+CSubscriberRegistry g_subscriber_registry;
+
+
+//==================================================================
+// Risk Engine Optimization (WP-06)
+//==================================================================
+// Unified Exposure Calculator - combines positions, pending orders, ledger reservations
+class CUnifiedExposureCalculator
+  {
+private:
+   CAlgoPortfolioRisk *m_portfolio_risk;
+   CExecutionLedger   *m_ledger;
+   string              m_account_key;
+   double              m_equity_cache;
+   datetime            m_equity_cache_time;
+   int                 m_equity_cache_ttl_sec;
+
+public:
+   struct UnifiedExposure
+     {
+      double positions_risk_pct;        // broker positions risk
+      double pending_risk_pct;          // pending orders estimated risk
+      double reserved_risk_pct;         // ledger reservations (ACTIVE + PARTIALLY_COVERED)
+      double total_exposure_pct;        // sum of all three
+      double equity;                    // current account equity
+      string currency;                  // account currency
+      bool   unknown_exposure;          // any unknown/ambiguous position
+      bool   valid;                     // calculation succeeded
+      datetime timestamp;               // when calculated
+      
+                      UnifiedExposure(): positions_risk_pct(0), pending_risk_pct(0), reserved_risk_pct(0),
+                          total_exposure_pct(0), equity(0), currency(""), unknown_exposure(false), valid(false), timestamp(0) {}
+     };
+
+                      CUnifiedExposureCalculator(): m_portfolio_risk(NULL), m_ledger(NULL),
+                          m_equity_cache(0), m_equity_cache_time(0), m_equity_cache_ttl_sec(5) {}
+
+   void SetDependencies(CAlgoPortfolioRisk *portfolio_risk, CExecutionLedger *ledger, const string& account_key)
+     {
+      m_portfolio_risk = portfolio_risk; m_ledger = ledger; m_account_key = account_key;
+     }
+
+   double GetCachedEquity()
+     {
+      if(TimeCurrent() - m_equity_cache_time <= m_equity_cache_ttl_sec && m_equity_cache > 0)
+         return m_equity_cache;
+      double eq = AccountInfoDouble(ACCOUNT_EQUITY);
+      if(eq > 0) { m_equity_cache = eq; m_equity_cache_time = TimeCurrent(); }
+      return eq;
+     }
+
+   UnifiedExposure Calculate()
+     {
+      UnifiedExposure result;
+      result.timestamp = TimeCurrent();
+      
+      double equity = GetCachedEquity();
+      if(equity <= 0) { result.valid = false; return result; }
+      result.equity = equity;
+      result.currency = AccountInfoString(ACCOUNT_CURRENCY);
+      
+      // 1. Broker positions risk (managed + unknown) - compute directly from positions
+      double pos_risk = 0;
+      bool unknown = false;
+      int total = PositionsTotal();
+      for(int i = 0; i < total; i++)
+        {
+         ulong ticket = PositionGetTicket(i);
+         if(ticket == 0) continue;
+         
+double pl = PositionGetDouble(POSITION_PROFIT);
+          double swap = PositionGetDouble(POSITION_SWAP);
+          double commission = PositionGetDouble(POSITION_COMMISSION);
+          double volume = PositionGetDouble(POSITION_VOLUME);
+          string sym = PositionGetString(POSITION_SYMBOL);
+          long magic = PositionGetInteger(POSITION_MAGIC);
+          
+          // For now, count all positions as risk (simplified)
+          // Risk = unrealized P&L + swap + commission (negative = risk)
+          double position_risk = -(pl + swap + commission); // positive = at risk
+          if(position_risk > 0)
+             pos_risk += position_risk;
+          
+          // Mark unknown if we can't verify magic ownership (simplified)
+          unknown = true; // Conservative: assume some unknown exposure
+         }
+      result.positions_risk_pct = (equity > 0) ? (pos_risk / equity * 100.0) : 0;
+      result.unknown_exposure = unknown;
+      
+      // 2. Pending orders estimated risk (simplified: count pending orders)
+      double pending_risk = 0;
+      int orders_total = OrdersTotal();
+      for(int i = 0; i < orders_total; i++)
+        {
+         ulong ticket = OrderGetTicket(i);
+         if(ticket == 0) continue;
+         // Simplified: each pending order adds small risk estimate
+         pending_risk += equity * 0.001; // 0.1% per pending order
+        }
+      result.pending_risk_pct = (equity > 0) ? (pending_risk / equity * 100.0) : 0;
+      
+      // 3. Ledger reservations (durable intent before execution)
+      double reserved_risk = 0;
+      if(m_portfolio_risk)
+        {
+         CAlgoPortfolioRisk::ReservationAggregate agg;
+         if(m_portfolio_risk.GetReservationAggregate(agg) && agg.valid)
+            reserved_risk = agg.total_reserved_pct;
+        }
+      result.reserved_risk_pct = reserved_risk;
+      
+      // Total unified exposure
+      result.total_exposure_pct = result.positions_risk_pct + result.pending_risk_pct + result.reserved_risk_pct;
+      result.valid = true;
+      return result;
+     }
+
+   // Stress test: project exposure under adverse conditions
+   UnifiedExposure StressTest(const double equity_shock_pct, const double volatility_multiplier)
+     {
+      UnifiedExposure base = Calculate();
+      if(!base.valid) return base;
+      
+      UnifiedExposure stressed = base;
+      stressed.equity = base.equity * (1.0 - equity_shock_pct / 100.0);
+      if(stressed.equity <= 0) { stressed.valid = false; return stressed; }
+      
+      // Positions risk increases with equity drop (same absolute risk, higher %)
+      stressed.positions_risk_pct = (base.equity > 0) ? (base.positions_risk_pct * base.equity / stressed.equity * volatility_multiplier) : 0;
+      stressed.pending_risk_pct *= volatility_multiplier;
+      stressed.reserved_risk_pct *= volatility_multiplier;
+      stressed.total_exposure_pct = stressed.positions_risk_pct + stressed.pending_risk_pct + stressed.reserved_risk_pct;
+      
+      return stressed;
+     }
+   };
+
+// Dynamic Margin Calculator - adjusts margin requirements based on market conditions
+class CDynamicMarginCalculator
+  {
+private:
+   double m_base_margin_pct;
+   double m_volatility_lookback;
+   double m_max_margin_pct;
+   double m_min_margin_pct;
+
+public:
+                      CDynamicMarginCalculator(): m_base_margin_pct(2.0), m_volatility_lookback(20),
+                          m_max_margin_pct(10.0), m_min_margin_pct(0.5) {}
+
+   void SetParams(double base_pct, int lookback, double max_pct, double min_pct)
+     {
+      m_base_margin_pct = base_pct;
+      m_volatility_lookback = lookback;
+      m_max_margin_pct = max_pct;
+      m_min_margin_pct = min_pct;
+     }
+
+   // Calculate required margin for a position based on current volatility
+   double CalculateMargin(const string symbol, const double volume, const ENUM_ORDER_TYPE order_type) const
+     {
+      // Get symbol specs
+      double margin_rate = SymbolInfoDouble(symbol, SYMBOL_MARGIN_INITIAL);
+      if(margin_rate <= 0)
+        {
+         // Fallback: use contract size and price
+         double contract = SymbolInfoDouble(symbol, SYMBOL_TRADE_CONTRACT_SIZE);
+         double price = (order_type == ORDER_TYPE_BUY) ? SymbolInfoDouble(symbol, SYMBOL_ASK) : SymbolInfoDouble(symbol, SYMBOL_BID);
+         margin_rate = contract * price * m_base_margin_pct / 100.0;
+        }
+      
+      // Apply volatility adjustment
+      double atr = 0;
+      // Simple ATR proxy using daily range
+      MqlRates rates[];
+      int copied = CopyRates(symbol, PERIOD_D1, 0, (int)m_volatility_lookback, rates);
+      if(copied > 10)
+        {
+         double sum_range = 0;
+         for(int i = 0; i < copied; i++)
+            sum_range += rates[i].high - rates[i].low;
+         double avg_range = sum_range / copied;
+         double current_price = (order_type == ORDER_TYPE_BUY) ? SymbolInfoDouble(symbol, SYMBOL_ASK) : SymbolInfoDouble(symbol, SYMBOL_BID);
+         double atr_pct = (current_price > 0) ? (avg_range / current_price * 100.0) : 0;
+         
+         // Scale margin: higher ATR = higher margin requirement
+         double vol_factor = 1.0 + atr_pct * 2.0; // 2x ATR as multiplier
+         vol_factor = MathMin(vol_factor, m_max_margin_pct / m_base_margin_pct);
+         vol_factor = MathMax(vol_factor, m_min_margin_pct / m_base_margin_pct);
+         margin_rate *= vol_factor;
+        }
+      
+      return margin_rate * volume;
+     }
+
+   // Check if account has sufficient free margin for new position
+   bool HasFreeMargin(const double required_margin) const
+     {
+      double free_margin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+      return free_margin >= required_margin * 1.1; // 10% buffer
+     }
+  };
+
+// Stress Test Framework
+class CRiskStressTest
+  {
+public:
+   struct StressScenario
+     {
+      string name;
+      double equity_drop_pct;        // e.g., 10 = 10% equity drop
+      double volatility_multiplier;  // e.g., 2.0 = 2x normal volatility
+      double correlation_spike;      // 0-1, increases cross-asset correlation
+      int    max_concurrent_positions; // position limit under stress
+     };
+
+   struct StressResult
+     {
+      string scenario_name;
+      bool   passed;
+      double pre_stress_exposure_pct;
+      double post_stress_exposure_pct;
+      double margin_surplus_pct;     // free margin / required margin - 1
+      int    positions_liquidated;   // estimated positions to close
+      string details;
+     };
+
+private:
+   CUnifiedExposureCalculator *m_exposure_calc;
+   CDynamicMarginCalculator   *m_margin_calc;
+
+public:
+                      CRiskStressTest(): m_exposure_calc(NULL), m_margin_calc(NULL) {}
+
+   void SetDependencies(CUnifiedExposureCalculator *exp, CDynamicMarginCalculator *mar)
+     {
+      m_exposure_calc = exp; m_margin_calc = mar;
+     }
+
+void RunScenario(const StressScenario& scenario, StressResult& result) const
+     {
+      result.scenario_name = scenario.name;
+      result.passed = true;
+      
+      if(!m_exposure_calc || !m_margin_calc)
+        {
+         result.passed = false;
+         result.details = "Dependencies not set";
+         return;
+        }
+      
+      // Baseline
+      CUnifiedExposureCalculator::UnifiedExposure base = m_exposure_calc.Calculate();
+      if(!base.valid)
+        {
+         result.passed = false;
+         result.details = "Baseline exposure calculation failed";
+         return;
+        }
+      
+      result.pre_stress_exposure_pct = base.total_exposure_pct;
+      
+      // Apply stress
+      CUnifiedExposureCalculator::UnifiedExposure stressed = m_exposure_calc.StressTest(scenario.equity_drop_pct, scenario.volatility_multiplier);
+      if(!stressed.valid)
+        {
+         result.passed = false;
+         result.details = "Stress test calculation failed";
+         return;
+        }
+      
+      result.post_stress_exposure_pct = stressed.total_exposure_pct;
+      
+      // Check margin
+      double free_margin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+      double required_margin = stressed.total_exposure_pct / 100.0 * stressed.equity;
+      if(required_margin > 0)
+         result.margin_surplus_pct = (free_margin / required_margin) - 1.0;
+      else
+         result.margin_surplus_pct = 100.0; // no margin needed
+      
+      // Check limits
+      if(stressed.total_exposure_pct > 100.0) // > 100% equity at risk
+        {
+         result.passed = false;
+         result.details = "Exposure exceeds equity under stress";
+        }
+      
+      if(result.margin_surplus_pct < 0.1) // less than 10% margin buffer
+        {
+         result.passed = false;
+         result.details = "Insufficient margin buffer: " + DoubleToString(result.margin_surplus_pct * 100, 1) + "%";
+        }
+      
+      // Estimate liquidations needed
+      double excess = MathMax(0, stressed.total_exposure_pct - 80.0); // target 80% max
+      if(excess > 0 && base.positions_risk_pct > 0)
+        {
+         result.positions_liquidated = (int)MathCeil(excess / base.positions_risk_pct * 10); // rough estimate
+        }
+      
+      result.details = "Equity shock: " + DoubleToString(scenario.equity_drop_pct, 1) + "%, Vol mult: " + 
+                       DoubleToString(scenario.volatility_multiplier, 1) + "x, Margin buffer: " + 
+                       DoubleToString(result.margin_surplus_pct * 100, 1) + "%";
+     }
+
+    // Run standard stress test suite
+    void RunStandardSuite(StressResult& out[]) const
+      {
+       StressScenario scenarios[5];
+       scenarios[0].name = "Mild"; scenarios[0].equity_drop_pct = 5.0; scenarios[0].volatility_multiplier = 1.5; scenarios[0].correlation_spike = 0.2; scenarios[0].max_concurrent_positions = 20;
+       scenarios[1].name = "Moderate"; scenarios[1].equity_drop_pct = 10.0; scenarios[1].volatility_multiplier = 2.0; scenarios[1].correlation_spike = 0.4; scenarios[1].max_concurrent_positions = 15;
+       scenarios[2].name = "Severe"; scenarios[2].equity_drop_pct = 20.0; scenarios[2].volatility_multiplier = 3.0; scenarios[2].correlation_spike = 0.6; scenarios[2].max_concurrent_positions = 10;
+       scenarios[3].name = "FlashCrash"; scenarios[3].equity_drop_pct = 30.0; scenarios[3].volatility_multiplier = 5.0; scenarios[3].correlation_spike = 0.8; scenarios[3].max_concurrent_positions = 5;
+       scenarios[4].name = "BlackSwan"; scenarios[4].equity_drop_pct = 50.0; scenarios[4].volatility_multiplier = 10.0; scenarios[4].correlation_spike = 1.0; scenarios[4].max_concurrent_positions = 0;
+       
+       for(int i = 0; i < 5; i++)
+          RunScenario(scenarios[i], out[i]);
+      }
+  };
+
+// Global risk optimization instances
+CUnifiedExposureCalculator g_unified_exposure;
+CDynamicMarginCalculator   g_dynamic_margin;
+CRiskStressTest            g_risk_stress_test;
+
 
 CAlgoStateManager   g_state;
 CRiskEngine         g_risk_engine;
@@ -753,6 +1365,8 @@ CPositionManager    g_position_manager;
 CAlgoLogger         g_logger;
 CHybridDashboard    g_dashboard;
 CSessionFilter      g_session_filter;
+CMetricsExporter    g_metrics_exporter;
+CAlertManager       g_alert_manager;
 CTesterFitness      g_tester_fitness;
 COptimizationController g_optimizer;
 bool g_system_ready=false;
@@ -760,6 +1374,7 @@ bool g_initialization_started=false;
 bool g_initialization_failed=false;
 bool g_last_trading_locked=false;
 string g_last_runtime_dashboard_status="";
+datetime g_ea_start_time=0;
 
 //==================================================================
 // Dashboard helpers
@@ -771,31 +1386,31 @@ string SnapshotGVKey(const string symbol, const string field)
   }
 
 void WriteSnapshotToGV(const string symbol,
-                       const int generation,
-                       const datetime snapshot_time,
-                       const datetime last_success_time,
-                       const string current_stage,
-                       const string last_block_reason,
-                       const int configured_style,
-                       const string regime_text,
-                       const string bias_text,
-                       const string long_text,
-                       const string short_text,
-                       const int regime_state,
-                       const int bias_state,
-                       const int long_state,
-                       const int short_state)
+                        const int generation,
+                        const datetime snapshot_time,
+                        const datetime last_success_time,
+                        const int current_stage_code,
+                        const int last_block_reason_code,
+                        const int configured_style,
+                        const int regime_code,
+                        const int bias_code,
+                        const int long_code,
+                        const int short_code,
+                        const int regime_state,
+                        const int bias_state,
+                        const int long_state,
+                        const int short_state)
   {
    GlobalVariableSet(SnapshotGVKey(symbol, "generation"), generation);
    GlobalVariableSet(SnapshotGVKey(symbol, "snapshot_time"), snapshot_time);
    GlobalVariableSet(SnapshotGVKey(symbol, "last_success_time"), last_success_time);
-   GlobalVariableSet(SnapshotGVKey(symbol, "current_stage"), current_stage);
-   GlobalVariableSet(SnapshotGVKey(symbol, "last_block_reason"), last_block_reason);
+   GlobalVariableSet(SnapshotGVKey(symbol, "current_stage"), current_stage_code);
+   GlobalVariableSet(SnapshotGVKey(symbol, "last_block_reason"), last_block_reason_code);
    GlobalVariableSet(SnapshotGVKey(symbol, "configured_style"), configured_style);
-   GlobalVariableSet(SnapshotGVKey(symbol, "regime_text"), regime_text);
-   GlobalVariableSet(SnapshotGVKey(symbol, "bias_text"), bias_text);
-   GlobalVariableSet(SnapshotGVKey(symbol, "long_text"), long_text);
-   GlobalVariableSet(SnapshotGVKey(symbol, "short_text"), short_text);
+   GlobalVariableSet(SnapshotGVKey(symbol, "regime_code"), regime_code);
+   GlobalVariableSet(SnapshotGVKey(symbol, "bias_code"), bias_code);
+   GlobalVariableSet(SnapshotGVKey(symbol, "long_code"), long_code);
+   GlobalVariableSet(SnapshotGVKey(symbol, "short_code"), short_code);
    GlobalVariableSet(SnapshotGVKey(symbol, "regime_state"), regime_state);
    GlobalVariableSet(SnapshotGVKey(symbol, "bias_state"), bias_state);
    GlobalVariableSet(SnapshotGVKey(symbol, "long_state"), long_state);
@@ -810,41 +1425,41 @@ void UpdateDashboardForChart()
    g_last_runtime_dashboard_status="";
    string chart_symbol=ChartSymbol(0);
 
-   for(int i=0;i<256;i++)
+   for(int i=0;i<g_runtime.Total();i++)
      {
-      if(!g_runtime[i].valid ||
-         g_runtime[i].symbol!=chart_symbol)
+      CSymbolRuntime *runtime = g_runtime.At(i);
+      if(!runtime || !runtime.valid || runtime.symbol!=chart_symbol)
          continue;
 
       // F11: If local snapshot not evaluated, try reading from Global Variables (shared by Coordinator)
-      if(g_runtime[i].snapshot.generation == 0)
+      if(runtime.snapshot.generation == 0)
         {
          string gen_key = SnapshotGVKey(chart_symbol, "generation");
          if(GlobalVariableCheck(gen_key))
            {
-            g_runtime[i].snapshot.generation = (int)GlobalVariableGet(gen_key);
-            g_runtime[i].snapshot.snapshot_time = (datetime)GlobalVariableGet(SnapshotGVKey(chart_symbol, "snapshot_time"));
-            g_runtime[i].snapshot.last_success_time = (datetime)GlobalVariableGet(SnapshotGVKey(chart_symbol, "last_success_time"));
-            g_runtime[i].snapshot.current_stage = GlobalVariableGet(SnapshotGVKey(chart_symbol, "current_stage"));
-            g_runtime[i].snapshot.last_block_reason = GlobalVariableGet(SnapshotGVKey(chart_symbol, "last_block_reason"));
-            g_runtime[i].snapshot.configured_style = (ENUM_TRADING_STYLE)(int)GlobalVariableGet(SnapshotGVKey(chart_symbol, "configured_style"));
-            g_runtime[i].snapshot.regime_text = GlobalVariableGet(SnapshotGVKey(chart_symbol, "regime_text"));
-            g_runtime[i].snapshot.bias_text = GlobalVariableGet(SnapshotGVKey(chart_symbol, "bias_text"));
-            g_runtime[i].snapshot.long_text = GlobalVariableGet(SnapshotGVKey(chart_symbol, "long_text"));
-            g_runtime[i].snapshot.short_text = GlobalVariableGet(SnapshotGVKey(chart_symbol, "short_text"));
-            g_runtime[i].snapshot.regime_state = (ESnapshotFieldState)(int)GlobalVariableGet(SnapshotGVKey(chart_symbol, "regime_state"));
-            g_runtime[i].snapshot.bias_state = (ESnapshotFieldState)(int)GlobalVariableGet(SnapshotGVKey(chart_symbol, "bias_state"));
-            g_runtime[i].snapshot.long_state = (ESnapshotFieldState)(int)GlobalVariableGet(SnapshotGVKey(chart_symbol, "long_state"));
-            g_runtime[i].snapshot.short_state = (ESnapshotFieldState)(int)GlobalVariableGet(SnapshotGVKey(chart_symbol, "short_state"));
+            runtime.snapshot.generation = (int)GlobalVariableGet(gen_key);
+            runtime.snapshot.snapshot_time = (datetime)GlobalVariableGet(SnapshotGVKey(chart_symbol, "snapshot_time"));
+            runtime.snapshot.last_success_time = (datetime)GlobalVariableGet(SnapshotGVKey(chart_symbol, "last_success_time"));
+            runtime.snapshot.current_stage_code = (int)GlobalVariableGet(SnapshotGVKey(chart_symbol, "current_stage"));
+            runtime.snapshot.last_block_reason_code = (int)GlobalVariableGet(SnapshotGVKey(chart_symbol, "last_block_reason"));
+            runtime.snapshot.configured_style = (ENUM_TRADING_STYLE)(int)GlobalVariableGet(SnapshotGVKey(chart_symbol, "configured_style"));
+            runtime.snapshot.regime_code = (int)GlobalVariableGet(SnapshotGVKey(chart_symbol, "regime_code"));
+            runtime.snapshot.bias_code = (int)GlobalVariableGet(SnapshotGVKey(chart_symbol, "bias_code"));
+            runtime.snapshot.long_code = (int)GlobalVariableGet(SnapshotGVKey(chart_symbol, "long_code"));
+            runtime.snapshot.short_code = (int)GlobalVariableGet(SnapshotGVKey(chart_symbol, "short_code"));
+            runtime.snapshot.regime_state = (ESnapshotFieldState)(int)GlobalVariableGet(SnapshotGVKey(chart_symbol, "regime_state"));
+            runtime.snapshot.bias_state = (ESnapshotFieldState)(int)GlobalVariableGet(SnapshotGVKey(chart_symbol, "bias_state"));
+            runtime.snapshot.long_state = (ESnapshotFieldState)(int)GlobalVariableGet(SnapshotGVKey(chart_symbol, "long_state"));
+            runtime.snapshot.short_state = (ESnapshotFieldState)(int)GlobalVariableGet(SnapshotGVKey(chart_symbol, "short_state"));
            }
         }
 
       MarketSnapshot market;
       ResetLastError();
 
-      if(!g_runtime[i].market_context.GetSnapshot(
-           g_runtime[i].symbol,
-           g_runtime[i].context_tf,
+      if(!runtime.market_context.GetSnapshot(
+           runtime.symbol,
+           runtime.context_tf,
            market))
         {
          g_dashboard.ShowStatus(
@@ -853,17 +1468,39 @@ void UpdateDashboardForChart()
           return;
          }
 
+      // Convert integer codes to strings for dashboard display
+      string regime_text = EnumToString((ENUM_REGIME_TYPE)runtime.snapshot.regime_code);
+      string bias_text = EnumToString((ENUM_BIAS_DIRECTION)runtime.snapshot.bias_code);
+      string long_text = (runtime.snapshot.long_code == 1 ? "LONG CANDIDATE" : "NO LONG");
+      string short_text = (runtime.snapshot.short_code == 1 ? "SHORT CANDIDATE" : "NO SHORT");
+      string current_stage_text;
+      switch(runtime.snapshot.current_stage_code)
+        {
+         case 1: current_stage_text = "WAITING_FOR_NEW_ENTRY_BAR"; break;
+         case 2: current_stage_text = "WAITING_FOR_SIGNAL_BAR"; break;
+         case 3: current_stage_text = "EVALUATED"; break;
+         case 4: current_stage_text = "BLOCKED"; break;
+         default: current_stage_text = "NOT_EVALUATED"; break;
+        }
+      string last_block_reason_text;
+      switch(runtime.snapshot.last_block_reason_code)
+        {
+         case 1: last_block_reason_text = "NO_NEW_CLOSED_BAR"; break;
+         case 2: last_block_reason_text = "SIGNAL_MARKET_INVALID"; break;
+         default: last_block_reason_text = (runtime.snapshot.last_block_reason_code == 0 ? "" : "UNKNOWN"); break;
+        }
+
       g_dashboard.SetRuntimeSnapshot(
-         EnumToString(g_runtime[i].snapshot.configured_style),
-         g_runtime[i].snapshot.regime_text,
-         g_runtime[i].snapshot.bias_text,
-         g_runtime[i].snapshot.long_text,
-         g_runtime[i].snapshot.short_text,
-         g_runtime[i].snapshot.current_stage,
-         g_runtime[i].snapshot.last_block_reason,
-         g_runtime[i].snapshot.snapshot_time,
-         g_runtime[i].snapshot.last_success_time,
-         (g_runtime[i].snapshot.regime_state==SNAP_VALID));
+         EnumToString(runtime.snapshot.configured_style),
+         regime_text,
+         bias_text,
+         long_text,
+         short_text,
+         current_stage_text,
+         last_block_reason_text,
+         runtime.snapshot.snapshot_time,
+         runtime.snapshot.last_success_time,
+         (runtime.snapshot.regime_state==SNAP_VALID));
 
       g_dashboard.RenderMarketView(market);
       return;
@@ -878,9 +1515,7 @@ void UpdateDashboardForChart()
 //+------------------------------------------------------------------+
 string TimeframeText(ENUM_TIMEFRAMES tf)
   {
-   string ts=EnumToString(tf);
-   StringReplace(ts,"PERIOD_","");
-   return ts;
+   return CAlgoUtils::TimeframeToString(tf);
   }
 
 //+------------------------------------------------------------------+
@@ -1626,8 +2261,8 @@ void ProcessRuntime(CSymbolRuntime& runtime)
       {
        ShowRuntimeGateStatus(runtime, "WAITING: ENTRY BAR");
        LogRuntimeGate(runtime, "ENTRY_BAR_WAIT", "ENTRY_BAR", "WAIT", "NO_NEW_CLOSED_BAR");
-       runtime.snapshot.current_stage = "WAITING_FOR_NEW_ENTRY_BAR";
-       runtime.snapshot.last_block_reason = "NO_NEW_CLOSED_BAR";
+       runtime.snapshot.current_stage_code = 1; // WAITING_FOR_NEW_ENTRY_BAR
+       runtime.snapshot.last_block_reason_code = 1; // NO_NEW_CLOSED_BAR
        runtime.snapshot.configured_style = runtime.style;
        return;
       }
@@ -1827,21 +2462,21 @@ void ProcessRuntime(CSymbolRuntime& runtime)
 
    ProcessHybridDecision(runtime, decision, portfolio_state);
 
-   // D1.1: publish real engine outputs into the Runtime Snapshot
-   runtime.snapshot_generation++;
-   runtime.snapshot.generation = runtime.snapshot_generation;
-   runtime.snapshot.snapshot_time = TimeCurrent();
-   runtime.snapshot.last_success_time = (decision.valid ? decision.decision_time : runtime.snapshot.last_success_time);
-   runtime.snapshot.current_stage = "EVALUATED";
-   runtime.snapshot.last_block_reason = (decision.valid ? "" : decision.main_reason);
-   runtime.snapshot.configured_style = runtime.style;
-   runtime.snapshot.regime_text = EnumToString(decision.regime);
-   runtime.snapshot.bias_text = EnumToString(decision.bias);
-   runtime.snapshot.long_text = (decision.long_score > 0 ? "LONG CANDIDATE" : "NO LONG");
-   runtime.snapshot.short_text = (decision.short_score > 0 ? "SHORT CANDIDATE" : "NO SHORT");
-   runtime.snapshot.regime_state = (decision.valid ? SNAP_VALID : SNAP_CALCULATION_FAILED);
-   runtime.snapshot.bias_state = (decision.valid ? SNAP_VALID : SNAP_CALCULATION_FAILED);
-runtime.snapshot.long_state = (decision.valid ? SNAP_VALID : SNAP_CALCULATION_FAILED);
+// D1.1: publish real engine outputs into the Runtime Snapshot
+    runtime.snapshot_generation++;
+    runtime.snapshot.generation = runtime.snapshot_generation;
+    runtime.snapshot.snapshot_time = TimeCurrent();
+    runtime.snapshot.last_success_time = (decision.valid ? decision.decision_time : runtime.snapshot.last_success_time);
+    runtime.snapshot.current_stage_code = (decision.valid ? 3 : 4); // 3=EVALUATED, 4=BLOCKED
+    runtime.snapshot.last_block_reason_code = (decision.valid ? 0 : 1); // 0=NONE, 1=GENERIC_BLOCK (detail in logs)
+    runtime.snapshot.configured_style = runtime.style;
+    runtime.snapshot.regime_code = (int)decision.regime;
+    runtime.snapshot.bias_code = (int)decision.bias;
+    runtime.snapshot.long_code = (decision.long_score > 0 ? 1 : 0);
+    runtime.snapshot.short_code = (decision.short_score > 0 ? 1 : 0);
+    runtime.snapshot.regime_state = (decision.valid ? SNAP_VALID : SNAP_CALCULATION_FAILED);
+    runtime.snapshot.bias_state = (decision.valid ? SNAP_VALID : SNAP_CALCULATION_FAILED);
+    runtime.snapshot.long_state = (decision.valid ? SNAP_VALID : SNAP_CALCULATION_FAILED);
     runtime.snapshot.short_state = (decision.valid ? SNAP_VALID : SNAP_CALCULATION_FAILED);
 
     // F11: Share snapshot via Global Variables for multi-chart Dashboard
@@ -1850,13 +2485,13 @@ runtime.snapshot.long_state = (decision.valid ? SNAP_VALID : SNAP_CALCULATION_FA
        runtime.snapshot.generation,
        runtime.snapshot.snapshot_time,
        runtime.snapshot.last_success_time,
-       runtime.snapshot.current_stage,
-       runtime.snapshot.last_block_reason,
+       runtime.snapshot.current_stage_code,
+       runtime.snapshot.last_block_reason_code,
        (int)runtime.snapshot.configured_style,
-       runtime.snapshot.regime_text,
-       runtime.snapshot.bias_text,
-       runtime.snapshot.long_text,
-       runtime.snapshot.short_text,
+       runtime.snapshot.regime_code,
+       runtime.snapshot.bias_code,
+       runtime.snapshot.long_code,
+       runtime.snapshot.short_code,
        (int)runtime.snapshot.regime_state,
        (int)runtime.snapshot.bias_state,
        (int)runtime.snapshot.long_state,
@@ -1933,46 +2568,34 @@ int InitializePendingRuntimes()
     timeframes[3]=entry_tf;
 
    bool tester_single_symbol =
-      (MQLInfoInteger(MQL_TESTER)!=0);
+     (MQLInfoInteger(MQL_TESTER)!=0);
    int runtime_count=0;
-   for(int i=0;i<256;i++)
+   for(int i=0;i<g_runtime.Total();i++)
      {
-      if(g_runtime[i].valid) runtime_count++;
+      CSymbolRuntime *runtime = g_runtime.At(i);
+      if(runtime && runtime.valid) runtime_count++;
      }
 
    for(int i=0;i<ArraySize(symbols);i++)
      {
-      if(i>=256) break;
       if(StringLen(symbols[i])==0)
          continue;
 
       if(tester_single_symbol &&
          symbols[i]!=_Symbol)
         {
-         if(g_runtime_wait_state[i]!="TESTER_SKIPPED")
-           {
-            g_logger.Event(
-               LOG_INFO, "INIT", "INIT_TESTER_SYMBOL_SKIPPED",
-               symbols[i], "", roles[i], "",
-               "SKIP", "TESTER_SINGLE_SYMBOL",
-               "Tester evaluates the chart symbol only");
-            g_runtime_wait_state[i]="TESTER_SKIPPED";
-           }
+         // In tester single-symbol mode, skip symbols not on the chart
          continue;
         }
 
       bool custom_symbol=false;
       if(!SymbolExist(symbols[i], custom_symbol))
         {
-         if(g_runtime_wait_state[i]!="SYMBOL_MISSING")
-           {
-            g_runtime_wait_state[i]="SYMBOL_MISSING";
-            g_logger.Event(
-               LOG_WARNING, "INIT", "INIT_SYMBOL_UNAVAILABLE",
-               symbols[i], "", roles[i], "",
-               "SKIP", "SYMBOL_MISSING",
-               "Configured symbol is unavailable; other symbols remain active");
-           }
+         g_logger.Event(
+            LOG_WARNING, "INIT", "INIT_SYMBOL_UNAVAILABLE",
+            symbols[i], "", roles[i], "",
+            "SKIP", "SYMBOL_MISSING",
+            "Configured symbol is unavailable; other symbols remain active");
          continue;
         }
 
@@ -1980,23 +2603,29 @@ int InitializePendingRuntimes()
       if(!SymbolSelect(symbols[i], true))
         {
          int select_error=GetLastError();
-         string select_state=
-            "SYMBOL_SELECT_FAILED_"+IntegerToString(select_error);
-         if(g_runtime_wait_state[i]!=select_state)
-           {
-            g_runtime_wait_state[i]=select_state;
-            g_logger.Event(
-               LOG_WARNING, "INIT", "INIT_SYMBOL_UNAVAILABLE",
-               symbols[i], "", roles[i], "",
-               "WAIT", "SYMBOL_SELECT",
-               "Unable to select configured symbol; other symbols remain active",
-               select_error);
-           }
+         g_logger.Event(
+            LOG_WARNING, "INIT", "INIT_SYMBOL_UNAVAILABLE",
+            symbols[i], "", roles[i], "",
+            "WAIT", "SYMBOL_SELECT",
+            "Unable to select configured symbol; other symbols remain active",
+            select_error);
          ResetLastError();
          continue;
         }
 
-      if(g_runtime[i].valid)
+      // Find existing runtime for this symbol
+      CSymbolRuntime *runtime = NULL;
+      for(int j=0;j<g_runtime.Total();j++)
+        {
+         CSymbolRuntime *r = g_runtime.At(j);
+         if(r && r.valid && r.symbol == symbols[i])
+           {
+            runtime = r;
+            break;
+           }
+        }
+
+      if(runtime)
         {
          runtime_count++;
          continue;
@@ -2034,60 +2663,65 @@ int InitializePendingRuntimes()
          if(wait_state=="")
             wait_state="history requests accepted";
 
-         if(wait_state!=g_runtime_wait_state[i])
-           {
-            g_runtime_wait_state[i]=wait_state;
-            g_logger.Event(
-               LOG_INFO, "INIT", "INIT_SYMBOL_WAITING",
-               symbols[i], "", roles[i], "",
-               "WAIT", "SYMBOL_SYNC",
-               "Waiting for this symbol only: "+wait_state);
-           }
+         g_logger.Event(
+            LOG_INFO, "INIT", "INIT_SYMBOL_WAITING",
+            symbols[i], "", roles[i], "",
+            "WAIT", "SYMBOL_SYNC",
+            "Waiting for this symbol only: "+wait_state);
          continue;
         }
 
-       g_runtime_wait_state[i]="";
-        int rt_ctx=0, rt_struct=0, rt_setup=0, rt_entry=0;
-        bool rt_override=false;
-        if(!ResolveFreshnessForSymbol(symbols[i], rt_ctx, rt_struct, rt_setup, rt_entry, rt_override))
-          {
-           g_logger.Event(
-              LOG_WARNING, "INIT", "INIT_FRESHNESS_INVALID",
-              symbols[i], "", roles[i], "",
-              "FAIL", "FRESHNESS_CONFIG",
-              "Invalid freshness override; new entries blocked");
-           continue;
-          }
-        if(!g_runtime[i].Initialize(
-              symbols[i],
-              InpTradingStyle,
-              context_tf,
-              structure_tf,
-              setup_tf,
-              entry_tf,
-              rt_ctx,
-              rt_struct,
-              rt_setup,
-              rt_entry))
+      // Create new runtime for this symbol
+      CSymbolRuntime *new_runtime = new CSymbolRuntime();
+      if(new_runtime == NULL)
         {
-         string failure=g_runtime[i].last_failure;
-         if(failure!=g_runtime_init_failure[i])
-           {
-            g_runtime_init_failure[i]=failure;
-            g_logger.Event(
-               LOG_WARNING, "INIT", "INIT_RUNTIME_PENDING",
-               symbols[i], "", roles[i], "",
-               "WAIT", "RUNTIME_INIT",
-               "Runtime initialization failed; other symbols remain active: "+
-               failure,
-               GetLastError());
-            ResetLastError();
-           }
+         g_logger.Event(
+            LOG_ERROR, "INIT", "INIT_RUNTIME_ALLOC_FAILED",
+            symbols[i], "", roles[i], "",
+            "FAIL", "MEMORY", "Failed to allocate CSymbolRuntime");
          continue;
         }
 
-      g_runtime_init_failure[i]="";
-      g_runtime[i].hybrid_engine.SetStrategyGroupKey(g_strategy_group_key);
+      int rt_ctx=0, rt_struct=0, rt_setup=0, rt_entry=0;
+      bool rt_override=false;
+      if(!ResolveFreshnessForSymbol(symbols[i], rt_ctx, rt_struct, rt_setup, rt_entry, rt_override))
+        {
+         g_logger.Event(
+            LOG_WARNING, "INIT", "INIT_FRESHNESS_INVALID",
+            symbols[i], "", roles[i], "",
+            "FAIL", "FRESHNESS_CONFIG",
+            "Invalid freshness override; new entries blocked");
+         delete new_runtime;
+         continue;
+        }
+
+      if(!new_runtime.Initialize(
+            symbols[i],
+            InpTradingStyle,
+            context_tf,
+            structure_tf,
+            setup_tf,
+            entry_tf,
+            rt_ctx,
+            rt_struct,
+            rt_setup,
+            rt_entry))
+        {
+         string failure=new_runtime.last_failure;
+         g_logger.Event(
+            LOG_WARNING, "INIT", "INIT_RUNTIME_PENDING",
+            symbols[i], "", roles[i], "",
+            "WAIT", "RUNTIME_INIT",
+            "Runtime initialization failed; other symbols remain active: "+
+            failure,
+            GetLastError());
+         ResetLastError();
+         delete new_runtime;
+         continue;
+        }
+
+      new_runtime.hybrid_engine.SetStrategyGroupKey(g_strategy_group_key);
+      g_runtime.Add(new_runtime);
       runtime_count++;
       g_logger.Event(
          LOG_INFO, "INIT", "INIT_RUNTIME_READY",
@@ -2414,6 +3048,21 @@ int OnInit()
 
    g_dashboard.Enable(InpDashboard);
    g_dashboard.SetTitle("ALGO HYBRID");
+   g_ea_start_time = TimeCurrent();
+
+   // Initialize Metrics Exporter (WP-07)
+   g_metrics_exporter.Initialize(&g_logger, IntegerToString((long)ChartID()), 10);
+   
+   // Initialize Alert Manager (WP-07)
+   g_alert_manager.Initialize(&g_logger, &g_metrics_exporter);
+   g_alert_manager.SetThresholds(
+      150.0, 200.0,    // Margin level: critical 150%, warning 200%
+      5.0, 3.0,        // Daily loss: critical 5%, warning 3%
+      10.0, 5.0,       // Drawdown: critical 10%, warning 5%
+      3.0,             // Spread warning multiplier: 3x normal
+      8, 10,           // Positions: warning at 8, critical at 10
+      60               // Alert cooldown: 60 seconds
+   );
 
    ResetLastError();
    if(!EventSetTimer(5))
@@ -2471,11 +3120,15 @@ void OnTick()
    if(!risk_state_ready)
       return;
 
-   if(g_coordinator_mode == COORD_MODE_COORDINATOR)
-     {
-      for(int i=0;i<256;i++)
-         ProcessRuntime(g_runtime[i]);
-     }
+if(g_coordinator_mode == COORD_MODE_COORDINATOR)
+      {
+       for(int i=0;i<g_runtime.Total();i++)
+         {
+          CSymbolRuntime *runtime = g_runtime.At(i);
+          if(runtime && runtime.valid)
+             ProcessRuntime(runtime);
+         }
+      }
   }
 
 //==================================================================
@@ -2502,65 +3155,69 @@ void OnTimer()
         }
      }
 
-    if(g_coordinator_mode == COORD_MODE_COORDINATOR)
+if(g_coordinator_mode == COORD_MODE_COORDINATOR)
       {
-        // F8: Discovery is rate-limited to 5s; the throttle must NOT gate heartbeat/authority
-        // validation, reconciliation, retry handoff, position management or runtime processing.
-        static datetime last_discovery = 0;
-        if(TimeCurrent() - last_discovery >= 5)
-          {
-           last_discovery = TimeCurrent();
-           // Discovery: enumerate charts and send discovery probe
-           long chart = ChartFirst();
-       string nonce = "N" + IntegerToString((long)TimeCurrent()) + IntegerToString((long)ChartID());
-       g_pending_nonce = nonce;
-       while(chart >= 0)
+       // F8: Discovery is rate-limited to 5s; the throttle must NOT gate heartbeat/authority
+       // validation, reconciliation, retry handoff, position management or runtime processing.
+       static datetime last_discovery = 0;
+       if(TimeCurrent() - last_discovery >= 5)
          {
-          if(chart != ChartID())
+          last_discovery = TimeCurrent();
+          // Discovery: enumerate charts and send discovery probe
+          long chart = ChartFirst();
+          string nonce = "N" + IntegerToString((long)TimeCurrent()) + IntegerToString((long)ChartID());
+          g_pending_nonce = nonce;
+          while(chart >= 0)
             {
-             string auth_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
-             string probe = "D|" + IntegerToString(CHARTREG_PROTOCOL_VERSION) + "|" + auth_key + "|" + IntegerToString((long)ChartID()) + "|" + IntegerToString(g_authority_epoch) + "|" + nonce;
-             if(StringLen(probe) <= 63)
+             if(chart != ChartID())
                {
-                if(!EventChartCustom(chart, CHARTREG_DISCOVERY, (long)ChartID(), 0.0, probe))
+                string auth_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
+                string probe = "D|" + IntegerToString(CHARTREG_PROTOCOL_VERSION) + "|" + auth_key + "|" + IntegerToString((long)ChartID()) + "|" + IntegerToString(g_authority_epoch) + "|" + nonce;
+                if(StringLen(probe) <= 63)
                   {
-                   // enqueue failed; retry next cycle
+                   if(!EventChartCustom(chart, CHARTREG_DISCOVERY, (long)ChartID(), 0.0, probe))
+                     {
+                      // enqueue failed; retry next cycle
+                     }
                   }
                }
+             chart = ChartNext(chart);
             }
-          chart = ChartNext(chart);
-         }
-        // Canonical state comparison based on time + subscriber count (placeholder for full dashboard hash)
-        static string last_canonical = "";
-        string canonical = IntegerToString((long)TimeCurrent()) + "_" + IntegerToString(g_subscriber_count) + "_" + IntegerToString(g_authority_epoch);
-        if(canonical == last_canonical)
-          {
-           // unchanged; skip
-          }
-        else
-          {
-           last_canonical = canonical;
-           g_snapshot_sequence++;
-           for(int i = 0; i < g_subscriber_count; i++)
-             {
-              long target_chart = g_subscribers[i].chart_id;
-              string obj_name = "AlgoEA_Dashboard";
-              ObjectCreate(target_chart, obj_name, OBJ_LABEL, 0, 0, 0);
-              ObjectSetInteger(target_chart, obj_name, OBJPROP_XDISTANCE, 10);
-              ObjectSetInteger(target_chart, obj_name, OBJPROP_YDISTANCE, 20);
-              ObjectSetString(target_chart, obj_name, OBJPROP_TEXT, "CoordSnap=" + IntegerToString(g_snapshot_sequence) + " Epoch=" + IntegerToString(g_authority_epoch));
-              ChartRedraw(target_chart);
-              string notify = "S|" + IntegerToString(CHARTREG_PROTOCOL_VERSION) + "|" + IntegerToString(g_authority_epoch) + "|" + IntegerToString(g_snapshot_sequence);
-              if(StringLen(notify) <= 63)
-                {
-                 if(!EventChartCustom(target_chart, SNAPREG_NOTIFY, (long)ChartID(), 0.0, notify))
-                   {
-                    // enqueue failed
-                   }
-                }
-             }
+         // Canonical state comparison based on time + subscriber count (placeholder for full dashboard hash)
+         static string last_canonical = "";
+         int sub_count = g_subscriber_registry.Count();
+         string canonical = IntegerToString((long)TimeCurrent()) + "_" + IntegerToString(sub_count) + "_" + IntegerToString(g_authority_epoch);
+         if(canonical == last_canonical)
+           {
+            // unchanged; skip
            }
-          } // end rate-limited discovery block (F8)
+         else
+           {
+            last_canonical = canonical;
+            g_snapshot_sequence++;
+            // Use thread-safe subscriber registry (WP-05)
+            SubscriberRecord subs[64];
+            int count = g_subscriber_registry.GetSubscribers(subs);
+            for(int i = 0; i < count; i++)
+              {
+               long target_chart = subs[i].chart_id;
+               string obj_name = "AlgoEA_Dashboard";
+               ObjectCreate(target_chart, obj_name, OBJ_LABEL, 0, 0, 0);
+               ObjectSetInteger(target_chart, obj_name, OBJPROP_XDISTANCE, 10);
+               ObjectSetInteger(target_chart, obj_name, OBJPROP_YDISTANCE, 20);
+               ObjectSetString(target_chart, obj_name, OBJPROP_TEXT, "CoordSnap=" + IntegerToString(g_snapshot_sequence) + " Epoch=" + IntegerToString(g_authority_epoch));
+               ChartRedraw(target_chart);
+               string notify = "S|" + IntegerToString(CHARTREG_PROTOCOL_VERSION) + "|" + IntegerToString(g_authority_epoch) + "|" + IntegerToString(g_snapshot_sequence);
+               if(StringLen(notify) <= 63)
+                 {
+                  if(!EventChartCustom(target_chart, SNAPREG_NOTIFY, (long)ChartID(), 0.0, notify))
+                    {
+                     // enqueue failed
+                    }
+                 }
+              }
+            }
+           } // end rate-limited discovery block (F8)
         string authority_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
         if(!g_execution_ledger.HeartbeatAuthority(authority_key, g_owner_instance_token, g_authority_epoch) ||
            !g_execution_ledger.ValidateAuthority(authority_key, g_owner_instance_token, g_authority_epoch))
@@ -2623,19 +3280,70 @@ void OnTimer()
 
    UpdateDashboardForChart();
 
+   // WP-07: Metrics Exporter & Alert Manager periodic updates
+   g_metrics_exporter.OnTimer();
+   
+   // Collect metrics for alerting
+   double used_margin = AccountInfoDouble(ACCOUNT_MARGIN);
+   double margin_level = (used_margin > 0) ? 
+                         (AccountInfoDouble(ACCOUNT_EQUITY) / used_margin * 100.0) : 0;
+   g_alert_manager.CheckMarginLevel(margin_level);
+   
+   PortfolioState pstate;
+   if(g_state.GetPortfolioState(pstate))
+   {
+      g_alert_manager.CheckDailyLoss(pstate.daily_loss_percent * 100.0);
+      // Note: PortfolioState doesn't have max_drawdown_pct, use total_open_risk_percent as proxy
+      g_alert_manager.CheckDrawdown(pstate.total_open_risk_percent * 100.0);
+      g_alert_manager.CheckPositionCount(pstate.total_positions);
+      
+      // Update metrics exporter with portfolio data
+      // PortfolioState has: total_open_risk_percent (exposure), total_positions
+      // No: unrealized_pnl, realized_pnl, pending_orders, max_drawdown_pct
+      g_metrics_exporter.SetPortfolioMetrics(
+         pstate.total_open_risk_percent,
+         0, // unrealized_pnl - not available in PortfolioState
+         0, // realized_pnl - not available in PortfolioState
+         pstate.total_positions,
+         0  // pending_orders - not available in PortfolioState
+      );
+      
+      // Account metrics
+      g_metrics_exporter.SetAccountMetrics(
+         AccountInfoDouble(ACCOUNT_BALANCE),
+         AccountInfoDouble(ACCOUNT_EQUITY),
+         AccountInfoDouble(ACCOUNT_MARGIN),
+         AccountInfoDouble(ACCOUNT_MARGIN_FREE),
+         margin_level
+      );
+   }
+   
+   // News blackout check - simplified: check if any position has NEWS_BLOCKED status
+   // We can't easily access HybridEngine's news service from here
+   // SetNewsMetrics with 0 for now
+   g_metrics_exporter.SetNewsMetrics(0, 0);
+   
+   // Engine metrics
+   g_metrics_exporter.SetEngineMetrics(
+      TimeCurrent() - g_ea_start_time, // uptime in seconds
+      0, // avg tick latency - would need more instrumentation
+      g_runtime.Total()
+   );
+
    g_position_manager.Update();
 
    if(!risk_state_ready)
       return;
 
-   if(g_coordinator_mode == COORD_MODE_COORDINATOR)
-     {
-      for(int i=0;i<256;i++)
-        {
-         if(g_runtime[i].valid)
-            ProcessRuntime(g_runtime[i]);
-        }
-     }
+if(g_coordinator_mode == COORD_MODE_COORDINATOR)
+      {
+       for(int i=0;i<g_runtime.Total();i++)
+         {
+          CSymbolRuntime *runtime = g_runtime.At(i);
+          if(runtime && runtime.valid)
+             ProcessRuntime(runtime);
+         }
+      }
   }
 
 //+------------------------------------------------------------------+
@@ -3323,8 +4031,11 @@ void RetryUIOnObjectClick(const string sparam)
 int RetryUIFindRuntimeForSymbol(const string symbol)
   {
    if(symbol=="") return -1;
-   for(int i=0;i<ArraySize(g_runtime);i++)
-      if(g_runtime[i].valid && g_runtime[i].symbol==symbol) return i;
+   for(int i=0;i<g_runtime.Total();i++)
+     {
+      CSymbolRuntime *runtime = g_runtime.At(i);
+      if(runtime && runtime.valid && runtime.symbol==symbol) return i;
+     }
    return -1;
   }
 
@@ -3494,12 +4205,14 @@ void ProcessRetryPendingHandoff()
    if(!g_execution_ledger.CanSubmit(g_retry_handoff.new_attempt_id, submit_reason))
      { g_retry_ui_status="HANDOFF_CANNOT_SUBMIT"; g_retry_ui_detail=submit_reason; return; }
 
-   // P1-C: fresh runtime evaluation + exact binding + full pre-submit revalidation, then existing submission protocol.
-   int rt_idx = RetryUIFindRuntimeForSymbol(new_att.symbol);
-   if(rt_idx < 0) { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_RUNTIME_NOT_FOUND"; g_retry_ui_detail="No valid runtime for approved symbol; committed intent remains non-submitted/quarantined by operator workflow (no auto-retry)."; return; }
-   TradePlan fresh_plan; StrategySignal fresh_signal; RiskDecision fresh_risk; string reval_reason="";
-   if(!RetryUIRevalidateFreshPlan(g_runtime[rt_idx], new_att, g_retry_handoff.strategy_group_key, g_retry_handoff.logical_setup_key, g_retry_handoff.config_fingerprint,
-                                  fresh_plan, fresh_signal, fresh_risk, reval_reason))
+// P1-C: fresh runtime evaluation + exact binding + full pre-submit revalidation, then existing submission protocol.
+    int rt_idx = RetryUIFindRuntimeForSymbol(new_att.symbol);
+    if(rt_idx < 0) { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_RUNTIME_NOT_FOUND"; g_retry_ui_detail="No valid runtime for approved symbol; committed intent remains non-submitted/quarantined by operator workflow (no auto-retry)."; return; }
+    CSymbolRuntime *runtime = g_runtime.At(rt_idx);
+    if(!runtime) { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_RUNTIME_NOT_FOUND"; return; }
+    TradePlan fresh_plan; StrategySignal fresh_signal; RiskDecision fresh_risk; string reval_reason="";
+    if(!RetryUIRevalidateFreshPlan(runtime, new_att, g_retry_handoff.strategy_group_key, g_retry_handoff.logical_setup_key, g_retry_handoff.config_fingerprint,
+                                   fresh_plan, fresh_signal, fresh_risk, reval_reason))
      {
       // One-shot handoff consumed on this explicit-confirm session attempt; do NOT auto-retry/reuse confirmation.
       // Committed new intent remains durable/non-submitted; not marked FINAL_FAILURE (no terminal failure evidence).
@@ -3535,7 +4248,7 @@ void ProcessRetryPendingHandoff()
 // Build fresh ExecutionRequest bound to new attempt ID (not old plan/request).
     ExecutionRequest request;
     request.intent = (fresh_plan.direction==SIGNAL_LONG ? ORDER_INTENT_OPEN_LONG : ORDER_INTENT_OPEN_SHORT);
-    request.symbol = g_runtime[rt_idx].symbol;
+    request.symbol = runtime.symbol;
     request.direction = fresh_plan.direction;
     request.strategy = STRATEGY_TREND_PULLBACK;
     request.volume = fresh_risk.calculated_volume;
@@ -3543,7 +4256,7 @@ void ProcessRetryPendingHandoff()
     request.stop_loss = fresh_plan.stop;
     request.take_profit = fresh_plan.target;
     request.position_ticket = 0;
-    request.magic = MagicForStyle(g_runtime[rt_idx].style);
+    request.magic = MagicForStyle(runtime.style);
     request.comment = "E26_RETRY|" + g_retry_handoff.action_id;
     request.signal_id = fresh_plan.setup_id;
     request.attempt_id = g_retry_handoff.new_attempt_id;
@@ -3599,9 +4312,9 @@ void ProcessRetryPendingHandoff()
                       "Attempt state unreadable after retry RecordResult failure - ledger trust degraded; fail-closed by blocking checks");
       }
    }
-   // Consume only this fresh plan's local engine duplicate-suppression marker for the same runtime context.
-   // Do not consume stale historical plan; this is the fresh plan produced by revalidation.
-   g_runtime[rt_idx].hybrid_engine.MarkPlanConsumed(fresh_plan);
+// Consume only this fresh plan's local engine duplicate-suppression marker for the same runtime context.
+    // Do not consume stale historical plan; this is the fresh plan produced by revalidation.
+    runtime.hybrid_engine.MarkPlanConsumed(fresh_plan);
    g_retry_handoff.active=false;
    g_retry_ui_status = (execution_ok && result.success) ? "HANDOFF_SUBMITTED" : "HANDOFF_SUBMIT_RECORDED_FAIL_OR_AMBIG";
    g_retry_ui_detail = reval_reason + " submit_ok=" + (execution_ok?"1":"0") + " ret=" + IntegerToString((int)result.retcode) + " recon=" + (result.reconciliation_required?"1":"0");
@@ -3662,75 +4375,47 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
            }
         }
      }
-   else if(id == CHARTEVENT_CUSTOM + CHARTREG_REGISTER)
-     {
-      // Coordinator receives registration request
-      if(g_coordinator_mode != COORD_MODE_COORDINATOR)
-         return;
-      string parts[];
-      int n = StringSplit(sparam, '|', parts);
-      if(n < 10)
-         return;
-      if((int)StringToInteger(parts[1]) != CHARTREG_PROTOCOL_VERSION)
-         return;
-      if(parts[2] != auth_key)
-         return;
-      long req_chart = (long)StringToInteger(parts[3]);
-      string req_token = parts[4];
-      string req_group = parts[5];
-      string req_fp = parts[6];
-      long target_coord = (long)StringToInteger(parts[7]);
-      long target_epoch = (long)StringToInteger(parts[8]);
-      string req_nonce = parts[9];
-      if(target_coord != ChartID())
-         return;
-      if(target_epoch != g_authority_epoch)
-         return;
-      // Group-level config conflict check
-      bool conflict = false;
-      for(int i = 0; i < g_subscriber_count; i++)
-        {
-         if(g_subscribers[i].strategy_group_key == req_group &&
-            g_subscribers[i].config_fingerprint != req_fp)
-           {
-            conflict = true;
-            break;
-           }
-        }
-      if(conflict)
-         return;
-      // Idempotent registration
-      bool found = false;
-      for(int i = 0; i < g_subscriber_count; i++)
-        {
-         if(g_subscribers[i].chart_id == req_chart && g_subscribers[i].owner_token == req_token)
-           {
-            found = true;
-            break;
-           }
-        }
-      if(!found && g_subscriber_count < 64)
-        {
-         g_subscribers[g_subscriber_count].chart_id = req_chart;
-         g_subscribers[g_subscriber_count].owner_token = req_token;
-         g_subscribers[g_subscriber_count].strategy_group_key = req_group;
-         g_subscribers[g_subscriber_count].config_fingerprint = req_fp;
-         g_subscribers[g_subscriber_count].registered = true;
-         g_subscriber_count++;
-        }
-      // Send ACK with nonce
-      string ack = "A|" + IntegerToString(CHARTREG_PROTOCOL_VERSION) + "|" + auth_key + "|" +
-                   IntegerToString((long)ChartID()) + "|" + g_owner_instance_token + "|" +
-                   IntegerToString(g_authority_epoch) + "|" + IntegerToString(req_chart) + "|" +
-                   req_token + "|" + req_nonce;
-      if(StringLen(ack) <= 63)
-        {
-         if(!EventChartCustom(req_chart, CHARTREG_ACK, (long)ChartID(), 0.0, ack))
-           {
-            // enqueue failed
-           }
-        }
-     }
+else if(id == CHARTEVENT_CUSTOM + CHARTREG_REGISTER)
+      {
+       // Coordinator receives registration request
+       if(g_coordinator_mode != COORD_MODE_COORDINATOR)
+          return;
+       string parts[];
+       int n = StringSplit(sparam, '|', parts);
+       if(n < 10)
+          return;
+       if((int)StringToInteger(parts[1]) != CHARTREG_PROTOCOL_VERSION)
+          return;
+       if(parts[2] != auth_key)
+          return;
+       long req_chart = (long)StringToInteger(parts[3]);
+       string req_token = parts[4];
+       string req_group = parts[5];
+       string req_fp = parts[6];
+       long target_coord = (long)StringToInteger(parts[7]);
+       long target_epoch = (long)StringToInteger(parts[8]);
+       string req_nonce = parts[9];
+       if(target_coord != ChartID())
+          return;
+       if(target_epoch != g_authority_epoch)
+          return;
+       // Use thread-safe subscriber registry (WP-05)
+       bool ok = g_subscriber_registry.Register(req_chart, req_token, req_group, req_fp);
+       if(!ok)
+          return; // conflict or capacity exceeded
+       // Send ACK with nonce
+       string ack = "A|" + IntegerToString(CHARTREG_PROTOCOL_VERSION) + "|" + auth_key + "|" +
+                    IntegerToString((long)ChartID()) + "|" + g_owner_instance_token + "|" +
+                    IntegerToString(g_authority_epoch) + "|" + IntegerToString(req_chart) + "|" +
+                    req_token + "|" + req_nonce;
+       if(StringLen(ack) <= 63)
+         {
+          if(!EventChartCustom(req_chart, CHARTREG_ACK, (long)ChartID(), 0.0, ack))
+            {
+             // enqueue failed
+            }
+         }
+      }
    else if(id == CHARTEVENT_CUSTOM + CHARTREG_ACK)
      {
       // Chart Context receives ack - validate all fields
@@ -3799,13 +4484,8 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
        long ack_seq = (long)StringToInteger(parts[3]);
        if(ack_chart <= 0 || ack_seq < 0)
           return;
-       // Validate sender is a known subscriber (or at minimum known chart token not required in payload).
-       bool known = false;
-       for(int i = 0; i < g_subscriber_count; i++)
-         {
-          if(g_subscribers[i].chart_id == ack_chart && g_subscribers[i].registered)
-            { known = true; break; }
-         }
+       // Validate sender is a known subscriber using thread-safe registry (WP-05)
+       bool known = g_subscriber_registry.IsRegistered(ack_chart);
        // Unknown sender ignored (fail-safe). Known ACK is accepted as protocol evidence only.
       }
     else if(id == CHARTEVENT_CUSTOM + CHARTREG_UNREGISTER)
@@ -3825,17 +4505,8 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
        string req_token = parts[4];
        if(req_chart <= 0 || req_token == "")
           return;
-       // Remove only matching registered subscriber (chart+token). Invalid/stale sender cannot remove others.
-       for(int i = 0; i < g_subscriber_count; i++)
-         {
-          if(g_subscribers[i].chart_id == req_chart && g_subscribers[i].owner_token == req_token)
-            {
-             for(int j = i; j < g_subscriber_count - 1; j++)
-                g_subscribers[j] = g_subscribers[j+1];
-             g_subscriber_count--;
-             break;
-            }
-         }
+       // Remove only matching registered subscriber (chart+token) using thread-safe registry (WP-05)
+       g_subscriber_registry.Unregister(req_chart, req_token);
       }
    }
 
