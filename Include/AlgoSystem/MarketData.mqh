@@ -26,10 +26,9 @@ private:
 
    string            m_symbols[];
    ENUM_TIMEFRAMES   m_timeframes[];
-   datetime          m_last_closed_bar[];
-   bool              m_caching_enabled;
+    datetime          m_last_closed_bar[];
 
-   int FindRegistration(const string symbol,
+    int FindRegistration(const string symbol,
                         const ENUM_TIMEFRAMES timeframe) const
      {
       int count=ArraySize(m_symbols);
@@ -189,9 +188,8 @@ public:
      {
       ArrayResize(m_symbols,0);
       ArrayResize(m_timeframes,0);
-      ArrayResize(m_last_closed_bar,0);
-      m_caching_enabled=false;
-     }
+       ArrayResize(m_last_closed_bar,0);
+      }
 
    //+---------------------------------------------------------------+
    //| IMarketDataProvider                                           |
@@ -478,17 +476,6 @@ public:
    //+---------------------------------------------------------------+
    //| Registered data stream count                                  |
    //+---------------------------------------------------------------+
-
-    bool EnableCaching(bool enable)
-     {
-      m_caching_enabled = enable;
-      return true;
-     }
-
-    bool IsCachingEnabled() const
-     {
-      return m_caching_enabled;
-     }
 
     int GetSymbolDigits(const string symbol) const
      {

@@ -43,10 +43,16 @@ private:
 
    int    m_max_holding_minutes;
 
-   bool   m_emergency_close;
+    bool   m_emergency_close;
 
-   //+----------------------------------------------------------------+
-   //| Check whether magic belongs to this EA                        |
+    // F5: cached ATR indicator handle (created once per symbol/config, reused across ticks).
+    int    m_atr_handle;
+    string m_atr_handle_symbol;
+    ENUM_TIMEFRAMES m_atr_handle_timeframe;
+    int    m_atr_handle_period;
+
+    //+----------------------------------------------------------------+
+    //| Check whether magic belongs to this EA                        |
    //+----------------------------------------------------------------+
 bool IsManagedMagic(const long magic) const
   {
@@ -129,10 +135,16 @@ bool IsManagedMagic(const long magic) const
       if(magic==MAGIC_MEAN_REVERSION)
          return STRATEGY_MEAN_REVERSION;
 
-      if(magic==MAGIC_RELATIVE_VALUE)
-         return STRATEGY_RELATIVE_VALUE;
+       if(magic==MAGIC_RELATIVE_VALUE)
+          return STRATEGY_RELATIVE_VALUE;
 
-      return STRATEGY_NONE;
+       // F15: align with PortfolioRisk.StrategyFromMagic — hybrid magics map to TREND_PULLBACK.
+       if(magic==MAGIC_HYBRID_SCALP ||
+          magic==MAGIC_HYBRID_DAY ||
+          magic==MAGIC_HYBRID_SWING)
+          return STRATEGY_TREND_PULLBACK;
+
+       return STRATEGY_NONE;
      }
 
    //+----------------------------------------------------------------+
@@ -378,9 +390,9 @@ bool IsManagedMagic(const long magic) const
    //+----------------------------------------------------------------+
    //| ATR trailing                                                   |
    //+----------------------------------------------------------------+
-   bool TryTrailing(
-      const ulong ticket) const
-     {
+    bool TryTrailing(
+       const ulong ticket)
+      {
       if(!m_use_trailing)
          return false;
 
@@ -415,29 +427,35 @@ bool IsManagedMagic(const long magic) const
       if(current_price<=0.0)
          return false;
 
-      int handle=
-         iATR(
-            symbol,
-            m_trailing_timeframe,
-            m_atr_period);
+       // F5: reuse the ATR handle for the same symbol/config instead of create+release per tick.
+       if(m_atr_handle==INVALID_HANDLE ||
+          m_atr_handle_symbol!=symbol ||
+          m_atr_handle_timeframe!=m_trailing_timeframe ||
+          m_atr_handle_period!=m_atr_period)
+         {
+          if(m_atr_handle!=INVALID_HANDLE)
+             IndicatorRelease(m_atr_handle);
+          m_atr_handle=iATR(symbol, m_trailing_timeframe, m_atr_period);
+          m_atr_handle_symbol=symbol;
+          m_atr_handle_timeframe=m_trailing_timeframe;
+          m_atr_handle_period=m_atr_period;
+         }
 
-      if(handle==INVALID_HANDLE)
-         return false;
+       if(m_atr_handle==INVALID_HANDLE)
+          return false;
 
-      double buffer[1];
+       double buffer[1];
 
-      int copied=
-         CopyBuffer(
-            handle,
-            0,
-            1,
-            1,
-            buffer);
+       int copied=
+          CopyBuffer(
+             m_atr_handle,
+             0,
+             1,
+             1,
+             buffer);
 
-      IndicatorRelease(handle);
-
-      if(copied!=1)
-         return false;
+       if(copied!=1)
+          return false;
 
       if(!MathIsValidNumber(buffer[0]) ||
          buffer[0]<=0.0)
@@ -595,10 +613,25 @@ public:
       m_atr_period=14;
       m_trailing_atr_multiplier=2.0;
 
-      m_max_holding_minutes=240;
+       m_max_holding_minutes=240;
 
-      m_emergency_close=false;
-     }
+       m_emergency_close=false;
+
+       m_atr_handle=INVALID_HANDLE;
+       m_atr_handle_symbol="";
+       m_atr_handle_timeframe=PERIOD_CURRENT;
+       m_atr_handle_period=0;
+      }
+
+    //+----------------------------------------------------------------+
+    //| Destructor: release cached indicator handle                   |
+    //+----------------------------------------------------------------+
+    ~CPositionManager()
+      {
+       if(m_atr_handle!=INVALID_HANDLE)
+          IndicatorRelease(m_atr_handle);
+       m_atr_handle=INVALID_HANDLE;
+      }
 
 //+----------------------------------------------------------------+
     //| Attach executor                                                |

@@ -445,48 +445,44 @@ public:
        if(snapshot.equity <= 0.0 || snapshot.currency == "")
           return false;
 
-       // Positions: include ALL (managed + unknown/ambiguous) per F-005.2.4
-       int valid_positions = 0;
-       for(int i=0; i<env.GetPositionsTotal(); i++)
-         {
-         ulong ticket = env.GetPositionTicket(i);
-         if(ticket == 0) continue;
+        // Positions: include ALL (managed + unknown/ambiguous) per F-005.2.4
+        // F9: single pass — accumulate risk and count evaluatable positions together
+        // (the previous second pass recomputed PositionRiskPercent over the same positions).
+        int valid_positions = 0;
+        int evaluated_positions = 0;
+        for(int i=0; i<env.GetPositionsTotal(); i++)
+          {
+          ulong ticket = env.GetPositionTicket(i);
+          if(ticket == 0) continue;
 
-         string symbol = env.PositionGetSymbol();
-         long magic = env.PositionGetMagic();
+          string symbol = env.PositionGetSymbol();
+          long magic = env.PositionGetMagic();
 
-         bool is_managed = IsManagedMagic(magic);
-         if(!is_managed)
-            snapshot.unknown_exposure = true;
+          bool is_managed = IsManagedMagic(magic);
+          if(!is_managed)
+             snapshot.unknown_exposure = true;
 
-         double pr = PositionRiskPercent(ticket);
-         if(pr == DBL_MAX)
-            {
-            // F-002-P1: Conservative handling - use max portfolio risk as cap for uncalculatable position
-            // instead of failing entire snapshot. Log the ticket for diagnostics.
-            pr = m_max_portfolio_risk; // cap at portfolio limit
+          double pr = PositionRiskPercent(ticket);
+          if(MathIsValidNumber(pr) && pr >= 0.0)
+             evaluated_positions++;
+          if(pr == DBL_MAX)
+             {
+             // F-002-P1: Conservative handling - use max portfolio risk as cap for uncalculatable position
+             // instead of failing entire snapshot. Log the ticket for diagnostics.
+             pr = m_max_portfolio_risk; // cap at portfolio limit
 // Note: In production, consider logging the ticket here
-            }
-         if(MathIsValidNumber(pr) && pr > 0.0)
-            {
-            snapshot.positions_risk_pct += pr;
-            valid_positions++;
-            }
-         }
+             }
+          if(MathIsValidNumber(pr) && pr > 0.0)
+             {
+             snapshot.positions_risk_pct += pr;
+             valid_positions++;
+             }
+          }
 
-       // If no positions could be evaluated (all uncalculatable), fail
-       // But allow positions with zero risk (e.g., SL at open price)
-       int evaluated_positions = 0;
-       for(int i=0; i<env.GetPositionsTotal(); i++)
-         {
-         ulong ticket = env.GetPositionTicket(i);
-         if(ticket == 0) continue;
-         double pr = PositionRiskPercent(ticket);
-         if(MathIsValidNumber(pr) && pr >= 0.0)
-            evaluated_positions++;
-         }
-       if(evaluated_positions == 0 && env.GetPositionsTotal() > 0)
-          return false;
+        // If no positions could be evaluated (all uncalculatable), fail
+        // But allow positions with zero risk (e.g., SL at open price)
+        if(evaluated_positions == 0 && env.GetPositionsTotal() > 0)
+           return false;
 
        // Pending orders: estimate risk from SL if available
        // F-002-R5/FINDING-003: Include unknown pending orders with valid SL in pending_risk_pct

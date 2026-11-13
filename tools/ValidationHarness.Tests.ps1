@@ -1035,6 +1035,209 @@ Run-TestSuite 'Integration: Full Harness Run' {
             if (Test-Path -LiteralPath $fixture.Root) { Remove-Item -LiteralPath $fixture.Root -Recurse -Force }
         }
     }
+
+    Run-Test 'Unhandled error: crash report written; process exit equals OverallExitCode (10)' {
+        $fixture = New-ValidationFixture
+        $reportPath = Join-Path $fixture.Root 'crash-report.json'
+        $errFile = Join-Path $fixture.Root 'crash-stderr.txt'
+        $patched = Join-Path $fixture.Root 'harness-crash.ps1'
+        try {
+            # Pre-seed a stale report to prove this run overwrites it (no stale artifact reuse).
+            Set-Content -LiteralPath $reportPath -Value '{"OverallExitCode":0,"Results":[]}' -Encoding UTF8
+
+            # Inject an unhandled error after the first result is recorded (before env resolution),
+            # so the finally block must build and persist a crash report instead of silently dying.
+            $content = Get-Content -LiteralPath $harnessPath -Raw
+            $anchor = "    Write-ValidationStep 'Environment Resolution' 'START'"
+            Assert-True $content.Contains($anchor)
+            $inject = "    throw 'INJECTED_UNHANDLED_ERROR_FOR_CRASH_REPORT_TEST'`n" + $anchor
+            Set-Content -LiteralPath $patched -Value ($content.Replace($anchor, $inject)) -Encoding UTF8
+
+            # PowerShell 5.1 turns any native stderr into a terminating NativeCommandError under
+            # EAP=Stop; the child intentionally writes an error, so relax EAP only around the call.
+            $prevEap = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            try {
+                $null = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $patched `
+                    -TerminalInstallRoot $fixture.TerminalInstallRoot `
+                    -ProjectMql5Root $fixture.ProjectMql5Root `
+                    -SkipCompile -StrictMode -JsonReportPath $reportPath 2>$errFile
+                $exitCode = $LASTEXITCODE
+            }
+            finally {
+                $ErrorActionPreference = $prevEap
+            }
+
+            # Contract (Option A): process exit code == JSON OverallExitCode == SCRIPT_ERROR (10).
+            Assert-True (Test-Path -LiteralPath $reportPath -PathType Leaf)
+            $parsed = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+            Assert-Equal 10 $parsed.OverallExitCode
+            Assert-Equal 10 $exitCode
+            Assert-Equal 1 @($parsed.Results | Where-Object { $_.Id -eq 'ERR-001' -and $_.Status -eq 'FAILED' -and $_.Severity -eq 'CRITICAL' }).Count
+            # The original exception must be preserved in the report, not replaced by an ActionPreference error.
+            $errResult = @($parsed.Results | Where-Object { $_.Id -eq 'ERR-001' })[0]
+            Assert-True ($errResult.Message -like '*INJECTED_UNHANDLED_ERROR_FOR_CRASH_REPORT_TEST*')
+        }
+        finally {
+            if (Test-Path -LiteralPath $fixture.Root) { Remove-Item -LiteralPath $fixture.Root -Recurse -Force }
+        }
+    }
+
+    Run-Test 'Crash report write failure still exits non-zero (no false success)' {
+        $fixture = New-ValidationFixture
+        # Make the report path un-writable: its parent is an existing FILE, so creating the
+        # directory tree fails. The crash path must still exit SCRIPT_ERROR (10), never 0.
+        $blocker = Join-Path $fixture.Root 'blocker.txt'
+        Set-Content -LiteralPath $blocker -Value 'x' -Encoding UTF8
+        $badReport = Join-Path $blocker 'report.json'
+        $errFile = Join-Path $fixture.Root 'crash-stderr.txt'
+        $patched = Join-Path $fixture.Root 'harness-crash.ps1'
+        try {
+            $content = Get-Content -LiteralPath $harnessPath -Raw
+            $anchor = "    Write-ValidationStep 'Environment Resolution' 'START'"
+            $inject = "    throw 'INJECTED_WRITE_FAIL_TEST'`n" + $anchor
+            Set-Content -LiteralPath $patched -Value ($content.Replace($anchor, $inject)) -Encoding UTF8
+
+            $prevEap = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            try {
+                $null = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $patched `
+                    -TerminalInstallRoot $fixture.TerminalInstallRoot `
+                    -ProjectMql5Root $fixture.ProjectMql5Root `
+                    -SkipCompile -StrictMode -JsonReportPath $badReport 2>$errFile
+                $exitCode = $LASTEXITCODE
+            }
+            finally { $ErrorActionPreference = $prevEap }
+
+            Assert-Equal 10 $exitCode
+            Assert-True (-not (Test-Path -LiteralPath $badReport -PathType Leaf))
+        }
+        finally {
+            if (Test-Path -LiteralPath $fixture.Root) { Remove-Item -LiteralPath $fixture.Root -Recurse -Force }
+        }
+    }
+
+    Run-Test 'Write-Error is terminating under EAP=Stop; -ErrorAction Continue is not' {
+        $prevEap = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Stop'
+            $terminating = $false
+            try { & { Write-Error 'PROBE_BARE_WRITE_ERROR' } 2>$null } catch { $terminating = $true }
+            Assert-True $terminating
+
+            $continued = $true
+            try { & { Write-Error 'PROBE_CONTINUE_WRITE_ERROR' -ErrorAction Continue } 2>$null } catch { $continued = $false }
+            Assert-True $continued
+        }
+        finally { $ErrorActionPreference = $prevEap }
+    }
+}
+
+# ----------------------------------------------------------------------------
+# EA source regression guards (fix-presence invariants; static, no runtime)
+# ----------------------------------------------------------------------------
+Run-TestSuite 'EA source regression guards' {
+    $eaPath = Join-Path $script:ProjectRoot 'Experts\AlgoMultiAssetEA.mq5'
+    $elPath = Join-Path $script:ProjectRoot 'Include\AlgoSystem\ExecutionLedger.mqh'
+    $pmPath = Join-Path $script:ProjectRoot 'Include\AlgoSystem\PositionManager.mqh'
+    $prPath = Join-Path $script:ProjectRoot 'Include\AlgoSystem\PortfolioRisk.mqh'
+    $mdPath = Join-Path $script:ProjectRoot 'Include\AlgoSystem\MarketData.mqh'
+    $smPath = Join-Path $script:ProjectRoot 'Include\AlgoSystem\StateManager.mqh'
+
+    Run-Test 'F3: MathSrand seeded + attempt counter present' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'MathSrand\(\(int\)GetTickCount\(\)\)'
+        Assert-Match $ea 'g_attempt_counter'
+    }
+
+    Run-Test 'F8: discovery rate-limit no longer returns from OnTimer' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-True (-not ($ea -match 'return; // rate limit: 5 seconds'))
+        Assert-Match $ea 'if\(TimeCurrent\(\) - last_discovery >= 5\)'
+    }
+
+    Run-Test 'F1: retry UI invalidate only inside chart-change branch' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-True (-not ($ea -match 'RetryUIInvalidate\("CHART_GEOMETRY_CHANGED"\);\s+if\(id == CHARTEVENT_CHART_CHANGE\)'))
+    }
+
+    Run-Test 'F17: IsForexSymbol currency list is static' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'static string fx\[\]'
+    }
+
+    Run-Test 'F2: busy_timeout PRAGMA set on ledger open' {
+        $el = Get-Content -LiteralPath $elPath -Raw
+        Assert-Match $el 'PRAGMA busy_timeout = 5000'
+    }
+
+    Run-Test 'F16: EscapeSQL delegates to EscapeSQLStatic' {
+        $el = Get-Content -LiteralPath $elPath -Raw
+        Assert-Match $el 'return EscapeSQLStatic\(s\);'
+    }
+
+    Run-Test 'F15: PositionManager hybrid magics map to TREND_PULLBACK' {
+        $pm = Get-Content -LiteralPath $pmPath -Raw
+        Assert-Match $pm 'MAGIC_HYBRID_SCALP'
+    }
+
+    Run-Test 'F5: ATR handle cached + released in destructor' {
+        $pm = Get-Content -LiteralPath $pmPath -Raw
+        Assert-Match $pm 'm_atr_handle'
+        Assert-Match $pm '~CPositionManager'
+    }
+
+    Run-Test 'F9: exposure snapshot single pass (evaluated_positions declared once)' {
+        $pr = Get-Content -LiteralPath $prPath -Raw
+        $count = ([regex]::Matches($pr, 'int evaluated_positions = 0;')).Count
+        Assert-Equal 1 $count
+    }
+
+    Run-Test 'F12: dead caching abstraction removed' {
+        $md = Get-Content -LiteralPath $mdPath -Raw
+        Assert-True (-not ($md -match 'EnableCaching'))
+        Assert-True (-not ($md -match 'm_caching_enabled'))
+    }
+
+    $newsPath = Join-Path $script:ProjectRoot 'Include\AlgoSystem\NewsRiskService.mqh'
+
+    Run-Test 'F4: owned news provider released before the NoOp fallback (no leak)' {
+        $news = Get-Content -LiteralPath $newsPath -Raw
+        Assert-Match $news 'delete m_provider;\s*\r?\n\s*m_provider= new CNoOpNewsProvider\(\);'
+    }
+
+    Run-Test 'F6: batched magic ownership replaces the per-position query' {
+        $sm = Get-Content -LiteralPath $smPath -Raw
+        $el = Get-Content -LiteralPath $elPath -Raw
+        Assert-Match $el 'ResolveMagicOwnershipBatch'
+        Assert-Match $sm 'ResolveMagicOwnershipBatch'
+        # The single-value form may survive only in the IsManagedMagic helper; the
+        # per-tick CountPositions path must not use it.
+        $single = ([regex]::Matches($sm, 'ResolveMagicOwnership\(\(ulong\)magic')).Count
+        Assert-Equal 1 $single
+    }
+}
+
+# ----------------------------------------------------------------------------
+# Compile gate guards (static, no compile run)
+# ----------------------------------------------------------------------------
+Run-TestSuite 'Compile-MT5 gate guards' {
+    $compileText = Get-Content -LiteralPath (Join-Path $script:ScriptDir 'Compile-MT5.ps1') -Raw
+
+    Run-Test 'Compile-MT5: ProjectMql5Root defaults to the repo root' {
+        Assert-Match $compileText 'ProjectMql5Root\s*=\s*\(Split-Path -Parent \$PSScriptRoot\)'
+        Assert-True (-not ($compileText -match "ProjectMql5Root\s*=\s*'C:\\\\Users\\\\Ali"))
+    }
+
+    Run-Test 'Compile-MT5: non-zero MetaEditor exit code does not fail a clean compile' {
+        Assert-True (-not ($compileText -match 'COMPILE: FAILED \(MetaEditor process exit code'))
+    }
+
+    Run-Test 'Compile-MT5: catch block keeps the documented exit codes' {
+        # Write-Error is terminating under EAP=Stop and would skip exit 12/13/14/10.
+        Assert-True (-not ($compileText -match 'catch\s*\{\s*\r?\n\s*Write-Error \$_'))
+        Assert-Match $compileText 'Console\]::Error\.WriteLine'
+    }
 }
 # ----------------------------------------------------------------------------
 # Summary
