@@ -19,6 +19,7 @@ private:
    string         m_file_day;
    int            m_summary_interval_seconds;
    datetime       m_last_summary_time;
+   string         m_instance_id;       // F3: unique instance identifier for multi-chart log separation
 
    ulong m_events_total;
    ulong m_errors_total;
@@ -37,19 +38,24 @@ private:
    ulong m_execution_successes;
    ulong m_state_failures;
 
-   string CurrentDay() const
-     {
-      return TimeToString(TimeCurrent(),TIME_DATE);
-     }
+string CurrentDay() const
+      {
+       return TimeToString(TimeCurrent(),TIME_DATE);
+      }
 
-   string NewRunId() const
-     {
-      return TimeToString(TimeLocal(),TIME_DATE|TIME_SECONDS)+
-             "-"+
-             IntegerToString((int)GetTickCount());
-     }
+    string NewRunId() const
+      {
+       return TimeToString(TimeLocal(),TIME_DATE|TIME_SECONDS)+
+              "-"+
+              IntegerToString((int)GetTickCount());
+      }
 
-   bool ShouldLog(const ENUM_LOG_LEVEL level) const
+    string InstanceSuffix() const
+      {
+       return (m_instance_id != "") ? "_" + m_instance_id : "";
+      }
+
+    bool ShouldLog(const ENUM_LOG_LEVEL level) const
      {
       // Enum ordering is ERROR -> ... -> OPTIMIZATION.
       // A configured level includes all more-severe levels.
@@ -281,18 +287,22 @@ private:
          m_human_file_handle=INVALID_HANDLE;
         }
 
-      FolderCreate("AlgoSystem");
-      FolderCreate("AlgoSystem/Logs");
+FolderCreate("AlgoSystem");
+       FolderCreate("AlgoSystem/Logs");
 
-      m_file_name=
-         "AlgoSystem/Logs/AlgoSystem_"+
-         day+
-         ".csv";
+       string suffix = InstanceSuffix();
 
-      m_human_file_name=
-         "AlgoSystem/Logs/AlgoSystem_Human_"+
-         day+
-         ".log";
+       m_file_name=
+          "AlgoSystem/Logs/AlgoSystem_"+
+          day+
+          suffix+
+          ".csv";
+
+       m_human_file_name=
+          "AlgoSystem/Logs/AlgoSystem_Human_"+
+          day+
+          suffix+
+          ".log";
 
       ResetLastError();
       m_file_handle=FileOpen(
@@ -431,12 +441,19 @@ public:
       m_file_day="";
       m_summary_interval_seconds=60;
       m_last_summary_time=0;
+      m_instance_id="";         // F3: empty until SetInstanceId() called
       ResetCounters();
      }
 
    ~CAlgoLogger()
      {
       Shutdown();
+     }
+
+   // F3: Set unique instance identifier for multi-chart log separation
+   void SetInstanceId(const string instance_id)
+     {
+      m_instance_id = instance_id;
      }
 
    void StartRun()
