@@ -2,6 +2,7 @@
 #define __ALGOSYSTEM_HYBRID_DASHBOARD_MQH__
 
 #include "HybridTypes.mqh"
+#include "Utilities.mqh"
 
 class CHybridDashboard
   {
@@ -138,47 +139,27 @@ bool               m_enabled;
  private:
     string LabelName(const int index) const { return m_bg_name+"_lbl_"+IntegerToString(index); }
 
-    string StyleText(ENUM_TRADING_STYLE s) const
-      { switch(s){case STYLE_SCALPING:return "SCALP";case STYLE_DAY_TRADING:return "DAY";case STYLE_SWING_TRADING:return "SWING";default:return "UNKNOWN";} }
-    string RegimeText(ENUM_HYBRID_REGIME r) const
-      { switch(r){case HYBRID_REGIME_TRENDING:return "TREND";case HYBRID_REGIME_RANGING:return "RANGE";case HYBRID_REGIME_VOLATILITY_EXPANSION:return "VOL_EXP";case HYBRID_REGIME_COMPRESSION:return "COMPRESS";case HYBRID_REGIME_TRANSITION:return "TRANSITION";case HYBRID_REGIME_INSUFFICIENT_DATA:return "N/A";default:return "?";} }
-    string BiasText(ENUM_BIAS_DIRECTION b) const
-      { switch(b){case BIAS_BULLISH:return "BULL";case BIAS_BEARISH:return "BEAR";case BIAS_NEUTRAL:return "NEUTRAL";case BIAS_CONFLICTED:return "CONFLICT";case BIAS_INSUFFICIENT_DATA:return "N/A";default:return "?";} }
-    string NewsText(ENUM_NEWS_STATE s) const
-      { switch(s){case NEWS_UNAVAILABLE:return "N/A";case NEWS_NO_EVENT_SCHEDULED:return "CLEAR";case NEWS_BLACKOUT_ACTIVE:return "BLACKOUT";case NEWS_COOLDOWN_ACTIVE:return "COOLDOWN";case NEWS_EVENT_PASSED:return "PAST";default:return "?";} }
-    string DecisionText(ENUM_DECISION_STATUS s) const
-      { switch(s){case DECISION_BUY_CANDIDATE:return "BUY";case DECISION_SELL_CANDIDATE:return "SELL";case DECISION_NO_TRADE:return "NO-TRADE";case DECISION_DATA_UNAVAILABLE:return "NO-DATA";case DECISION_NEWS_BLOCKED:return "NEWS-BLOCKED";case DECISION_RISK_REJECTED:return "RISK-REJECT";case DECISION_CONFLICTED_SIGNAL:return "CONFLICT";case DECISION_SETUP_EXPIRED:return "EXPIRED";case DECISION_SETUP_INVALIDATED:return "INVALIDATED";default:return "?";} }
+    string StyleText(ENUM_TRADING_STYLE s) const { return CAlgoUtils::StyleToString(s); }
+    string RegimeText(ENUM_HYBRID_REGIME r) const { return CAlgoUtils::RegimeToString(r); }
+    string BiasText(ENUM_BIAS_DIRECTION b) const { return CAlgoUtils::BiasToString(b); }
+    string NewsText(ENUM_NEWS_STATE s) const { return CAlgoUtils::NewsStateToString(s); }
+    string DecisionText(ENUM_DECISION_STATUS s) const { return CAlgoUtils::DecisionStatusToString(s); }
     string ColorForStatus(ENUM_DECISION_STATUS s) const
       { switch(s){case DECISION_BUY_CANDIDATE:return "GREEN";case DECISION_SELL_CANDIDATE:return "RED";case DECISION_NO_TRADE:return "GREY";case DECISION_DATA_UNAVAILABLE:return "GREY";case DECISION_NEWS_BLOCKED:return "AMBER";case DECISION_RISK_REJECTED:return "AMBER";case DECISION_CONFLICTED_SIGNAL:return "AMBER";default:return "GREY";} }
-    color ColorFromString(const string c) const
+color ColorFromString(const string c) const
       {
        string n=c; StringTrimLeft(n); StringTrimRight(n); StringToUpper(n);
-if(n=="GREEN") return clrDarkGreen;
-        if(n=="RED") return clrDarkRed;
-        if(n=="AMBER") return clrDarkOrange;
-        if(n=="GREY") return clrDimGray;
-        if(n=="LIME") return clrSeaGreen;
-        if(n=="SILVER") return clrDarkSlateGray;
-        if(n=="TEAL") return clrTeal;
-        if(n=="CHARCOAL") return clrBlack;
-        return clrBlack;
+       if(n=="GREEN") return clrDarkGreen;
+       if(n=="RED") return clrDarkRed;
+       if(n=="AMBER") return clrDarkOrange;
+       if(n=="GREY") return clrDimGray;
+       if(n=="LIME") return clrSeaGreen;
+       if(n=="SILVER") return clrDarkSlateGray;
+       if(n=="TEAL") return clrTeal;
+       if(n=="CHARCOAL") return clrBlack;
+       return clrBlack;
       }
-    string TimeframeText(ENUM_TIMEFRAMES tf) const
-      {
-       switch(tf)
-         {
-          case PERIOD_M1: return "M1";
-          case PERIOD_M5: return "M5";
-          case PERIOD_M15: return "M15";
-          case PERIOD_M30: return "M30";
-          case PERIOD_H1: return "H1";
-          case PERIOD_H4: return "H4";
-          case PERIOD_D1: return "D1";
-          case PERIOD_W1: return "W1";
-          case PERIOD_MN1: return "MN1";
-          default: return "TF";
-         }
-      }
+    string TimeframeText(ENUM_TIMEFRAMES tf) const { return CAlgoUtils::TimeframeToString(tf); }
     string ShortReason(const string r) const
       { if(StringLen(r)<=20) return r; return StringSubstr(r,0,17)+"..."; }
 
