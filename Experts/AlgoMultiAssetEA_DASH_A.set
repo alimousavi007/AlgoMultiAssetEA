@@ -1,0 +1,125 @@
+; AlgoMultiAssetEA Dashboard Test SET A
+; Generated: 2026-11-15
+; Version: 1.002
+; Purpose: Visual Strategy Tester A/B test - Dashboard configuration A
+; Safe Dashboard-Only Mode: ENABLED (blocks all broker mutations)
+
+; === 01. General & Trading Mode ===
+InpTradingStyle=1
+InpStrategyGroupKey=ALGO_MULTI_ASSET_EA_DASH_A
+InpMode=0
+InpLiveAutoConfirm=false
+InpDashboardViewMode=1
+InpDashboard=true
+InpDashboardCompact=false
+InpDashboardOverlay=true
+InpDashboardDiagnostics=true
+InpDashboardSafeMode=true
+InpEnforceSafeModeInTester=true
+InpLogLevel=3
+InpLogFile=true
+InpLogFlushEachWrite=true
+InpLogSummarySeconds=30
+
+; === 02. Trading Symbols ===
+InpUseDynamicForex=true
+InpForexMaxSymbols=40
+InpIncludeMetalsCrypto=true
+InpGoldSymbol=XAUUSDb
+InpSilverSymbol=XAGUSDb
+InpBitcoinSymbol=BTCUSD
+
+; === 03. Hybrid Decision ===
+InpMinRR=1.50
+InpMinScore=70.0
+InpConflictThreshold=15.0
+InpEntryToleranceScalp=5.0
+InpEntryToleranceDay=20.0
+InpEntryToleranceSwing=50.0
+InpAllowMeanReversion=false
+
+; === 04. Volume Profile ===
+InpProfileSessionBars=78
+InpProfileRollingBars=156
+InpValueAreaPercent=0.68
+InpProfileEnabled=true
+
+; === 05. Liquidity & Market Structure ===
+InpSwingLookback=5
+InpEqualTolerancePoints=3
+InpMaxLevelAgeBars=100
+InpSweepConfirmBars=3
+
+; === 06. Divergence & Momentum ===
+InpRSIPeriod=14
+InpMACD_Fast=12
+InpMACD_Slow=26
+InpMACD_Signal=9
+InpPivotTolerancePercent=0.02
+InpMaxDivergenceAgeBars=30
+InpMomentumLookback=50
+
+; === 07. Market Regime ===
+InpADXPeriod=14
+InpADXTrendThreshold=25
+InpHighVolatilityRatio=1.50
+InpLowVolatilityRatio=0.70
+InpRangeLookback=20
+InpHysteresisBars=3
+
+; === 08. News Filter ===
+InpNewsBlackoutBefore=30
+InpNewsBlackoutAfter=30
+InpNewsCooldown=60
+InpNewsImpactThreshold=3
+InpNewsPreventEntries=true
+InpNewsCloseOnNews=false
+InpNewsEnabled=true
+
+; === 09. Risk Management ===
+InpRiskPercent=1.0
+InpDailyLossLimit=3.0
+InpMonthlyLossLimit=6.0
+InpMaxConsecutiveLosses=5
+InpMaxPositionsTotal=10
+InpMaxPositionsPerSymbol=1
+InpMaxPositionsPerStrategy=2
+InpMaxPortfolioRisk=3.0
+InpMaxPreciousMetalsRisk=2.0
+InpMarginSafetyFraction=0.80
+InpDeviationPoints=20
+
+; === 09b. External Risk Lock ===
+InpExternalRiskLockEnabled=false
+InpExternalRiskLockGVPrefix=ALGO_EXT_RISK_LOCK
+InpExternalRiskLockTTL=60
+InpExternalRiskLockFailClosed=true
+
+; === 10. Trading Sessions & Market Filters ===
+InpSessionFilter=true
+InpSessionStartHour=0
+InpSessionEndHour=24
+InpUseSpreadFilter=true
+InpMaxSpreadPoints=50
+
+; === 11. Dashboard & Diagnostics ===
+InpDashboardCompact=false
+InpDashboardOverlay=true
+
+; === 12. Position Management ===
+InpBreakEven=false
+InpBreakEvenTriggerR=1.0
+InpBreakEvenOffsetPoints=0.0
+InpTrailing=false
+InpTrailingTF=16385
+InpTrailingATRPeriod=14
+InpTrailingATRMultiplier=2.0
+InpTimeExit=false
+InpMaxHoldingMinutes=240
+
+; === 13. Data Freshness ===
+InpFreshnessContextSeconds=300
+InpFreshnessStructureSeconds=300
+InpFreshnessSetupSeconds=300
+InpFreshnessEntrySeconds=60
+InpFreshnessOverrides=

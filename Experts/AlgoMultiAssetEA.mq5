@@ -29,6 +29,7 @@
 #include "../Include/AlgoSystem/StateManager.mqh"
 #include "../Include/AlgoSystem/SessionFilter.mqh"
 #include "../Include/AlgoSystem/MetricsExporter.mqh"
+#include "../Include/AlgoSystem/DashboardDiag.mqh"
 
 #include <Object.mqh>
 #include <Arrays\ArrayObj.mqh>
@@ -46,6 +47,7 @@ input(name="Confirm Live Automatic Trading") bool               InpLiveAutoConfi
 enum ENUM_DASHBOARD_VIEW_MODE { DASHBOARD_COMPACT, DASHBOARD_NORMAL, DASHBOARD_FULL };
 input(name="Dashboard View Mode")          ENUM_DASHBOARD_VIEW_MODE InpDashboardViewMode=DASHBOARD_FULL;
 input(name="Enable Dashboard")             bool               InpDashboard=true;
+input(name="Enable Dashboard Diagnostics")  bool               InpDashboardDiagnostics=false;
 input(name="Log Level")                    ENUM_LOG_LEVEL     InpLogLevel=LOG_INFO;
 input(name="Log to File")                  bool               InpLogFile=true;
 input(name="Flush Log on Each Write")      bool               InpLogFlushEachWrite=true;
@@ -119,6 +121,12 @@ input(name="Max Precious Metals Risk (%)") double             InpMaxPreciousMeta
 input(name="Margin Safety Fraction")       double             InpMarginSafetyFraction=0.80;
 input(name="Maximum Execution Deviation (Points)") ulong      InpDeviationPoints=20;
 
+input group "09b. External Risk Lock"
+input(name="Enable External Risk Lock")    bool               InpExternalRiskLockEnabled=false;
+input(name="External Risk Lock GV Prefix") string             InpExternalRiskLockGVPrefix="ALGO_EXT_RISK_LOCK";
+input(name="External Risk Lock TTL (Sec)") int                InpExternalRiskLockTTL=60;
+input(name="Fail Closed on Stale/Unavail") bool               InpExternalRiskLockFailClosed=true;
+
 input group "10. Trading Sessions & Market Filters"
 input(name="Enable Session Filter")        bool               InpSessionFilter=true;
 input(name="Session Start Hour (Server)")  int                InpSessionStartHour=0;
@@ -128,8 +136,9 @@ input(name="Max Spread (Points)")          int                InpMaxSpreadPoints
 
 input group "11. Dashboard & Diagnostics"
 input(name="Compact Dashboard View")       bool               InpDashboardCompact=true;
-input(name="Show Diagnostics")             bool               InpDashboardDiagnostics=false;
 input(name="Show Overlay")                 bool               InpDashboardOverlay=true;
+input(name="Safe Dashboard-Only Mode")     bool               InpDashboardSafeMode=false;
+input(name="Enforce Safe Mode in Tester")  bool               InpEnforceSafeModeInTester=true;
 
 input group "12. Position Management"
 input(name="Enable Break-Even")            bool               InpBreakEven=false;
@@ -738,12 +747,16 @@ struct SubscriberRecord
 SubscriberRecord g_subscribers[64];
 int g_subscriber_count = 0;
 // E2.1: Strategy Group identity and Config Fingerprint (single-instance only;
-// cross-instance durable arbitration requires later Ledger/Gateway packages)
-string g_strategy_group_key = "";
-string g_config_fingerprint = "";
-int g_runtime_count_max=256;
+ // cross-instance durable arbitration requires later Ledger/Gateway packages)
+ string g_strategy_group_key = "";
+ string g_config_fingerprint = "";
+ int g_runtime_count_max=256;
 
-//==================================================================
+ // Dashboard Diagnostics
+ CDashboardDiag g_dashboard_diag;
+ bool g_dashboard_diag_enabled = false;
+
+ //==================================================================
 // Concurrency Engine (WP-05)
 //==================================================================
 // Fair Lock using Global Variables (ticket-based FIFO)
@@ -1100,9 +1113,12 @@ public:
          if(ticket == 0) continue;
          
 double pl = PositionGetDouble(POSITION_PROFIT);
-          double swap = PositionGetDouble(POSITION_SWAP);
-          double commission = PositionGetDouble(POSITION_COMMISSION);
-          double volume = PositionGetDouble(POSITION_VOLUME);
+           double swap = PositionGetDouble(POSITION_SWAP);
+           // POSITION_COMMISSION is deprecated; commission is obtained from deal history via HistorySelectByPosition().
+           // For unrealized risk estimation, commission on open positions is typically minimal or not yet charged.
+           // Using 0 here avoids expensive history selection on every risk calculation.
+           double commission = 0.0;
+           double volume = PositionGetDouble(POSITION_VOLUME);
           string sym = PositionGetString(POSITION_SYMBOL);
           long magic = PositionGetInteger(POSITION_MAGIC);
           
@@ -1376,47 +1392,622 @@ bool g_last_trading_locked=false;
 string g_last_runtime_dashboard_status="";
 datetime g_ea_start_time=0;
 
+// Safe Dashboard-Only Mode: blocks all broker mutation paths
+// Enforcement (IsSafeModeEnforced):
+//   - Live (outside Tester): ALWAYS enforced if InpDashboardSafeMode=true (fail-closed)
+//   - Visual Tester: enforced if InpDashboardSafeMode=true
+//   - Non-Visual Tester: enforced if InpDashboardSafeMode=true AND InpEnforceSafeModeInTester=true (default)
+// Active dashboard display (IsSafeModeActive): only MQL_TESTER && MQL_VISUAL_MODE && InpDashboardSafeMode
+int g_blocked_mutation_count = 0;
+int g_executed_mutation_count = 0;
+
+bool IsSafeModeActive()
+{
+   return (MQLInfoInteger(MQL_TESTER) != 0) && 
+          (MQLInfoInteger(MQL_VISUAL_MODE) != 0) && 
+          InpDashboardSafeMode;
+}
+
+bool IsSafeModeEnforced()
+{
+   // Safe Mode is fail-closed outside Tester or when not in Visual Mode
+   // If InpEnforceSafeModeInTester is true, also enforce in Tester without Visual Mode
+   bool in_tester = (MQLInfoInteger(MQL_TESTER) != 0);
+   bool in_visual = (MQLInfoInteger(MQL_VISUAL_MODE) != 0);
+   
+   // Outside Tester: Safe Mode enforced if enabled (fail-closed)
+   if(!in_tester)
+      return InpDashboardSafeMode;
+   
+   // Inside Visual Tester: Safe Mode enforced if enabled
+   if(in_visual)
+      return InpDashboardSafeMode;
+   
+   // Inside non-Visual Tester: Safe Mode enforced only if both enabled AND Enforce flag set
+   return InpDashboardSafeMode && InpEnforceSafeModeInTester;
+}
+
+//==================================================================
+// P0-2: External Risk Lock via Global Variables
+//==================================================================
+// State codes for External Risk Lock
+#define EXT_RISK_LOCK_DISABLED         0
+#define EXT_RISK_LOCK_UNLOCKED         1
+#define EXT_RISK_LOCK_LOCKED           2
+#define EXT_RISK_LOCK_UNKNOWN          3
+// Additional states for detailed tracking (not used in switch, mapped to UNKNOWN)
+#define EXT_RISK_LOCK_SOURCE_UNAVAILABLE  4
+#define EXT_RISK_LOCK_STALE               5
+#define EXT_RISK_LOCK_SCOPE_MISMATCH      6
+
+// External Risk Lock reason codes (stored as int in Global Variables)
+enum ENUM_EXT_RISK_LOCK_REASON
+  {
+   EXT_RISK_LOCK_REASON_NONE = 0,
+   EXT_RISK_LOCK_REASON_MANUAL = 1,
+   EXT_RISK_LOCK_REASON_AUTO = 2,
+   EXT_RISK_LOCK_REASON_RISK_MGR = 3,
+   EXT_RISK_LOCK_REASON_TTL_EXPIRED = 4,
+   EXT_RISK_LOCK_REASON_STALE = 5,
+   EXT_RISK_LOCK_REASON_SCOPE_MISMATCH = 6,
+   EXT_RISK_LOCK_REASON_DISABLED = 7,
+   EXT_RISK_LOCK_REASON_GV_NOT_FOUND = 8,
+   EXT_RISK_LOCK_REASON_UNKNOWN = 9
+  };
+
+// External Risk Lock source codes (stored as int in Global Variables)
+enum ENUM_EXT_RISK_LOCK_SOURCE
+  {
+   EXT_RISK_LOCK_SRC_NONE = 0,
+   EXT_RISK_LOCK_SRC_MANUAL = 1,
+   EXT_RISK_LOCK_SRC_RISK_MGR = 2,
+   EXT_RISK_LOCK_SRC_AUTO = 3,
+   EXT_RISK_LOCK_SRC_EXTERNAL_TOOL = 4,
+   EXT_RISK_LOCK_SRC_SYSTEM = 5
+  };
+
+// Convert reason code to human-readable string
+string ExtRiskLockReasonToString(const int reason_code)
+  {
+   switch(reason_code)
+     {
+      case EXT_RISK_LOCK_REASON_NONE:           return "None";
+      case EXT_RISK_LOCK_REASON_MANUAL:         return "Manual lock";
+      case EXT_RISK_LOCK_REASON_AUTO:           return "Automatic lock";
+      case EXT_RISK_LOCK_REASON_RISK_MGR:       return "Risk Manager";
+      case EXT_RISK_LOCK_REASON_TTL_EXPIRED:    return "TTL expired";
+      case EXT_RISK_LOCK_REASON_STALE:          return "State stale";
+      case EXT_RISK_LOCK_REASON_SCOPE_MISMATCH: return "Scope mismatch";
+      case EXT_RISK_LOCK_REASON_DISABLED:       return "Disabled by configuration";
+      case EXT_RISK_LOCK_REASON_GV_NOT_FOUND:   return "GV not found";
+      case EXT_RISK_LOCK_REASON_UNKNOWN:        return "Unknown";
+      default:                                  return "Invalid code (" + IntegerToString(reason_code) + ")";
+     }
+  }
+
+// Convert source code to human-readable string
+string ExtRiskLockSourceToString(const int source_code)
+  {
+   switch(source_code)
+     {
+      case EXT_RISK_LOCK_SRC_NONE:          return "None";
+      case EXT_RISK_LOCK_SRC_MANUAL:        return "MANUAL";
+      case EXT_RISK_LOCK_SRC_RISK_MGR:      return "RISK_MGR";
+      case EXT_RISK_LOCK_SRC_AUTO:          return "AUTO";
+      case EXT_RISK_LOCK_SRC_EXTERNAL_TOOL: return "EXTERNAL_TOOL";
+      case EXT_RISK_LOCK_SRC_SYSTEM:        return "SYSTEM";
+      default:                              return "INVALID(" + IntegerToString(source_code) + ")";
+     }
+  }
+
+struct ExtRiskLockState
+  {
+   int        state;              // EXT_RISK_LOCK_DISABLED/UNLOCKED/LOCKED/UNKNOWN
+   int        reason_code;        // ENUM_EXT_RISK_LOCK_REASON
+   int        source_code;        // ENUM_EXT_RISK_LOCK_SOURCE
+   datetime   updated_at;         // Last update timestamp
+   datetime   expiry;             // Expiry timestamp (0 = no expiry)
+   int        revision;           // Revision counter for change detection
+   bool       valid;              // True if state was successfully read
+  };
+
+// P0-2: Global storage for External Risk Lock state (updated in RefreshTradingState)
+ExtRiskLockState g_ext_risk_lock_state;
+bool g_ext_risk_lock_state_valid=false;
+
 //==================================================================
 // Dashboard helpers
 //==================================================================
 // F11: Snapshot sharing via Global Variables for multi-chart Dashboard
+// P0 FIX: Key length must not exceed 63 chars (MQL5 Global Variable limit).
+// Original format: "ALGO_HYBRID_SNAPSHOT_<group_key>_<symbol>_<field>" could exceed 63 chars.
+// New format: "AHSS_<hash8>_<field_short>" where hash8 = first 8 chars of hash(group_key + "|" + symbol)
+// Field names shortened: generation→gen, snapshot_time→sn_t, last_success_time→ls_t,
+// current_stage→stg, last_block_reason→blk, configured_style→cfg, regime_code→reg,
+// bias_code→bis, long_code→lng, short_code→sht, regime_state→rs, bias_state→bs, long_state→ls, short_state→ss
+
 string SnapshotGVKey(const string symbol, const string field)
   {
-   return "ALGO_HYBRID_SNAPSHOT_" + g_strategy_group_key + "_" + symbol + "_" + field;
+   // Build compact key: AHSS_<hash8>_<field_short>
+   // Normalize symbol to handle broker suffixes/prefixes (e.g., EURUSD.pro vs EURUSD)
+   // This ensures Coordinator and Chart Context generate identical GV keys for the same logical symbol.
+   string norm_symbol = NormalizeSymbolForComparison(symbol);
+   string combined = g_strategy_group_key + "|" + norm_symbol;
+   uint h = 5381;
+   for(int i = 0; i < StringLen(combined); i++)
+     {
+      h = ((h << 5) + h) + (uint)StringGetCharacter(combined, i);
+     }
+   string hash8 = IntegerToString((long)h, 16);
+   if(StringLen(hash8) > 8) hash8 = StringSubstr(hash8, 0, 8);
+   
+   // Map field names to short versions
+   string field_short = field;
+   if(field == "generation") field_short = "gen";
+   else if(field == "snapshot_time") field_short = "sn_t";
+   else if(field == "last_success_time") field_short = "ls_t";
+   else if(field == "current_stage") field_short = "stg";
+   else if(field == "last_block_reason") field_short = "blk";
+   else if(field == "configured_style") field_short = "cfg";
+   else if(field == "regime_code") field_short = "reg";
+   else if(field == "bias_code") field_short = "bis";
+   else if(field == "long_code") field_short = "lng";
+   else if(field == "short_code") field_short = "sht";
+   else if(field == "regime_state") field_short = "rs";
+   else if(field == "bias_state") field_short = "bs";
+   else if(field == "long_state") field_short = "ls";
+   else if(field == "short_state") field_short = "ss";
+   
+string key = "AHSS_" + hash8 + "_" + field_short;
+    // Safety: ensure key <= 63 chars (should be ~20 chars with new format)
+    if(StringLen(key) > 63)
+      {
+       key = StringSubstr(key, 0, 63);
+      }
+    // NOTE: 32-bit hash (8 hex chars) has collision risk (~1 in 4 billion per pair).
+    // Accepted for expected cardinality (few dozen symbols/groups). If higher
+    // cardinality is needed, extend hash length within 63-char limit.
+    return key;
   }
 
-void WriteSnapshotToGV(const string symbol,
-                        const int generation,
-                        const datetime snapshot_time,
-                        const datetime last_success_time,
-                        const int current_stage_code,
-                        const int last_block_reason_code,
-                        const int configured_style,
-                        const int regime_code,
-                        const int bias_code,
-                        const int long_code,
-                        const int short_code,
-                        const int regime_state,
-                        const int bias_state,
-                        const int long_state,
-                        const int short_state)
+// WriteSnapshotToGV: returns true if all 14 GlobalVariableSet calls succeed
+bool WriteSnapshotToGV(const string symbol,
+                         const int generation,
+                         const datetime snapshot_time,
+                         const datetime last_success_time,
+                         const int current_stage_code,
+                         const int last_block_reason_code,
+                         const int configured_style,
+                         const int regime_code,
+                         const int bias_code,
+                         const int long_code,
+                         const int short_code,
+                         const int regime_state,
+                         const int bias_state,
+                         const int long_state,
+                         const int short_state)
   {
-   GlobalVariableSet(SnapshotGVKey(symbol, "generation"), generation);
-   GlobalVariableSet(SnapshotGVKey(symbol, "snapshot_time"), snapshot_time);
-   GlobalVariableSet(SnapshotGVKey(symbol, "last_success_time"), last_success_time);
-   GlobalVariableSet(SnapshotGVKey(symbol, "current_stage"), current_stage_code);
-   GlobalVariableSet(SnapshotGVKey(symbol, "last_block_reason"), last_block_reason_code);
-   GlobalVariableSet(SnapshotGVKey(symbol, "configured_style"), configured_style);
-   GlobalVariableSet(SnapshotGVKey(symbol, "regime_code"), regime_code);
-   GlobalVariableSet(SnapshotGVKey(symbol, "bias_code"), bias_code);
-   GlobalVariableSet(SnapshotGVKey(symbol, "long_code"), long_code);
-   GlobalVariableSet(SnapshotGVKey(symbol, "short_code"), short_code);
-   GlobalVariableSet(SnapshotGVKey(symbol, "regime_state"), regime_state);
-   GlobalVariableSet(SnapshotGVKey(symbol, "bias_state"), bias_state);
-   GlobalVariableSet(SnapshotGVKey(symbol, "long_state"), long_state);
-   GlobalVariableSet(SnapshotGVKey(symbol, "short_state"), short_state);
+   bool all_ok = true;
+   string err_details = "";
+   
+   // Diagnostics: collect keys for logging
+   string gv_keys_written[];
+   string gv_keys_failed[];
+   int written_count = 0;
+   int failed_count = 0;
+   
+   // Check each GlobalVariableSet call individually
+   string key;
+   datetime result;
+   int err;
+   
+   key = SnapshotGVKey(symbol, "generation");
+   result = GlobalVariableSet(key, generation);
+   if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "gen key=" + key + " err=" + IntegerToString(err); ResetLastError(); ArrayResize(gv_keys_failed, failed_count + 1); gv_keys_failed[failed_count] = key; failed_count++; }
+   else { ArrayResize(gv_keys_written, written_count + 1); gv_keys_written[written_count] = key; written_count++; }
+   
+   key = SnapshotGVKey(symbol, "snapshot_time");
+   result = GlobalVariableSet(key, snapshot_time);
+   if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "sn_t key=" + key + " err=" + IntegerToString(err); ResetLastError(); ArrayResize(gv_keys_failed, failed_count + 1); gv_keys_failed[failed_count] = key; failed_count++; }
+   else { ArrayResize(gv_keys_written, written_count + 1); gv_keys_written[written_count] = key; written_count++; }
+   
+   key = SnapshotGVKey(symbol, "last_success_time");
+   result = GlobalVariableSet(key, last_success_time);
+   if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "ls_t key=" + key + " err=" + IntegerToString(err); ResetLastError(); ArrayResize(gv_keys_failed, failed_count + 1); gv_keys_failed[failed_count] = key; failed_count++; }
+   else { ArrayResize(gv_keys_written, written_count + 1); gv_keys_written[written_count] = key; written_count++; }
+   
+   key = SnapshotGVKey(symbol, "current_stage");
+   result = GlobalVariableSet(key, current_stage_code);
+   if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "stg key=" + key + " err=" + IntegerToString(err); ResetLastError(); ArrayResize(gv_keys_failed, failed_count + 1); gv_keys_failed[failed_count] = key; failed_count++; }
+   else { ArrayResize(gv_keys_written, written_count + 1); gv_keys_written[written_count] = key; written_count++; }
+   
+   key = SnapshotGVKey(symbol, "last_block_reason");
+   result = GlobalVariableSet(key, last_block_reason_code);
+   if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "blk key=" + key + " err=" + IntegerToString(err); ResetLastError(); ArrayResize(gv_keys_failed, failed_count + 1); gv_keys_failed[failed_count] = key; failed_count++; }
+   else { ArrayResize(gv_keys_written, written_count + 1); gv_keys_written[written_count] = key; written_count++; }
+   
+   key = SnapshotGVKey(symbol, "configured_style");
+   result = GlobalVariableSet(key, configured_style);
+   if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "cfg key=" + key + " err=" + IntegerToString(err); ResetLastError(); ArrayResize(gv_keys_failed, failed_count + 1); gv_keys_failed[failed_count] = key; failed_count++; }
+   else { ArrayResize(gv_keys_written, written_count + 1); gv_keys_written[written_count] = key; written_count++; }
+   
+   key = SnapshotGVKey(symbol, "regime_code");
+   result = GlobalVariableSet(key, regime_code);
+   if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "reg key=" + key + " err=" + IntegerToString(err); ResetLastError(); ArrayResize(gv_keys_failed, failed_count + 1); gv_keys_failed[failed_count] = key; failed_count++; }
+   else { ArrayResize(gv_keys_written, written_count + 1); gv_keys_written[written_count] = key; written_count++; }
+   
+   key = SnapshotGVKey(symbol, "bias_code");
+   result = GlobalVariableSet(key, bias_code);
+   if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "bis key=" + key + " err=" + IntegerToString(err); ResetLastError(); ArrayResize(gv_keys_failed, failed_count + 1); gv_keys_failed[failed_count] = key; failed_count++; }
+   else { ArrayResize(gv_keys_written, written_count + 1); gv_keys_written[written_count] = key; written_count++; }
+   
+   key = SnapshotGVKey(symbol, "long_code");
+   result = GlobalVariableSet(key, long_code);
+   if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "lng key=" + key + " err=" + IntegerToString(err); ResetLastError(); ArrayResize(gv_keys_failed, failed_count + 1); gv_keys_failed[failed_count] = key; failed_count++; }
+   else { ArrayResize(gv_keys_written, written_count + 1); gv_keys_written[written_count] = key; written_count++; }
+   
+   key = SnapshotGVKey(symbol, "short_code");
+   result = GlobalVariableSet(key, short_code);
+   if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "sht key=" + key + " err=" + IntegerToString(err); ResetLastError(); ArrayResize(gv_keys_failed, failed_count + 1); gv_keys_failed[failed_count] = key; failed_count++; }
+   else { ArrayResize(gv_keys_written, written_count + 1); gv_keys_written[written_count] = key; written_count++; }
+   
+   key = SnapshotGVKey(symbol, "regime_state");
+   result = GlobalVariableSet(key, regime_state);
+   if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "rs key=" + key + " err=" + IntegerToString(err); ResetLastError(); ArrayResize(gv_keys_failed, failed_count + 1); gv_keys_failed[failed_count] = key; failed_count++; }
+   else { ArrayResize(gv_keys_written, written_count + 1); gv_keys_written[written_count] = key; written_count++; }
+   
+   key = SnapshotGVKey(symbol, "bias_state");
+   result = GlobalVariableSet(key, bias_state);
+   if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "bs key=" + key + " err=" + IntegerToString(err); ResetLastError(); ArrayResize(gv_keys_failed, failed_count + 1); gv_keys_failed[failed_count] = key; failed_count++; }
+   else { ArrayResize(gv_keys_written, written_count + 1); gv_keys_written[written_count] = key; written_count++; }
+   
+   key = SnapshotGVKey(symbol, "long_state");
+   result = GlobalVariableSet(key, long_state);
+   if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "ls key=" + key + " err=" + IntegerToString(err); ResetLastError(); ArrayResize(gv_keys_failed, failed_count + 1); gv_keys_failed[failed_count] = key; failed_count++; }
+   else { ArrayResize(gv_keys_written, written_count + 1); gv_keys_written[written_count] = key; written_count++; }
+   
+   key = SnapshotGVKey(symbol, "short_state");
+   result = GlobalVariableSet(key, short_state);
+   if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "ss key=" + key + " err=" + IntegerToString(err); ResetLastError(); ArrayResize(gv_keys_failed, failed_count + 1); gv_keys_failed[failed_count] = key; failed_count++; }
+   else { ArrayResize(gv_keys_written, written_count + 1); gv_keys_written[written_count] = key; written_count++; }
+   
+   if(!all_ok)
+     {
+      g_logger.Event(LOG_ERROR, "DASHBOARD", "SNAPSHOT_GV_WRITE_FAILED", symbol, "", "", "", "FAIL", "GV_WRITE",
+                     "One or more GlobalVariableSet failed: " + err_details);
+     }
+   
+// Diagnostics logging
+    if(g_dashboard_diag_enabled)
+      {
+       // Pass max key length and a summary
+       int max_key_len = 0;
+       for(int k = 0; k < written_count; k++)
+         {
+          if(StringLen(gv_keys_written[k]) > max_key_len)
+             max_key_len = StringLen(gv_keys_written[k]);
+         }
+       for(int k = 0; k < failed_count; k++)
+         {
+          if(StringLen(gv_keys_failed[k]) > max_key_len)
+             max_key_len = StringLen(gv_keys_failed[k]);
+         }
+       string written_summary = "";
+       for(int k = 0; k < written_count && k < 3; k++)
+         {
+          if(written_summary != "") written_summary += ",";
+          written_summary += gv_keys_written[k];
+         }
+       string failed_summary = "";
+       for(int k = 0; k < failed_count && k < 3; k++)
+         {
+          if(failed_summary != "") failed_summary += ",";
+          failed_summary += gv_keys_failed[k];
+         }
+       g_dashboard_diag.LogSnapshotWrite(symbol, generation, all_ok, err_details, written_summary, failed_summary, max_key_len);
+      }
+   
+   return all_ok;
   }
 
+//==================================================================
+// P0-2: External Risk Lock via Global Variables
+//==================================================================
+// DJB2 hash for compact GV key generation (used by both Snapshot and ExtRiskLock)
+uint DJB2Hash8(const string str)
+  {
+   uint hash = 5381;
+   for(int i = 0; i < StringLen(str); ++i)
+     {
+      hash = ((hash << 5) + hash) + (ushort)StringGetCharacter(str, i);
+     }
+   return hash & 0xFFFFFFFF;
+  }
+
+// Compact External Risk Lock GV Key: "AERL_<hash8>_<field_short>"
+// hash8 = DJB2 hash of account_key (server_login), 8 hex chars
+// field_short: state→st, reason→rsn, source→src, updated_at→upd, expiry→exp, revision→rev
+// Max length: 5 + 1 + 8 + 1 + 4 = 19 chars (well under 63-char MQL5 GV limit)
+string ExtRiskLockGVKey(const string field)
+  {
+   string account_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
+   uint hash = DJB2Hash8(account_key);
+   string hash8 = IntegerToString((long)hash, 16);
+   if(StringLen(hash8) > 8) hash8 = StringSubstr(hash8, 0, 8);
+   else if(StringLen(hash8) < 8)
+     {
+      string zeros = "";
+      for(int z = 0; z < 8 - StringLen(hash8); ++z) zeros += "0";
+      hash8 = zeros + hash8;
+     }
+   
+   string field_short;
+   if(field == "state") field_short = "st";
+   else if(field == "reason") field_short = "rsn";
+   else if(field == "source") field_short = "src";
+   else if(field == "updated_at") field_short = "upd";
+   else if(field == "expiry") field_short = "exp";
+   else if(field == "revision") field_short = "rev";
+   else field_short = field; // fallback for unknown fields
+   
+   string key = "AERL_" + hash8 + "_" + field_short;
+   if(StringLen(key) > 63) key = StringSubstr(key, 0, 63);
+   return key;
+  }
+
+// Read External Risk Lock state from Global Variables
+ // Returns state struct with valid=false if disabled, unavailable, or stale
+ ExtRiskLockState ReadExtRiskLockState()
+   {
+    ExtRiskLockState state;
+    state.state = EXT_RISK_LOCK_UNKNOWN;
+    state.reason_code = EXT_RISK_LOCK_REASON_NONE;
+    state.source_code = EXT_RISK_LOCK_SRC_NONE;
+    state.updated_at = 0;
+    state.expiry = 0;
+    state.revision = 0;
+    state.valid = false;
+
+    if(!InpExternalRiskLockEnabled)
+      {
+      state.state = EXT_RISK_LOCK_DISABLED;
+      state.reason_code = EXT_RISK_LOCK_REASON_DISABLED;
+      state.valid = true;
+      return state;
+      }
+
+    string state_key = ExtRiskLockGVKey("state");
+    if(!GlobalVariableCheck(state_key))
+      {
+      state.reason_code = EXT_RISK_LOCK_REASON_GV_NOT_FOUND;
+      if(InpExternalRiskLockFailClosed)
+        {
+        state.state = EXT_RISK_LOCK_UNKNOWN; // Fail-closed
+        }
+      else
+        {
+        state.state = EXT_RISK_LOCK_UNLOCKED; // Permissive (not recommended)
+        }
+      state.valid = true;
+      return state;
+      }
+
+    state.state = (int)GlobalVariableGet(state_key);
+    state.reason_code = (int)GlobalVariableGet(ExtRiskLockGVKey("reason"));
+    state.source_code = (int)GlobalVariableGet(ExtRiskLockGVKey("source"));
+    state.updated_at = (datetime)GlobalVariableGet(ExtRiskLockGVKey("updated_at"));
+    state.expiry = (datetime)GlobalVariableGet(ExtRiskLockGVKey("expiry"));
+    state.revision = (int)GlobalVariableGet(ExtRiskLockGVKey("revision"));
+
+    // Check TTL/staleness
+    datetime now = TimeCurrent();
+    if(state.expiry > 0 && now > state.expiry)
+      {
+      state.reason_code = EXT_RISK_LOCK_REASON_TTL_EXPIRED;
+      if(InpExternalRiskLockFailClosed)
+        state.state = EXT_RISK_LOCK_UNKNOWN; // Fail-closed on stale
+      else
+        state.state = EXT_RISK_LOCK_UNLOCKED;
+      }
+    else if(InpExternalRiskLockTTL > 0 && (now - state.updated_at) > InpExternalRiskLockTTL)
+      {
+      state.reason_code = EXT_RISK_LOCK_REASON_STALE;
+      if(InpExternalRiskLockFailClosed)
+        state.state = EXT_RISK_LOCK_UNKNOWN; // Fail-closed on stale
+      else
+        state.state = EXT_RISK_LOCK_UNLOCKED;
+      }
+
+    state.valid = true;
+    return state;
+   }
+
+// Write External Risk Lock state to Global Variables (for external control tools/scripts)
+ // Returns true if all 6 GlobalVariableSet calls succeed
+ bool WriteExtRiskLockState(const int state_code,
+                            const int reason_code,
+                            const int source_code,
+                            const datetime expiry,
+                            const int revision)
+   {
+    if(!InpExternalRiskLockEnabled)
+      {
+       g_logger.Event(LOG_INFO, "RISK", "EXT_RISK_LOCK_WRITE_SKIPPED", "", "", "", "", "SKIP", "EXT_LOCK",
+                      "External Risk Lock disabled by configuration");
+       return false;
+      }
+    bool all_ok = true;
+    string err_details = "";
+    string key;
+    datetime result;
+    int err;
+    
+    key = ExtRiskLockGVKey("state");
+    result = GlobalVariableSet(key, state_code);
+    if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "st key=" + key + " err=" + IntegerToString(err); ResetLastError(); }
+    
+    key = ExtRiskLockGVKey("reason");
+    result = GlobalVariableSet(key, reason_code);
+    if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "rsn key=" + key + " err=" + IntegerToString(err); ResetLastError(); }
+    
+    key = ExtRiskLockGVKey("source");
+    result = GlobalVariableSet(key, source_code);
+    if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "src key=" + key + " err=" + IntegerToString(err); ResetLastError(); }
+    
+    key = ExtRiskLockGVKey("updated_at");
+    result = GlobalVariableSet(key, TimeCurrent());
+    if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "upd key=" + key + " err=" + IntegerToString(err); ResetLastError(); }
+    
+    key = ExtRiskLockGVKey("expiry");
+    result = GlobalVariableSet(key, expiry);
+    if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "exp key=" + key + " err=" + IntegerToString(err); ResetLastError(); }
+    
+    key = ExtRiskLockGVKey("revision");
+    result = GlobalVariableSet(key, revision);
+    if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "rev key=" + key + " err=" + IntegerToString(err); ResetLastError(); }
+    
+    if(!all_ok)
+      {
+       g_logger.Event(LOG_ERROR, "RISK", "EXT_RISK_LOCK_GV_WRITE_FAILED", "", "", "", "", "FAIL", "GV_WRITE",
+                      "One or more GlobalVariableSet failed: " + err_details);
+      }
+    
+    return all_ok;
+   }
+
+// P0-2: Convert EA's ExtRiskLockState to PortfolioRisk's ExtRiskLockState
+ CAlgoPortfolioRisk::ExtRiskLockState ToPortfolioRiskLockState(const ExtRiskLockState &src)
+   {
+    CAlgoPortfolioRisk::ExtRiskLockState dst;
+    dst.state = src.state;
+    dst.reason = ExtRiskLockReasonToString(src.reason_code);
+    dst.source = ExtRiskLockSourceToString(src.source_code);
+    dst.updated_at = src.updated_at;
+    dst.expiry = src.expiry;
+    dst.revision = src.revision;
+    dst.valid = src.valid;
+    dst.fail_closed = InpExternalRiskLockFailClosed;
+    return dst;
+   }
+
+// P0-2: Fresh read of External Risk Lock state (for final submission gate)
+ExtRiskLockState ReadExtRiskLockStateFresh()
+{
+   return ReadExtRiskLockState();
+  }
+
+//+------------------------------------------------------------------+
+//| Helper: Read snapshot from Global Variables                      |
+//+------------------------------------------------------------------+
+struct GVSnapshotData
+  {
+   int generation;
+   datetime snapshot_time;
+   datetime last_success_time;
+   int current_stage_code;
+   int last_block_reason_code;
+   int configured_style;
+   int regime_code;
+   int bias_code;
+   int long_code;
+   int short_code;
+   int regime_state;
+   int bias_state;
+   int long_state;
+   int short_state;
+bool valid;
+   };
+
+//+------------------------------------------------------------------+
+//| Read snapshot from GV for a symbol                               |
+//+------------------------------------------------------------------+
+bool ReadGVSnapshot(const string symbol, GVSnapshotData &snap)
+  {
+   string gen_key = SnapshotGVKey(symbol, "generation");
+   if(!GlobalVariableCheck(gen_key))
+     {
+      snap.valid = false;
+      // Diagnostics logging
+      if(g_dashboard_diag_enabled)
+        {
+         g_dashboard_diag.LogSnapshotRead(symbol, false, 0, 0, "GV generation key not found: " + gen_key);
+        }
+      return false;
+     }
+   snap.generation = (int)GlobalVariableGet(gen_key);
+   snap.snapshot_time = (datetime)GlobalVariableGet(SnapshotGVKey(symbol, "snapshot_time"));
+   snap.last_success_time = (datetime)GlobalVariableGet(SnapshotGVKey(symbol, "last_success_time"));
+   snap.current_stage_code = (int)GlobalVariableGet(SnapshotGVKey(symbol, "current_stage"));
+   snap.last_block_reason_code = (int)GlobalVariableGet(SnapshotGVKey(symbol, "last_block_reason"));
+   snap.configured_style = (int)GlobalVariableGet(SnapshotGVKey(symbol, "configured_style"));
+   snap.regime_code = (int)GlobalVariableGet(SnapshotGVKey(symbol, "regime_code"));
+   snap.bias_code = (int)GlobalVariableGet(SnapshotGVKey(symbol, "bias_code"));
+   snap.long_code = (int)GlobalVariableGet(SnapshotGVKey(symbol, "long_code"));
+   snap.short_code = (int)GlobalVariableGet(SnapshotGVKey(symbol, "short_code"));
+   snap.regime_state = (int)GlobalVariableGet(SnapshotGVKey(symbol, "regime_state"));
+   snap.bias_state = (int)GlobalVariableGet(SnapshotGVKey(symbol, "bias_state"));
+   snap.long_state = (int)GlobalVariableGet(SnapshotGVKey(symbol, "long_state"));
+   snap.short_state = (int)GlobalVariableGet(SnapshotGVKey(symbol, "short_state"));
+   snap.valid = true;
+
+   // Diagnostics logging
+   if(g_dashboard_diag_enabled)
+     {
+      g_dashboard_diag.LogSnapshotRead(symbol, true, snap.generation, snap.snapshot_time, "");
+     }
+
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Helper: Apply GV snapshot to dashboard display                   |
+//+------------------------------------------------------------------+
+void ApplySnapshotToDashboard(const string symbol, const GVSnapshotData &snap)
+  {
+   string regime_text = EnumToString((ENUM_REGIME_TYPE)snap.regime_code);
+   string bias_text = EnumToString((ENUM_BIAS_DIRECTION)snap.bias_code);
+   string long_text = (snap.long_code == 1 ? "LONG CANDIDATE" : "NO LONG");
+   string short_text = (snap.short_code == 1 ? "SHORT CANDIDATE" : "NO SHORT");
+   string current_stage_text;
+   switch(snap.current_stage_code)
+     {
+      case 1: current_stage_text = "WAITING_FOR_NEW_ENTRY_BAR"; break;
+      case 2: current_stage_text = "WAITING_FOR_SIGNAL_BAR"; break;
+      case 3: current_stage_text = "EVALUATED"; break;
+      case 4: current_stage_text = "BLOCKED"; break;
+      default: current_stage_text = "NOT_EVALUATED"; break;
+     }
+   string last_block_reason_text;
+   switch(snap.last_block_reason_code)
+     {
+      case 1: last_block_reason_text = "NO_NEW_CLOSED_BAR"; break;
+      case 2: last_block_reason_text = "SIGNAL_MARKET_INVALID"; break;
+      default: last_block_reason_text = (snap.last_block_reason_code == 0 ? "" : "UNKNOWN"); break;
+     }
+
+   g_dashboard.SetRuntimeSnapshot(
+      EnumToString((ENUM_TRADING_STYLE)snap.configured_style),
+      regime_text,
+      bias_text,
+      long_text,
+      short_text,
+      current_stage_text,
+      last_block_reason_text,
+      snap.snapshot_time,
+      snap.last_success_time,
+      (snap.regime_state == SNAP_VALID));
+
+   // Diagnostics logging
+   if(g_dashboard_diag_enabled)
+     {
+      g_dashboard_diag.LogDashboardApply(symbol, true, current_stage_text, regime_text, bias_text,
+                                         long_text, short_text, (snap.regime_state == SNAP_VALID), snap.generation);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
 void UpdateDashboardForChart()
   {
    if(!g_system_ready || !InpDashboard)
@@ -1425,36 +2016,57 @@ void UpdateDashboardForChart()
    g_last_runtime_dashboard_status="";
    string chart_symbol=ChartSymbol(0);
 
+   // First: try to find local runtime for this chart symbol
    for(int i=0;i<g_runtime.Total();i++)
      {
       CSymbolRuntime *runtime = g_runtime.At(i);
       if(!runtime || !runtime.valid || runtime.symbol!=chart_symbol)
          continue;
 
-      // F11: If local snapshot not evaluated, try reading from Global Variables (shared by Coordinator)
-      if(runtime.snapshot.generation == 0)
-        {
-         string gen_key = SnapshotGVKey(chart_symbol, "generation");
-         if(GlobalVariableCheck(gen_key))
-           {
-            runtime.snapshot.generation = (int)GlobalVariableGet(gen_key);
-            runtime.snapshot.snapshot_time = (datetime)GlobalVariableGet(SnapshotGVKey(chart_symbol, "snapshot_time"));
-            runtime.snapshot.last_success_time = (datetime)GlobalVariableGet(SnapshotGVKey(chart_symbol, "last_success_time"));
-            runtime.snapshot.current_stage_code = (int)GlobalVariableGet(SnapshotGVKey(chart_symbol, "current_stage"));
-            runtime.snapshot.last_block_reason_code = (int)GlobalVariableGet(SnapshotGVKey(chart_symbol, "last_block_reason"));
-            runtime.snapshot.configured_style = (ENUM_TRADING_STYLE)(int)GlobalVariableGet(SnapshotGVKey(chart_symbol, "configured_style"));
-            runtime.snapshot.regime_code = (int)GlobalVariableGet(SnapshotGVKey(chart_symbol, "regime_code"));
-            runtime.snapshot.bias_code = (int)GlobalVariableGet(SnapshotGVKey(chart_symbol, "bias_code"));
-            runtime.snapshot.long_code = (int)GlobalVariableGet(SnapshotGVKey(chart_symbol, "long_code"));
-            runtime.snapshot.short_code = (int)GlobalVariableGet(SnapshotGVKey(chart_symbol, "short_code"));
-            runtime.snapshot.regime_state = (ESnapshotFieldState)(int)GlobalVariableGet(SnapshotGVKey(chart_symbol, "regime_state"));
-            runtime.snapshot.bias_state = (ESnapshotFieldState)(int)GlobalVariableGet(SnapshotGVKey(chart_symbol, "bias_state"));
-            runtime.snapshot.long_state = (ESnapshotFieldState)(int)GlobalVariableGet(SnapshotGVKey(chart_symbol, "long_state"));
-            runtime.snapshot.short_state = (ESnapshotFieldState)(int)GlobalVariableGet(SnapshotGVKey(chart_symbol, "short_state"));
-           }
-        }
+// F11: If local snapshot not evaluated, try reading from Global Variables (shared by Coordinator)
+        if(runtime.snapshot.generation == 0)
+          {
+           GVSnapshotData gv_snap;
+           if(ReadGVSnapshot(chart_symbol, gv_snap))
+             {
+              runtime.snapshot.generation = gv_snap.generation;
+              runtime.snapshot.snapshot_time = gv_snap.snapshot_time;
+              runtime.snapshot.last_success_time = gv_snap.last_success_time;
+              runtime.snapshot.current_stage_code = gv_snap.current_stage_code;
+              runtime.snapshot.last_block_reason_code = gv_snap.last_block_reason_code;
+              runtime.snapshot.configured_style = (ENUM_TRADING_STYLE)gv_snap.configured_style;
+              runtime.snapshot.regime_code = gv_snap.regime_code;
+              runtime.snapshot.bias_code = gv_snap.bias_code;
+              runtime.snapshot.long_code = gv_snap.long_code;
+              runtime.snapshot.short_code = gv_snap.short_code;
+              runtime.snapshot.regime_state = (ESnapshotFieldState)gv_snap.regime_state;
+              runtime.snapshot.bias_state = (ESnapshotFieldState)gv_snap.bias_state;
+              runtime.snapshot.long_state = (ESnapshotFieldState)gv_snap.long_state;
+              runtime.snapshot.short_state = (ESnapshotFieldState)gv_snap.short_state;
+             }
+          }
 
-      MarketSnapshot market;
+// Diagnostics: Log runtime state
+        if(g_dashboard_diag_enabled)
+          {
+           // Use snapshot_time for missing timestamp fields
+           datetime snapshot_time = runtime.snapshot.snapshot_time;
+           g_dashboard_diag.LogRuntimeState(
+              runtime.symbol, i, runtime.valid,
+              runtime.snapshot.generation,
+              snapshot_time,      // last_process_time (use snapshot_time as proxy)
+              snapshot_time,      // last_data_time
+              snapshot_time,      // last_feature_time
+              snapshot_time,      // last_evaluation_time
+              snapshot_time,      // last_snapshot_time
+              runtime.snapshot.current_stage_code,
+              runtime.snapshot.regime_code,
+              runtime.snapshot.bias_code,
+              runtime.snapshot.long_code,
+              runtime.snapshot.short_code);
+          }
+
+       MarketSnapshot market;
       ResetLastError();
 
       if(!runtime.market_context.GetSnapshot(
@@ -1464,48 +2076,77 @@ void UpdateDashboardForChart()
         {
          g_dashboard.ShowStatus(
               "WAITING FOR MARKET DATA | "+chart_symbol);
-          ResetLastError();
-          return;
-         }
-
-      // Convert integer codes to strings for dashboard display
-      string regime_text = EnumToString((ENUM_REGIME_TYPE)runtime.snapshot.regime_code);
-      string bias_text = EnumToString((ENUM_BIAS_DIRECTION)runtime.snapshot.bias_code);
-      string long_text = (runtime.snapshot.long_code == 1 ? "LONG CANDIDATE" : "NO LONG");
-      string short_text = (runtime.snapshot.short_code == 1 ? "SHORT CANDIDATE" : "NO SHORT");
-      string current_stage_text;
-      switch(runtime.snapshot.current_stage_code)
-        {
-         case 1: current_stage_text = "WAITING_FOR_NEW_ENTRY_BAR"; break;
-         case 2: current_stage_text = "WAITING_FOR_SIGNAL_BAR"; break;
-         case 3: current_stage_text = "EVALUATED"; break;
-         case 4: current_stage_text = "BLOCKED"; break;
-         default: current_stage_text = "NOT_EVALUATED"; break;
-        }
-      string last_block_reason_text;
-      switch(runtime.snapshot.last_block_reason_code)
-        {
-         case 1: last_block_reason_text = "NO_NEW_CLOSED_BAR"; break;
-         case 2: last_block_reason_text = "SIGNAL_MARKET_INVALID"; break;
-         default: last_block_reason_text = (runtime.snapshot.last_block_reason_code == 0 ? "" : "UNKNOWN"); break;
+         ResetLastError();
+         return;
         }
 
-      g_dashboard.SetRuntimeSnapshot(
-         EnumToString(runtime.snapshot.configured_style),
-         regime_text,
-         bias_text,
-         long_text,
-         short_text,
-         current_stage_text,
-         last_block_reason_text,
-         runtime.snapshot.snapshot_time,
-         runtime.snapshot.last_success_time,
-         (runtime.snapshot.regime_state==SNAP_VALID));
+      // Apply snapshot to dashboard (reads from runtime.snapshot which now has GV data if available)
+      GVSnapshotData snap;
+      snap.generation = runtime.snapshot.generation;
+      snap.snapshot_time = runtime.snapshot.snapshot_time;
+      snap.last_success_time = runtime.snapshot.last_success_time;
+      snap.current_stage_code = runtime.snapshot.current_stage_code;
+      snap.last_block_reason_code = runtime.snapshot.last_block_reason_code;
+      snap.configured_style = (int)runtime.snapshot.configured_style;
+      snap.regime_code = runtime.snapshot.regime_code;
+      snap.bias_code = runtime.snapshot.bias_code;
+      snap.long_code = runtime.snapshot.long_code;
+      snap.short_code = runtime.snapshot.short_code;
+      snap.regime_state = (int)runtime.snapshot.regime_state;
+      snap.bias_state = (int)runtime.snapshot.bias_state;
+      snap.long_state = (int)runtime.snapshot.long_state;
+      snap.short_state = (int)runtime.snapshot.short_state;
+snap.valid = (runtime.snapshot.generation > 0);
+       ApplySnapshotToDashboard(chart_symbol, snap);
 
       g_dashboard.RenderMarketView(market);
       return;
      }
 
+// Fix 1: Chart Context mode - read Coordinator-published GV snapshots directly
+    // when no local runtime exists but we're registered with a Coordinator
+    if(g_coordinator_mode == COORD_MODE_CHART_CONTEXT && g_reg_state == REG_STATE_REGISTERED)
+      {
+       GVSnapshotData gv_snap;
+if(ReadGVSnapshot(chart_symbol, gv_snap))
+          {
+           ApplySnapshotToDashboard(chart_symbol, gv_snap);
+
+          // Try to render market view from local data if available
+          MarketSnapshot market;
+          // Use default timeframe for market view rendering
+          ENUM_TIMEFRAMES view_tf = (ENUM_TIMEFRAMES)_Period;
+          // In Chart Context mode, we don't have a local runtime, so create a temporary market context
+          CMarketDataEngine temp_market_context;
+          if(temp_market_context.Initialize())
+            {
+             if(temp_market_context.GetSnapshot(chart_symbol, view_tf, market))
+               {
+                g_dashboard.RenderMarketView(market);
+               }
+             else
+               {
+                // Render without market data
+                g_dashboard.RenderMarketView(market); // empty snapshot
+               }
+            }
+          else
+            {
+             g_dashboard.RenderMarketView(market); // empty snapshot
+            }
+          // Explicit cleanup: deselect symbol to avoid leaving it selected in market watch
+          SymbolSelect(chart_symbol, false);
+          return;
+         }
+       else
+         {
+          // Registered but no snapshot yet from Coordinator
+          g_dashboard.ShowStatus("WAITING FOR COORDINATOR SNAPSHOT | " + chart_symbol);
+          return;
+         }
+      }
+
+   // Not Coordinator, not registered Chart Context, or no snapshot available
    g_dashboard.ShowStatus(
       "CHART SYMBOL NOT CONFIGURED | "+chart_symbol);
   }
@@ -1756,10 +2397,31 @@ if(struct_res != EVIDENCE_SUFFICIENT_NO_INVALIDATION)
 
    g_logger.Signal(legacy_signal);
 
-   RiskDecision risk;
+RiskDecision risk;
 
-   if(!g_risk_engine.Evaluate(legacy_signal, risk))
-     {
+    // P0-2: External Risk Lock check before RiskEngine.Evaluate (redundant but defense in depth)
+    if(g_ext_risk_lock_state_valid && InpExternalRiskLockEnabled)
+      {
+      string rejection_code, rejection_reason;
+      CAlgoPortfolioRisk::ExtRiskLockState pr_lock_state = ToPortfolioRiskLockState(g_ext_risk_lock_state);
+      
+      if(!g_portfolio_risk.CheckExternalRiskLock(pr_lock_state, rejection_code, rejection_reason))
+        {
+        risk.decision = RISK_REJECTED;
+        risk.rejection_reason = REJECT_EXTERNAL_RISK_LOCKED;
+        risk.reason = rejection_reason;
+        g_logger.Event(
+          LOG_WARNING, "RISK", "EXTERNAL_RISK_LOCK_BLOCK",
+          legacy_signal.symbol, "", "", legacy_signal.signal_id,
+          "REJECT", "EXT_RISK_LOCK", rejection_reason);
+        g_logger.Risk(risk);
+        g_dashboard.Update(decision, portfolio_state);
+        return;
+        }
+      }
+
+    if(!g_risk_engine.Evaluate(legacy_signal, risk))
+      {
       g_logger.Risk(risk);
       g_dashboard.Update(decision, portfolio_state);
       return;
@@ -1791,6 +2453,28 @@ if(struct_res != EVIDENCE_SUFFICIENT_NO_INVALIDATION)
      }
 
 g_dashboard.Update(decision, portfolio_state);
+
+    // P0-2: External Risk Lock check before CanAdmit (independent of RiskEngine)
+    if(g_ext_risk_lock_state_valid && InpExternalRiskLockEnabled)
+      {
+      string rejection_code, rejection_reason;
+      CAlgoPortfolioRisk::ExtRiskLockState pr_lock_state = ToPortfolioRiskLockState(g_ext_risk_lock_state);
+      
+      if(!g_portfolio_risk.CheckExternalRiskLock(pr_lock_state, rejection_code, rejection_reason))
+        {
+        risk.decision = RISK_REJECTED;
+        risk.rejection_reason = REJECT_EXTERNAL_RISK_LOCKED;
+        risk.reason = rejection_reason;
+
+        g_logger.Event(
+          LOG_WARNING, "PORTFOLIO", "EXTERNAL_RISK_LOCK_BLOCK_ADMIT",
+          legacy_signal.symbol, "", "", legacy_signal.signal_id,
+          "REJECT", "EXT_RISK_LOCK", rejection_reason);
+        g_logger.Risk(risk);
+        g_dashboard.Update(decision, portfolio_state);
+        return;
+        }
+      }
 
     // F-002: Centralized admission with durable reservation aggregation (initial check).
     // This runs after PortfolioRisk.CanOpen and before durable intent creation.
@@ -2087,14 +2771,50 @@ string submit_reason = "";
         }
 
 g_logger.Event(
-         LOG_INFO, "EXECUTION", "EXECUTION_SUBMITTED",
-         request.symbol, "", "",
-         request.signal_id,
-         "SUBMIT", "EXECUTION_READY", "Order execution request ready",
-         0, 0,
-         request.volume,
-         request.stop_loss,
-         request.take_profit);
+          LOG_INFO, "EXECUTION", "EXECUTION_SUBMITTED",
+          request.symbol, "", "",
+          request.signal_id,
+          "SUBMIT", "EXECUTION_READY", "Order execution request ready",
+          0, 0,
+          request.volume,
+          request.stop_loss,
+          request.take_profit);
+
+      // P0-2: External Risk Lock check at SUBMISSION_MAY_HAVE_OCCURRED boundary (critical - final gate before broker)
+      if(g_ext_risk_lock_state_valid && InpExternalRiskLockEnabled)
+        {
+        string rejection_code, rejection_reason;
+        CAlgoPortfolioRisk::ExtRiskLockState pr_lock_state = ToPortfolioRiskLockState(g_ext_risk_lock_state);
+        
+        if(!g_portfolio_risk.CheckExternalRiskLock(pr_lock_state, rejection_code, rejection_reason))
+          {
+          g_logger.Event(LOG_ERROR, "EXECUTION", "EXTERNAL_RISK_LOCK_BLOCK_REVALIDATE",
+                         request.symbol, "", "", request.signal_id,
+                         "FAIL", "EXT_RISK_LOCK", rejection_reason);
+          // Bound intent was never sent to broker; resolve as terminal non-submission.
+          // F-002-R2: Release durable reservation on confirmed non-submission abort (no broker call).
+          {
+          ExecutionAttemptRecord abort_rec;
+          if(g_execution_ledger.GetAttempt(request.attempt_id, abort_rec))
+             {
+             string release_reason = "ABORTED_NON_SUBMISSION:ExternalRiskLock:" + rejection_reason;
+             string rel_reason = "";
+             if(g_execution_ledger.ReleaseReservation(request.attempt_id, abort_rec.risk_reserve_revision, release_reason, rel_reason) != CExecutionLedger::RESERVATION_LIFECYCLE_OK)
+                {
+                g_logger.Event(LOG_WARNING, "EXECUTION", "RESERVATION_RELEASE_FAILED", request.symbol, "", "", request.signal_id, "WARN", "RESERVATION", "ReleaseReservation failed: " + rel_reason);
+                }
+             }
+          }
+          if(!g_execution_ledger.ResolveAttempt(request.attempt_id, EXEC_STATE_ABORTED, "External Risk Lock block at revalidation: " + rejection_reason))
+             {
+             g_logger.Event(LOG_ERROR, "EXECUTION", "RESOLVE_ATTEMPT_FAILED", request.symbol, "", "", request.signal_id, "FAIL", "LEDGER_ERROR", "ResolveAttempt(ABORTED) failed after external risk lock block");
+             string block_reason="";
+             g_execution_ledger.HasBlockingUnresolved(block_reason);
+             }
+          runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+          return;
+          }
+        }
 
       // F-002: Final pre-submit revalidation at SUBMISSION_MAY_HAVE_OCCURRED boundary.
       // Verifies nothing changed since CanAdmit: equity, positions, pending orders, reservations.
@@ -2156,8 +2876,64 @@ g_logger.Event(
          return;
         }
 
-     ExecutionResult result;
-     bool execution_ok = g_executor.Execute(request, result);
+ExecutionResult result;
+
+      // P0-2: Fresh External Risk Lock read at final broker boundary (closes intra-tick race)
+      if(InpExternalRiskLockEnabled)
+        {
+        string fresh_rejection_code, fresh_rejection_reason;
+        ExtRiskLockState fresh_lock = ReadExtRiskLockStateFresh();
+        CAlgoPortfolioRisk::ExtRiskLockState pr_fresh_lock = ToPortfolioRiskLockState(fresh_lock);
+        if(!g_portfolio_risk.CheckExternalRiskLock(pr_fresh_lock, fresh_rejection_code, fresh_rejection_reason))
+          {
+          g_logger.Event(LOG_ERROR, "EXECUTION", "EXTERNAL_RISK_LOCK_BLOCK_FINAL",
+                         request.symbol, "", "", request.signal_id,
+                         "FAIL", "EXT_RISK_LOCK", fresh_rejection_reason);
+          // Bound intent was never sent to broker; resolve as terminal non-submission.
+          {
+          ExecutionAttemptRecord abort_rec;
+          if(g_execution_ledger.GetAttempt(request.attempt_id, abort_rec))
+             {
+             string release_reason = "ABORTED_NON_SUBMISSION:ExternalRiskLock:" + fresh_rejection_reason;
+             string rel_reason = "";
+             if(g_execution_ledger.ReleaseReservation(request.attempt_id, abort_rec.risk_reserve_revision, release_reason, rel_reason) != CExecutionLedger::RESERVATION_LIFECYCLE_OK)
+                {
+                g_logger.Event(LOG_WARNING, "EXECUTION", "RESERVATION_RELEASE_FAILED", request.symbol, "", "", request.signal_id, "WARN", "RESERVATION", "ReleaseReservation failed: " + rel_reason);
+                }
+             }
+          }
+          if(!g_execution_ledger.ResolveAttempt(request.attempt_id, EXEC_STATE_ABORTED, "External Risk Lock block at final gate: " + fresh_rejection_reason))
+            {
+            g_logger.Event(LOG_ERROR, "EXECUTION", "RESOLVE_ATTEMPT_FAILED", request.symbol, "", "", request.signal_id, "FAIL", "LEDGER_ERROR", "ResolveAttempt(ABORTED) failed after final gate block");
+            string block_reason="";
+            g_execution_ledger.HasBlockingUnresolved(block_reason);
+            }
+          runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+          return;
+          }
+}
+ 
+// SAFE MODE: Block all broker mutations when active
+    // Only allows Visual Tester execution; fail-closed elsewhere
+    if(IsSafeModeEnforced() && !IsSafeModeActive())
+      {
+      g_blocked_mutation_count++;
+      g_logger.Event(LOG_INFO, "SAFE_MODE", "MUTATION_BLOCKED",
+                     request.symbol, "", "", request.signal_id,
+                     "BLOCK", "SAFE_MODE",
+                     "Safe Dashboard-Only Mode: broker mutation blocked (blocked=" + IntegerToString(g_blocked_mutation_count) + " executed=" + IntegerToString(g_executed_mutation_count) + ")");
+      // Resolve attempt as ABORTED (non-submission) without broker call
+      if(!g_execution_ledger.ResolveAttempt(request.attempt_id, EXEC_STATE_ABORTED, "Safe Dashboard-Only Mode: broker mutation blocked"))
+        {
+        g_logger.Event(LOG_ERROR, "EXECUTION", "RESOLVE_ATTEMPT_FAILED", request.symbol, "", "", request.signal_id, "FAIL", "LEDGER_ERROR", "ResolveAttempt(ABORTED) failed after Safe Mode block");
+        string block_reason="";
+        g_execution_ledger.HasBlockingUnresolved(block_reason);
+        }
+g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_SAFE_MODE_BLOCKED"; return;
+      }
+
+      bool execution_ok = g_executor.Execute(request, result);
+      g_executed_mutation_count++;
       g_logger.Trade(result);
 
      // F-E26-003: confirmed pre-broker authorization denial by executor (no broker API invoked)
@@ -2173,29 +2949,166 @@ g_logger.Event(
         return;
        }
 
-     // Record result in ledger after API call/observation (authoritative state transition)
-     bool result_recorded = g_execution_ledger.RecordResult(request.attempt_id, result, "Executor result");
-     if(!result_recorded)
-       {
-        g_logger.Event(LOG_ERROR, "EXECUTION", "RECORD_RESULT_FAILED", request.symbol, "", "", request.signal_id, "FAIL", "LEDGER_ERROR",
-                       "RecordResult failed after broker invocation/result observation; forcing reconciliation (no retry, no FINAL_FAILURE fabrication)");
-        // Never fabricate FINAL_FAILURE. Broker may have been invoked; force safe reconciliation path.
-        bool recon_ok = g_execution_ledger.MarkReconciliationRequired(request.attempt_id, "RecordResult write failed after execution result - reconciliation required (no retry)");
-        if(!recon_ok)
+// Record result in ledger after API call/observation (authoritative state transition)
+      bool result_recorded = g_execution_ledger.RecordResult(request.attempt_id, result, "Executor result");
+      if(!result_recorded)
+        {
+         g_logger.Event(LOG_ERROR, "EXECUTION", "RECORD_RESULT_FAILED", request.symbol, "", "", request.signal_id, "FAIL", "LEDGER_ERROR",
+                        "RecordResult failed after broker invocation/result observation; forcing reconciliation (no retry, no FINAL_FAILURE fabrication)");
+         // Never fabricate FINAL_FAILURE. Broker may have been invoked; force safe reconciliation path.
+         bool recon_ok = g_execution_ledger.MarkReconciliationRequired(request.attempt_id, "RecordResult write failed after execution result - reconciliation required (no retry)");
+         // R-04: Also mark reservation as requiring reconciliation
+         ExecutionAttemptRecord attempt_rec_rec;
+         if(g_execution_ledger.GetAttempt(request.attempt_id, attempt_rec_rec))
+           {
+string reserve_reason_rec = "";
+            string recon_reason_rec = "RecordResult failed - reservation marked for reconciliation";
+            bool reserve_recon_ok = g_execution_ledger.MarkReservationReconciliationRequired(request.attempt_id, attempt_rec_rec.risk_reserve_revision, recon_reason_rec, reserve_reason_rec);
+            if(!reserve_recon_ok)
+              {
+              g_logger.Event(LOG_ERROR, "EXECUTION", "RESERVATION_RECONCILE_MARK_FAILED", request.symbol, "", "", request.signal_id, "FAIL", "RESERVATION",
+                             "MarkReservationReconciliationRequired failed after RecordResult failure; reservation state unknown (update failed)");
+              }
+           }
+         if(!recon_ok)
+           {
+            ENUM_EXEC_ATTEMPT_STATE st = EXEC_STATE_NONE;
+            bool st_ok = g_execution_ledger.GetAttemptState(request.attempt_id, st);
+            bool blocked = false; string block_reason="";
+            if(st_ok)
+               blocked = (st==EXEC_STATE_SUBMISSION_MAY_HAVE_OCCURRED || st==EXEC_STATE_RECONCILIATION_REQUIRED || st==EXEC_STATE_PARTIAL_FILL || st==EXEC_STATE_SUBMITTED || st==EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED);
+            else
+               blocked = g_execution_ledger.HasBlockingUnresolved(block_reason);
+            g_logger.Event(LOG_ERROR, "EXECUTION", "RECONCILIATION_MARK_FAILED_AFTER_RECORD_RESULT", request.symbol, "", "", request.attempt_id, "FAIL", "LEDGER_ERROR",
+                           "MarkReconciliationRequired failed after RecordResult failure; state_readable="+(st_ok?"1":"0")+" state="+IntegerToString((int)st)+" blocking="+(blocked?"1":"0")+" reason="+block_reason+" (no retry, no FINAL_FAILURE)");
+           }
+        }
+      else
           {
-           ENUM_EXEC_ATTEMPT_STATE st = EXEC_STATE_NONE;
-           bool st_ok = g_execution_ledger.GetAttemptState(request.attempt_id, st);
-           bool blocked = false; string block_reason="";
-           if(st_ok)
-              blocked = (st==EXEC_STATE_SUBMISSION_MAY_HAVE_OCCURRED || st==EXEC_STATE_RECONCILIATION_REQUIRED || st==EXEC_STATE_PARTIAL_FILL || st==EXEC_STATE_SUBMITTED || st==EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED);
-           else
-              blocked = g_execution_ledger.HasBlockingUnresolved(block_reason);
-           g_logger.Event(LOG_ERROR, "EXECUTION", "RECONCILIATION_MARK_FAILED_AFTER_RECORD_RESULT", request.symbol, "", "", request.attempt_id, "FAIL", "LEDGER_ERROR",
-                          "MarkReconciliationRequired failed after RecordResult failure; state_readable="+(st_ok?"1":"0")+" state="+IntegerToString((int)st)+" blocking="+(blocked?"1":"0")+" reason="+block_reason+" (no retry, no FINAL_FAILURE)");
+           // CR-01: Advance reservation lifecycle on successful execution result
+           // Get the attempt record to access risk_reserve_revision for CAS
+           ExecutionAttemptRecord attempt_rec;
+           if(g_execution_ledger.GetAttempt(request.attempt_id, attempt_rec))
+             {
+              string reserve_reason = "";
+              if(result.partial_fill)
+                {
+                 // Partial fill: ACTIVE -> PARTIALLY_COVERED (or PARTIALLY_COVERED refresh)
+                 // R-01: Only advance if attempt state is PARTIAL_FILL (not RECONCILIATION_REQUIRED)
+                 ENUM_EXEC_ATTEMPT_STATE attempt_state = EXEC_STATE_NONE;
+                 if(g_execution_ledger.GetAttemptState(request.attempt_id, attempt_state) && attempt_state == EXEC_STATE_PARTIAL_FILL)
+                   {
+double executed_vol = result.executed_volume; // F3: executed_volume is the volume filled in THIS attempt (single order submission).
+                     // Each attempt_id = one order submission. Remaining = requested - executed.
+                     double remaining_vol = MathMax(0.0, attempt_rec.requested_volume - executed_vol);
+                    // Compute remaining risk amount proportionally
+                    double remaining_amount = 0.0;
+                    if(attempt_rec.requested_volume > 0.0 && attempt_rec.risk_reserve_initial_amount > 0.0)
+                       remaining_amount = attempt_rec.risk_reserve_initial_amount * (remaining_vol / attempt_rec.requested_volume);
+                    
+                    // P3: Bounded retry on CAS revision mismatch
+                    CExecutionLedger::ENUM_RESERVATION_LIFECYCLE_RESULT res = CExecutionLedger::RESERVATION_LIFECYCLE_DB_ERROR;
+                    for(int retry = 0; retry < 3; retry++)
+                       {
+                       res = g_execution_ledger.UpdateReservationToPartiallyCovered(
+                           request.attempt_id, attempt_rec.risk_reserve_revision, executed_vol, remaining_amount, remaining_vol, reserve_reason);
+                       if(res != CExecutionLedger::RESERVATION_LIFECYCLE_REVISION_MISMATCH)
+                          break;
+                       // Re-read attempt to get current revision and retry
+                       if(!g_execution_ledger.GetAttempt(request.attempt_id, attempt_rec))
+                          {
+                          res = CExecutionLedger::RESERVATION_LIFECYCLE_DB_ERROR;
+                          break;
+                          }
+                       }
+if(res != CExecutionLedger::RESERVATION_LIFECYCLE_OK)
+                       {
+                       g_logger.Event(LOG_WARNING, "EXECUTION", "RESERVATION_PARTIAL_UPDATE_FAILED", request.symbol, "", "", request.signal_id, "WARN", "RESERVATION",
+                                       "UpdateReservationToPartiallyCovered failed: " + reserve_reason + " rev=" + IntegerToString(attempt_rec.risk_reserve_revision));
+// R-04: Mark reservation as requiring reconciliation on CAS exhaustion
+                        string recon_reason = "CAS exhaustion after partial fill: " + reserve_reason;
+                        bool recon_ok = g_execution_ledger.MarkReservationReconciliationRequired(request.attempt_id, attempt_rec.risk_reserve_revision, recon_reason, reserve_reason);
+                        if(!recon_ok)
+                          {
+                          g_logger.Event(LOG_ERROR, "EXECUTION", "RESERVATION_RECONCILE_MARK_FAILED", request.symbol, "", "", request.signal_id, "FAIL", "RESERVATION",
+                                         "MarkReservationReconciliationRequired failed after CAS exhaustion (partial fill); reservation state unknown (update failed)");
+                          }
+                       }
+                    else
+                       {
+                       g_logger.Event(LOG_INFO, "EXECUTION", "RESERVATION_PARTIALLY_COVERED", request.symbol, "", "", request.signal_id, "INFO", "RESERVATION",
+                                      "Reservation advanced to PARTIALLY_COVERED rev=" + IntegerToString(attempt_rec.risk_reserve_revision + 1));
+                       }
+                   }
+                 else
+                   {
+                   // Attempt state is not PARTIAL_FILL (e.g., RECONCILIATION_REQUIRED) - do not advance reservation
+                   g_logger.Event(LOG_WARNING, "EXECUTION", "RESERVATION_PARTIAL_SKIPPED", request.symbol, "", "", request.signal_id, "WARN", "RESERVATION",
+                                  "Partial fill but attempt state is " + IntegerToString((int)attempt_state) + " - reservation not advanced");
+                   }
+                }
+              else if(result.success)
+                {
+                 // R-01: Only advance to EXPOSURE_RECONCILED if attempt state is COMPLETED and not reconciliation_required
+                 ENUM_EXEC_ATTEMPT_STATE attempt_state = EXEC_STATE_NONE;
+                 if(g_execution_ledger.GetAttemptState(request.attempt_id, attempt_state) && attempt_state == EXEC_STATE_COMPLETED && !result.reconciliation_required)
+                   {
+                    // Full fill: ACTIVE/PARTIALLY_COVERED -> EXPOSURE_RECONCILED
+                    CExecutionLedger::ENUM_RESERVATION_LIFECYCLE_RESULT res = CExecutionLedger::RESERVATION_LIFECYCLE_DB_ERROR;
+                    for(int retry = 0; retry < 3; retry++)
+                       {
+                       res = g_execution_ledger.UpdateReservationToExposureReconciled(
+                           request.attempt_id, attempt_rec.risk_reserve_revision, reserve_reason);
+                       if(res != CExecutionLedger::RESERVATION_LIFECYCLE_REVISION_MISMATCH)
+                          break;
+                       // Re-read attempt to get current revision and retry
+                       if(!g_execution_ledger.GetAttempt(request.attempt_id, attempt_rec))
+                          {
+                          res = CExecutionLedger::RESERVATION_LIFECYCLE_DB_ERROR;
+                          break;
+                          }
+                       }
+if(res != CExecutionLedger::RESERVATION_LIFECYCLE_OK)
+                        {
+                        g_logger.Event(LOG_WARNING, "EXECUTION", "RESERVATION_RECONCILE_FAILED", request.symbol, "", "", request.signal_id, "WARN", "RESERVATION",
+                                       "UpdateReservationToExposureReconciled failed: " + reserve_reason + " rev=" + IntegerToString(attempt_rec.risk_reserve_revision));
+                        // R-04: Mark reservation as requiring reconciliation on CAS exhaustion
+                        string recon_reason = "CAS exhaustion after full fill: " + reserve_reason;
+                        bool recon_ok = g_execution_ledger.MarkReservationReconciliationRequired(request.attempt_id, attempt_rec.risk_reserve_revision, recon_reason, reserve_reason);
+                        if(!recon_ok)
+                          {
+                          g_logger.Event(LOG_ERROR, "EXECUTION", "RESERVATION_RECONCILE_MARK_FAILED", request.symbol, "", "", request.signal_id, "FAIL", "RESERVATION",
+                                         "MarkReservationReconciliationRequired failed after CAS exhaustion (full fill); reservation state unknown (update failed)");
+                          }
+                        }
+                    else
+                       {
+                       g_logger.Event(LOG_INFO, "EXECUTION", "RESERVATION_EXPOSURE_RECONCILED", request.symbol, "", "", request.signal_id, "INFO", "RESERVATION",
+                                      "Reservation advanced to EXPOSURE_RECONCILED rev=" + IntegerToString(attempt_rec.risk_reserve_revision + 1));
+                       }
+                   }
+else
+                    {
+                    // Attempt state is not COMPLETED or reconciliation_required is true - do not advance reservation
+                    g_logger.Event(LOG_WARNING, "EXECUTION", "RESERVATION_RECONCILE_SKIPPED", request.symbol, "", "", request.signal_id, "WARN", "RESERVATION",
+                                   "Full fill but attempt state is " + IntegerToString((int)attempt_state) + " reconciliation_required=" + (result.reconciliation_required?"1":"0") + " - reservation not advanced");
+                    // R-04: If reconciliation_required, ensure reservation is marked for reconciliation
+                    if(result.reconciliation_required || attempt_state == EXEC_STATE_RECONCILIATION_REQUIRED)
+                      {
+                      string recon_reason = "Result has reconciliation_required or attempt state is RECONCILIATION_REQUIRED";
+                      bool reserve_recon_ok = g_execution_ledger.MarkReservationReconciliationRequired(request.attempt_id, attempt_rec.risk_reserve_revision, recon_reason, reserve_reason);
+                      if(!reserve_recon_ok)
+                        {
+                        g_logger.Event(LOG_ERROR, "EXECUTION", "RESERVATION_RECONCILE_MARK_FAILED", request.symbol, "", "", request.signal_id, "FAIL", "RESERVATION",
+                                       "MarkReservationReconciliationRequired failed for reconciliation_required path; reservation state unknown (update failed)");
+                        }
+                      }
+                    }
+                }
+             }
           }
-       }
 
-     {
+      {
         ENUM_EXEC_ATTEMPT_STATE st = EXEC_STATE_NONE;
         if(g_execution_ledger.GetAttemptState(request.attempt_id, st))
           {
@@ -2479,8 +3392,8 @@ void ProcessRuntime(CSymbolRuntime& runtime)
     runtime.snapshot.long_state = (decision.valid ? SNAP_VALID : SNAP_CALCULATION_FAILED);
     runtime.snapshot.short_state = (decision.valid ? SNAP_VALID : SNAP_CALCULATION_FAILED);
 
-    // F11: Share snapshot via Global Variables for multi-chart Dashboard
-    WriteSnapshotToGV(
+// F11: Share snapshot via Global Variables for multi-chart Dashboard
+    bool gv_write_ok = WriteSnapshotToGV(
        runtime.symbol,
        runtime.snapshot.generation,
        runtime.snapshot.snapshot_time,
@@ -2496,7 +3409,12 @@ void ProcessRuntime(CSymbolRuntime& runtime)
        (int)runtime.snapshot.bias_state,
        (int)runtime.snapshot.long_state,
        (int)runtime.snapshot.short_state);
-   }
+    if(!gv_write_ok)
+      {
+       g_logger.Event(LOG_WARNING, "DASHBOARD", "SNAPSHOT_GV_PARTIAL_WRITE", runtime.symbol, "", "", "", "WARN", "GV_WRITE",
+                      "Snapshot GV write had failures (see ERROR log above)");
+      }
+    }
 
 //==================================================================
 // Initialization
@@ -2882,36 +3800,60 @@ else if(claim_rows > 0)
       return SYSTEM_INIT_FAILED;
      }
 
-   int runtime_count=0;
-   // E2.4: Coordinator election
-   string authority_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
-   if(g_execution_ledger.IsAvailable())
-     {
-      int astate = g_execution_ledger.GetAuthorityState(authority_key);
-       if(astate == (int)GATEWAY_AUTHORITY_ORPHANED || astate == -1)
-         {
-          g_coordinator_mode = COORD_MODE_UNAVAILABLE;
-          g_executor.SyncAuthority(g_authority_epoch, false);
-          g_logger.Event(LOG_WARNING, "INIT", "COORDINATOR_UNAVAILABLE", _Symbol, "", "", "", "FAIL", "AUTHORITY", "Authority unavailable or orphaned");
-         }
-      else
-        {
-         long epoch = 0;
-          if(g_execution_ledger.AcquireAuthority(authority_key, g_owner_instance_token, epoch))
+int runtime_count=0;
+    // E2.4: Coordinator election
+    string authority_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
+    if(g_execution_ledger.IsAvailable())
+      {
+       // CR-02: Expire stale authority lease before election (30s lease)
+       string expire_reason = "";
+       // R-03: Pass owner_token to prevent self-expiry during init (consistent with OnTimer)
+g_execution_ledger.ExpireStaleAuthority(authority_key, 30, expire_reason, g_owner_instance_token);
+        if(expire_reason != "")
+          {
+          if(expire_reason == "LEDGER_UNAVAILABLE")
             {
-             g_coordinator_mode = COORD_MODE_COORDINATOR;
-             g_authority_epoch = epoch;
-             g_executor.SyncAuthority(g_authority_epoch, true);
-             runtime_count = InitializePendingRuntimes();
+            g_logger.Event(LOG_WARNING, "INIT", "AUTHORITY_EXPIRE_SKIPPED", _Symbol, "", "", "", "WARNING", "AUTHORITY", "Authority lease expiry skipped: " + expire_reason);
             }
           else
             {
-             g_coordinator_mode = COORD_MODE_CHART_CONTEXT;
-             g_executor.SyncAuthority(g_authority_epoch, false);
-             g_logger.Event(LOG_INFO, "INIT", "CHART_CONTEXT_ONLY", _Symbol, "", "", "", "INFO", "AUTHORITY", "Another coordinator owns authority");
+            g_logger.Event(LOG_INFO, "INIT", "AUTHORITY_EXPIRED", _Symbol, "", "", "", "INFO", "AUTHORITY", "Authority lease expired during election: " + expire_reason);
             }
-        }
-     }
+          }
+       int astate = g_execution_ledger.GetAuthorityState(authority_key);
+       // CR-02 / Architecture Decision: No Automatic Takeover
+       // ORPHANED is a BLOCKING state. Do NOT auto-reacquire on init/election.
+       // Recovery requires explicit operator/orchestrator action (separate path, auditable, fenced).
+       if(astate == (int)GATEWAY_AUTHORITY_ORPHANED)
+         {
+         g_coordinator_mode = COORD_MODE_UNAVAILABLE;
+         g_executor.SyncAuthority(g_authority_epoch, false);
+         g_logger.Event(LOG_WARNING, "INIT", "COORDINATOR_UNAVAILABLE", _Symbol, "", "", "", "FAIL", "AUTHORITY", "Authority is ORPHANED (expired lease) - blocking state, no automatic re-acquisition. Explicit recovery required.");
+         }
+       else if(astate == -1)
+         {
+         g_coordinator_mode = COORD_MODE_UNAVAILABLE;
+         g_executor.SyncAuthority(g_authority_epoch, false);
+         g_logger.Event(LOG_WARNING, "INIT", "COORDINATOR_UNAVAILABLE", _Symbol, "", "", "", "FAIL", "AUTHORITY", "Authority unavailable (no row)");
+         }
+       else
+         {
+          long epoch = 0;
+           if(g_execution_ledger.AcquireAuthority(authority_key, g_owner_instance_token, epoch))
+             {
+              g_coordinator_mode = COORD_MODE_COORDINATOR;
+              g_authority_epoch = epoch;
+              g_executor.SyncAuthority(g_authority_epoch, true);
+              runtime_count = InitializePendingRuntimes();
+             }
+           else
+             {
+              g_coordinator_mode = COORD_MODE_CHART_CONTEXT;
+              g_executor.SyncAuthority(g_authority_epoch, false);
+              g_logger.Event(LOG_INFO, "INIT", "CHART_CONTEXT_ONLY", _Symbol, "", "", "", "INFO", "AUTHORITY", "Another coordinator owns authority");
+             }
+         }
+      }
    else
       {
        // Ledger unavailable: fail-closed, no coordinator
@@ -2958,21 +3900,125 @@ else if(claim_rows > 0)
 // OnInit
 //==================================================================
 //+------------------------------------------------------------------+
-//| E2.1: Deterministic Config Fingerprint (v1)                      |
+//| E2.1: Deterministic Config Fingerprint (v2)                      |
 //+------------------------------------------------------------------+
 string ComputeConfigFingerprint()
   {
    // Canonical serialization of trading-relevant settings.
    // Presentation-only settings (Dashboard, ViewMode, diagnostics) excluded.
-   string s = "CFGV1|";
+   // Version CFGV2: includes risk params, position management, timeframe roles, freshness, universe, news, session, spread, hybrid thresholds, volume profile, liquidity, divergence, regime
+   string s = "CFGV2|";
    s += "STYLE=" + IntegerToString((int)InpTradingStyle) + "|";
    s += "MODE=" + IntegerToString((int)InpMode) + "|";
    s += "LIVECONFIRM=" + (InpLiveAutoConfirm ? "1" : "0") + "|";
    s += "GROUP=" + InpStrategyGroupKey + "|";
-   // Timeframe roles are global inputs; include if present as inputs (placeholder)
+   
+   // Fix 3: Include timeframe roles (resolved from style)
+   ENUM_TIMEFRAMES ctx_tf, struct_tf, setup_tf, entry_tf;
+   SelectStyleTimeframes(InpTradingStyle, ctx_tf, struct_tf, setup_tf, entry_tf);
+   s += "CTX_TF=" + IntegerToString((int)ctx_tf) + "|";
+   s += "STRUCT_TF=" + IntegerToString((int)struct_tf) + "|";
+   s += "SETUP_TF=" + IntegerToString((int)setup_tf) + "|";
+   s += "ENTRY_TF=" + IntegerToString((int)entry_tf) + "|";
+   
+   // Fix 3: Include risk parameters (group 09)
+   s += "RISK_PCT=" + DoubleToString(InpRiskPercent, 2) + "|";
+   s += "DAILY_LOSS_LIM=" + DoubleToString(InpDailyLossLimit, 2) + "|";
+   s += "MONTHLY_LOSS_LIM=" + DoubleToString(InpMonthlyLossLimit, 2) + "|";
+   s += "MAX_CONSEC_LOSSES=" + IntegerToString(InpMaxConsecutiveLosses) + "|";
+   s += "MAX_POS_TOTAL=" + IntegerToString(InpMaxPositionsTotal) + "|";
+   s += "MAX_POS_PER_SYM=" + IntegerToString(InpMaxPositionsPerSymbol) + "|";
+   s += "MAX_POS_PER_STRAT=" + IntegerToString(InpMaxPositionsPerStrategy) + "|";
+   s += "MAX_PORTF_RISK=" + DoubleToString(InpMaxPortfolioRisk, 2) + "|";
+   s += "MAX_PM_RISK=" + DoubleToString(InpMaxPreciousMetalsRisk, 2) + "|";
+   s += "MARGIN_SAFETY=" + DoubleToString(InpMarginSafetyFraction, 2) + "|";
    s += "DEVIATION=" + IntegerToString(InpDeviationPoints) + "|";
-   // Timeframe roles are resolved internally; include style-dependent policy via MagicForStyle
+   
+   // P2-1: Include missing position management params (group 12)
+   s += "BE_ENABLED=" + (InpBreakEven ? "1" : "0") + "|";
+   s += "BE_TRIGGER_R=" + DoubleToString(InpBreakEvenTriggerR, 2) + "|";
+   s += "BE_OFFSET_PTS=" + DoubleToString(InpBreakEvenOffsetPoints, 1) + "|";
+   s += "TRAIL_ENABLED=" + (InpTrailing ? "1" : "0") + "|";
+   s += "TRAIL_TF=" + IntegerToString((int)InpTrailingTF) + "|";
+   s += "TRAIL_ATR_PERIOD=" + IntegerToString(InpTrailingATRPeriod) + "|";
+   s += "TRAIL_ATR_MULT=" + DoubleToString(InpTrailingATRMultiplier, 2) + "|";
+   s += "TIME_EXIT_ENABLED=" + (InpTimeExit ? "1" : "0") + "|";
+   s += "MAX_HOLD_MIN=" + IntegerToString(InpMaxHoldingMinutes) + "|";
+   
+   // Fix 3: Include hybrid decision thresholds (group 03)
+   s += "MIN_RR=" + DoubleToString(InpMinRR, 2) + "|";
+   s += "MIN_SCORE=" + DoubleToString(InpMinScore, 1) + "|";
+   s += "CONFLICT_THRESH=" + DoubleToString(InpConflictThreshold, 1) + "|";
+   s += "ENTRY_TOL_SCALP=" + DoubleToString(InpEntryToleranceScalp, 1) + "|";
+   s += "ENTRY_TOL_DAY=" + DoubleToString(InpEntryToleranceDay, 1) + "|";
+   s += "ENTRY_TOL_SWING=" + DoubleToString(InpEntryToleranceSwing, 1) + "|";
+   s += "ALLOW_MEAN_REV=" + (InpAllowMeanReversion ? "1" : "0") + "|";
+   
+   // Fix 3: Include volume profile params (group 04)
+   s += "PROF_ENABLED=" + (InpProfileEnabled ? "1" : "0") + "|";
+   s += "PROF_SESS_BARS=" + IntegerToString(InpProfileSessionBars) + "|";
+   s += "PROF_ROLL_BARS=" + IntegerToString(InpProfileRollingBars) + "|";
+   s += "PROF_VA_PCT=" + DoubleToString(InpValueAreaPercent, 2) + "|";
+   
+   // Fix 3: Include liquidity/structure params (group 05)
+   s += "SWING_LOOKBACK=" + IntegerToString(InpSwingLookback) + "|";
+   s += "EQUAL_TOL_PTS=" + IntegerToString(InpEqualTolerancePoints) + "|";
+   s += "MAX_LVL_AGE=" + IntegerToString(InpMaxLevelAgeBars) + "|";
+   s += "SWEEP_CONF_BARS=" + IntegerToString(InpSweepConfirmBars) + "|";
+   
+   // Fix 3: Include divergence/momentum params (group 06)
+   s += "RSI_PERIOD=" + IntegerToString(InpRSIPeriod) + "|";
+   s += "MACD_FAST=" + IntegerToString(InpMACD_Fast) + "|";
+   s += "MACD_SLOW=" + IntegerToString(InpMACD_Slow) + "|";
+   s += "MACD_SIG=" + IntegerToString(InpMACD_Signal) + "|";
+   s += "PIVOT_TOL_PCT=" + DoubleToString(InpPivotTolerancePercent, 3) + "|";
+   s += "MAX_DIV_AGE=" + IntegerToString(InpMaxDivergenceAgeBars) + "|";
+   s += "MOM_LOOKBACK=" + IntegerToString(InpMomentumLookback) + "|";
+   
+   // Fix 3: Include regime params (group 07)
+   s += "ADX_PERIOD=" + IntegerToString(InpADXPeriod) + "|";
+   s += "ADX_TREND_THRESH=" + IntegerToString(InpADXTrendThreshold) + "|";
+   s += "HIGH_VOL_RATIO=" + DoubleToString(InpHighVolatilityRatio, 2) + "|";
+   s += "LOW_VOL_RATIO=" + DoubleToString(InpLowVolatilityRatio, 2) + "|";
+   s += "RANGE_LOOKBACK=" + IntegerToString(InpRangeLookback) + "|";
+   s += "HYST_BARS=" + IntegerToString(InpHysteresisBars) + "|";
+   
+   // Fix 3: Include news filter params (group 08)
+   s += "NEWS_ENABLED=" + (InpNewsEnabled ? "1" : "0") + "|";
+   s += "NEWS_PREVENT=" + (InpNewsPreventNewEntries ? "1" : "0") + "|";
+   s += "NEWS_BEFORE=" + IntegerToString(InpNewsBlackoutMinutesBefore) + "|";
+   s += "NEWS_AFTER=" + IntegerToString(InpNewsBlackoutMinutesAfter) + "|";
+   s += "NEWS_COOLDOWN=" + IntegerToString(InpNewsCooldownMinutes) + "|";
+   s += "NEWS_IMPACT=" + IntegerToString(InpNewsImpactThreshold) + "|";
+   // P2-1: Include missing news close positions param
+   s += "NEWS_CLOSE_POS=" + (InpNewsClosePositions ? "1" : "0") + "|";
+   
+   // Fix 3: Include session/spread filters (group 10)
+   s += "SESS_ENABLED=" + (InpSessionFilter ? "1" : "0") + "|";
+   s += "SESS_START=" + IntegerToString(InpSessionStartHour) + "|";
+   s += "SESS_END=" + IntegerToString(InpSessionEndHour) + "|";
+   s += "SPREAD_FILTER=" + (InpUseSpreadFilter ? "1" : "0") + "|";
+   s += "MAX_SPREAD=" + IntegerToString(InpMaxSpreadPoints) + "|";
+   
+   // Fix 3: Include freshness params (group 13)
+   s += "FRESH_CTX=" + IntegerToString(InpFreshnessContextSeconds) + "|";
+   s += "FRESH_STRUCT=" + IntegerToString(InpFreshnessStructureSeconds) + "|";
+   s += "FRESH_SETUP=" + IntegerToString(InpFreshnessSetupSeconds) + "|";
+   s += "FRESH_ENTRY=" + IntegerToString(InpFreshnessEntrySeconds) + "|";
+   // P2-1: Include freshness overrides
+   s += "FRESH_OVERRIDES=" + InpFreshnessOverrides + "|";
+   
+   // Fix 3: Include symbol universe params
+   s += "DYN_FOREX=" + (InpUseDynamicForex ? "1" : "0") + "|";
+   s += "MAX_SYMS=" + IntegerToString(InpForexMaxSymbols) + "|";
+   s += "INC_METALS=" + (InpIncludeMetalsCrypto ? "1" : "0") + "|";
+   s += "GOLD_SYM=" + InpGoldSymbol + "|";
+   s += "SILVER_SYM=" + InpSilverSymbol + "|";
+   s += "BTC_SYM=" + InpBitcoinSymbol + "|";
+   
+   // Magic for style
    s += "MAGIC=" + IntegerToString((int)MagicForStyle(InpTradingStyle)) + "|";
+   
    // Simple deterministic hash (not cryptographic)
    uint h = 5381;
    for(int i = 0; i < StringLen(s); i++)
@@ -3050,22 +4096,68 @@ int OnInit()
    g_dashboard.SetTitle("ALGO HYBRID");
    g_ea_start_time = TimeCurrent();
 
-   // Initialize Metrics Exporter (WP-07)
-   g_metrics_exporter.Initialize(&g_logger, IntegerToString((long)ChartID()), 10);
-   
-   // Initialize Alert Manager (WP-07)
-   g_alert_manager.Initialize(&g_logger, &g_metrics_exporter);
-   g_alert_manager.SetThresholds(
-      150.0, 200.0,    // Margin level: critical 150%, warning 200%
-      5.0, 3.0,        // Daily loss: critical 5%, warning 3%
-      10.0, 5.0,       // Drawdown: critical 10%, warning 5%
-      3.0,             // Spread warning multiplier: 3x normal
-      8, 10,           // Positions: warning at 8, critical at 10
-      60               // Alert cooldown: 60 seconds
-   );
+// Initialize Metrics Exporter (WP-07)
+    g_metrics_exporter.Initialize(&g_logger, IntegerToString((long)ChartID()), 10);
+    
+    // Initialize Alert Manager (WP-07)
+    g_alert_manager.Initialize(&g_logger, &g_metrics_exporter);
+    g_alert_manager.SetThresholds(
+       150.0, 200.0,    // Margin level: critical 150%, warning 200%
+       5.0, 3.0,        // Daily loss: critical 5%, warning 3%
+       10.0, 5.0,       // Drawdown: critical 10%, warning 5%
+       3.0,             // Spread warning multiplier: 3x normal
+       8, 10,           // Positions: warning at 8, critical at 10
+       60               // Alert cooldown: 60 seconds
+    );
 
-   ResetLastError();
-   if(!EventSetTimer(5))
+    // Initialize Dashboard Diagnostics
+    // Enable in Strategy Tester Visual mode or when explicitly configured
+    bool is_tester_visual = (MQLInfoInteger(MQL_TESTER) != 0 && MQLInfoInteger(MQL_VISUAL_MODE) != 0);
+    g_dashboard_diag_enabled = InpDashboard && (is_tester_visual || InpDashboardDiagnostics);
+    if(g_dashboard_diag_enabled)
+      {
+       if(g_dashboard_diag.Initialize(&g_logger, DIAG_MODE_FULL))
+         {
+          // Set run info - use local struct (MQL5 requires pass-by-reference for structs)
+          DiagRunInfo run_info;
+          run_info.run_id = g_dashboard_diag.GenerateRunId(); // Will be overwritten by Initialize
+          run_info.source_sha256 = ""; // TODO: compute from source
+          run_info.ex5_sha256 = "";    // TODO: compute from EX5
+          run_info.terminal_build = (int)TerminalInfoInteger(TERMINAL_BUILD);
+          run_info.ea_version = "1.002";
+          run_info.runtime_mode = MQLInfoInteger(MQL_TESTER) ? (MQLInfoInteger(MQL_VISUAL_MODE) ? 2 : 1) : 0;
+          run_info.chart_id = ChartID();
+          run_info.chart_symbol = ChartSymbol(0);
+          run_info.strategy_group_key = g_strategy_group_key;
+          run_info.config_fingerprint = g_config_fingerprint;
+          run_info.coordinator_mode = (int)g_coordinator_mode;
+          run_info.authority_epoch = (int)g_authority_epoch;
+          run_info.runtime_count = 0; // Will be updated after runtime init
+          g_dashboard_diag.SetRunInfo(run_info);
+          g_logger.Event(LOG_INFO, "INIT", "DIAG_INITIALIZED", "", "", "", "", "OK", "DIAG",
+                         "Dashboard Diagnostics enabled (TesterVisual=" + (is_tester_visual ? "true" : "false") + ")");
+         }
+       else
+         {
+          g_logger.Event(LOG_WARNING, "INIT", "DIAG_INIT_FAILED", "", "", "", "", "WARN", "DIAG",
+                         "Dashboard Diagnostics initialization failed");
+          g_dashboard_diag_enabled = false;
+         }
+}
+ 
+    // Safe Dashboard-Only Mode status
+    bool safe_mode_active = IsSafeModeActive();
+    bool safe_mode_enforced = IsSafeModeEnforced();
+    g_logger.Event(LOG_INFO, "INIT", "SAFE_MODE_STATUS", "", "", "", "",
+                   InpDashboardSafeMode ? (safe_mode_active ? "ACTIVE" : "ENFORCED") : "DISABLED", "SAFE_MODE",
+                   "Safe Dashboard-Only Mode: InpDashboardSafeMode=" + (InpDashboardSafeMode ? "true" : "false") +
+                   " MQL_TESTER=" + (MQLInfoInteger(MQL_TESTER) ? "true" : "false") +
+                   " MQL_VISUAL_MODE=" + (MQLInfoInteger(MQL_VISUAL_MODE) ? "true" : "false") +
+                   " Enforced=" + (safe_mode_enforced ? "true" : "false") +
+                   " Active=" + (safe_mode_active ? "true" : "false"));
+ 
+    ResetLastError();
+    if(!EventSetTimer(5))
      {
       g_logger.Event(
          LOG_ERROR, "INIT", "INIT_FAILED",
@@ -3095,7 +4187,70 @@ bool RefreshTradingState()
       InpMonthlyLossLimit,
       InpMaxConsecutiveLosses);
 
-   PortfolioState current_state;
+// P0-2: Read External Risk Lock state and apply to RiskEngine
+    ExtRiskLockState ext_lock_state = ReadExtRiskLockState();
+    if(ext_lock_state.valid)
+      {
+      ENUM_REJECTION_REASON lock_reason_code = REJECT_NONE;
+      string lock_reason = "";
+      
+      switch(ext_lock_state.state)
+        {
+        case EXT_RISK_LOCK_LOCKED:
+          lock_reason_code = REJECT_EXTERNAL_RISK_LOCKED;
+          lock_reason = "External Risk Lock active: " + ExtRiskLockReasonToString(ext_lock_state.reason_code);
+          break;
+        case EXT_RISK_LOCK_UNKNOWN:
+          if(InpExternalRiskLockFailClosed)
+            {
+            lock_reason_code = REJECT_EXTERNAL_RISK_STATE_UNKNOWN;
+            lock_reason = "External Risk Lock state unknown/unavailable (fail-closed): " + ExtRiskLockReasonToString(ext_lock_state.reason_code);
+            }
+          else
+            {
+            lock_reason_code = REJECT_EXTERNAL_RISK_SOURCE_UNAVAILABLE;
+            lock_reason = "External Risk Lock source unavailable: " + ExtRiskLockReasonToString(ext_lock_state.reason_code);
+            }
+          break;
+        case EXT_RISK_LOCK_DISABLED:
+        case EXT_RISK_LOCK_UNLOCKED:
+        default:
+          lock_reason_code = REJECT_NONE;
+          lock_reason = "";
+          break;
+        }
+      
+      g_risk_engine.SetExternalLock(
+        (lock_reason_code != REJECT_NONE),
+        lock_reason_code,
+        lock_reason);
+      
+      // Store globally for PortfolioRisk checks in ProcessHybridDecision
+      g_ext_risk_lock_state = ext_lock_state;
+      g_ext_risk_lock_state_valid = true;
+      
+      // Log state changes
+      static int s_last_ext_lock_revision = -1;
+      if(ext_lock_state.revision != s_last_ext_lock_revision)
+        {
+        s_last_ext_lock_revision = ext_lock_state.revision;
+        g_logger.Event(
+          LOG_INFO, "RISK", "EXTERNAL_RISK_LOCK_UPDATE",
+          "", "", "", "",
+          "INFO", "EXT_RISK_LOCK",
+          "External Risk Lock: state=" + IntegerToString(ext_lock_state.state) +
+          " reason=" + ExtRiskLockReasonToString(ext_lock_state.reason_code) +
+          " source=" + ExtRiskLockSourceToString(ext_lock_state.source_code) +
+          " rev=" + IntegerToString(ext_lock_state.revision) +
+          " applied_lock=" + (lock_reason_code != REJECT_NONE ? "true" : "false"));
+        }
+      }
+    else
+      {
+      g_ext_risk_lock_state_valid = false;
+      }
+
+    PortfolioState current_state;
    if(!g_state.GetPortfolioState(current_state))
       return false;
 
@@ -3113,14 +4268,26 @@ void OnTick()
 
    bool risk_state_ready=RefreshTradingState();
 
-   g_logger.MaybeWriteSummary(false);
+g_logger.MaybeWriteSummary(false);
 
-   g_position_manager.Update();
+    // Safe Mode: Skip all position management mutations
+    // Allow in Visual Tester (IsSafeModeActive), block elsewhere when enforced
+    if(IsSafeModeEnforced() && !IsSafeModeActive())
+      {
+      g_blocked_mutation_count++;
+      g_logger.Event(LOG_INFO, "SAFE_MODE", "MUTATION_BLOCKED", "", "", "", "",
+                     "BLOCK", "SAFE_MODE",
+                     "Safe Dashboard-Only Mode: position management blocked (blocked=" + IntegerToString(g_blocked_mutation_count) + " executed=" + IntegerToString(g_executed_mutation_count) + ")");
+      }
+    else
+      {
+      g_position_manager.Update();
+      }
 
-   if(!risk_state_ready)
+    if(!risk_state_ready)
       return;
 
-if(g_coordinator_mode == COORD_MODE_COORDINATOR)
+ if(g_coordinator_mode == COORD_MODE_COORDINATOR)
       {
        for(int i=0;i<g_runtime.Total();i++)
          {
@@ -3217,18 +4384,33 @@ if(g_coordinator_mode == COORD_MODE_COORDINATOR)
                  }
               }
             }
-           } // end rate-limited discovery block (F8)
-        string authority_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
-        if(!g_execution_ledger.HeartbeatAuthority(authority_key, g_owner_instance_token, g_authority_epoch) ||
-           !g_execution_ledger.ValidateAuthority(authority_key, g_owner_instance_token, g_authority_epoch))
-          {
-           g_coordinator_mode = COORD_MODE_UNAVAILABLE;
-           g_executor.SyncAuthority(g_authority_epoch, false);
-           g_logger.Event(LOG_WARNING, "SYSTEM", "COORDINATOR_LOST", _Symbol, "", "", "", "FAIL", "AUTHORITY", "Heartbeat/validation failed");
-          }
-      }
-
-     // Chart Context registration retry
+} // end rate-limited discovery block (F8)
+string authority_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
+           // CR-02: Expire stale authority lease before heartbeat/validation (30s lease)
+           // R-03: Pass owner_token to prevent coordinator from expiring its own lease
+           string expire_reason = "";
+           g_execution_ledger.ExpireStaleAuthority(authority_key, 30, expire_reason, g_owner_instance_token);
+           if(expire_reason != "")
+             {
+             if(expire_reason == "LEDGER_UNAVAILABLE")
+               {
+               g_logger.Event(LOG_WARNING, "SYSTEM", "AUTHORITY_EXPIRE_SKIPPED", _Symbol, "", "", "", "WARNING", "AUTHORITY", "Authority lease expiry skipped: " + expire_reason);
+               }
+             else
+               {
+               g_logger.Event(LOG_INFO, "SYSTEM", "AUTHORITY_EXPIRED", _Symbol, "", "", "", "INFO", "AUTHORITY", "Authority lease expired: " + expire_reason);
+               }
+             }
+          if(!g_execution_ledger.HeartbeatAuthority(authority_key, g_owner_instance_token, g_authority_epoch) ||
+             !g_execution_ledger.ValidateAuthority(authority_key, g_owner_instance_token, g_authority_epoch))
+            {
+             g_coordinator_mode = COORD_MODE_UNAVAILABLE;
+             g_executor.SyncAuthority(g_authority_epoch, false);
+             g_logger.Event(LOG_WARNING, "SYSTEM", "COORDINATOR_LOST", _Symbol, "", "", "", "FAIL", "AUTHORITY", "Heartbeat/validation failed");
+}
+        }
+ 
+      // Chart Context registration retry
      if(g_coordinator_mode == COORD_MODE_CHART_CONTEXT && g_reg_state == REG_STATE_PENDING)
        {
         if(TimeCurrent() - g_last_reg_request >= REG_RETRY_INTERVAL && g_reg_retry_count < REG_RETRY_MAX)
@@ -3253,12 +4435,26 @@ if(g_coordinator_mode == COORD_MODE_COORDINATOR)
            g_pending_nonce = "";
           }
        }
-        static datetime last_reconcile = 0;
-        if(TimeCurrent() - last_reconcile > 60)
-          {
-          g_execution_ledger.ReconcileUnresolved(5);
-         last_reconcile = TimeCurrent();
-          }
+static datetime last_reconcile = 0;
+         if(TimeCurrent() - last_reconcile > 60)
+           {
+           g_execution_ledger.ReconcileUnresolved(5);
+           // CR-01: Idempotent reservation reconciliation for restart safety
+           string res_reason = "";
+           string account_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
+int res_count = g_execution_ledger.ReconcileReservations(account_key, res_reason);
+            if(res_count > 0)
+              {
+              g_logger.Event(LOG_INFO, "EXECUTION", "RESERVATION_RECONCILED", _Symbol, "", "", "", "INFO", "RESERVATION",
+                             "Idempotent reservation reconciliation: " + IntegerToString(res_count) + " reservations advanced to EXPOSURE_RECONCILED");
+              }
+            else
+              {
+              g_logger.Event(LOG_INFO, "EXECUTION", "RESERVATION_RECONCILE_NONE", _Symbol, "", "", "", "INFO", "RESERVATION",
+                             "Idempotent reservation reconciliation: 0 reservations reconciled. Reason: " + res_reason);
+              }
+          last_reconcile = TimeCurrent();
+           }
         // E2.6: process explicit chart-confirmed retry handoff only in timer path (transient; no auto-retry on restart).
         // Handoff remains fail-closed before broker submission until full fresh-plan/LSK+gate revalidation binding is implemented.
         ProcessRetryPendingHandoff();
@@ -3324,15 +4520,27 @@ if(g_coordinator_mode == COORD_MODE_COORDINATOR)
    g_metrics_exporter.SetNewsMetrics(0, 0);
    
    // Engine metrics
-   g_metrics_exporter.SetEngineMetrics(
-      TimeCurrent() - g_ea_start_time, // uptime in seconds
-      0, // avg tick latency - would need more instrumentation
-      g_runtime.Total()
-   );
+g_metrics_exporter.SetEngineMetrics(
+       TimeCurrent() - g_ea_start_time, // uptime in seconds
+       0, // avg tick latency - would need more instrumentation
+       g_runtime.Total()
+    );
 
-   g_position_manager.Update();
+    // Safe Mode: Skip all position management mutations
+    // Allow in Visual Tester (IsSafeModeActive), block elsewhere when enforced
+    if(IsSafeModeEnforced() && !IsSafeModeActive())
+      {
+      g_blocked_mutation_count++;
+      g_logger.Event(LOG_INFO, "SAFE_MODE", "MUTATION_BLOCKED", "", "", "", "",
+                     "BLOCK", "SAFE_MODE",
+                     "Safe Dashboard-Only Mode: position management blocked (blocked=" + IntegerToString(g_blocked_mutation_count) + " executed=" + IntegerToString(g_executed_mutation_count) + ")");
+      }
+    else
+      {
+      g_position_manager.Update();
+      }
 
-   if(!risk_state_ready)
+    if(!risk_state_ready)
       return;
 
 if(g_coordinator_mode == COORD_MODE_COORDINATOR)
@@ -4150,12 +5358,26 @@ bool RetryUIRevalidateFreshPlan(CSymbolRuntime &runtime,
    double max_entry_dist = GetEntryDistanceTolerance(runtime.style, runtime.hybrid_engine.GetPoint());
    if(MathAbs(normalized_plan.entry-current_price) > max_entry_dist) { reason="ENTRY_TOO_FAR"; return false; }
 
-   // Preserve normal Risk/Portfolio/News gate chain (shared logic path) without duplicating alternate policy.
-   StrategySignal legacy_signal;
-   if(!RetryUIBuildLegacySignal(normalized_plan, decision, legacy_signal)) { reason="LEGACY_SIGNAL_BUILD_FAILED"; return false; }
-   RiskDecision risk;
-   if(!g_risk_engine.Evaluate(legacy_signal, risk)) { reason="RISK_ENGINE_REJECT:"+EnumToString(risk.rejection_reason); return false; }
-   if(!g_portfolio_risk.CanOpen(legacy_signal, risk)) { reason="PORTFOLIO_RISK_REJECT:"+g_portfolio_risk.LastRejectionReason(); return false; }
+// Preserve normal Risk/Portfolio/News gate chain (shared logic path) without duplicating alternate policy.
+    StrategySignal legacy_signal;
+    if(!RetryUIBuildLegacySignal(normalized_plan, decision, legacy_signal)) { reason="LEGACY_SIGNAL_BUILD_FAILED"; return false; }
+    RiskDecision risk;
+    if(!g_risk_engine.Evaluate(legacy_signal, risk)) { reason="RISK_ENGINE_REJECT:"+EnumToString(risk.rejection_reason); return false; }
+
+    // P0-2: External Risk Lock check in retry validation path
+    if(g_ext_risk_lock_state_valid && InpExternalRiskLockEnabled)
+      {
+      string rejection_code, rejection_reason;
+      CAlgoPortfolioRisk::ExtRiskLockState pr_lock_state = ToPortfolioRiskLockState(g_ext_risk_lock_state);
+      
+      if(!g_portfolio_risk.CheckExternalRiskLock(pr_lock_state, rejection_code, rejection_reason))
+        {
+        reason = "EXTERNAL_RISK_LOCK_BLOCK_RETRY:" + rejection_reason;
+        return false;
+        }
+      }
+
+    if(!g_portfolio_risk.CanOpen(legacy_signal, risk)) { reason="PORTFOLIO_RISK_REJECT:"+g_portfolio_risk.LastRejectionReason(); return false; }
    // News gate is inside HybridEngine CheckHardGates for Evaluate; decision reached candidate => entry news clear.
    // We still fail closed if engine marked news block in decision status (defensive).
    if(decision.status == DECISION_NEWS_BLOCKED) { reason="NEWS_ENTRY_BLOCKED"; return false; }
@@ -4266,11 +5488,66 @@ void ProcessRetryPendingHandoff()
      { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_BIND_FAILED"; g_execution_ledger.MarkReconciliationRequired(request.attempt_id,"MarkSubmissionBound failed (no broker call)"); return; }
    if(!g_execution_ledger.CanSubmit(request.attempt_id, final_submit_reason))
      { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_SUBMIT_GATE_FAILED"; g_execution_ledger.MarkReconciliationRequired(request.attempt_id,"CanSubmit failed after bind: "+final_submit_reason); return; }
-   if(!g_execution_ledger.MarkSubmissionMayHaveOccurred(request.attempt_id, "E2.6 retry broker boundary action="+g_retry_handoff.action_id))
-     { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_MAY_HAVE_OCCURRED_FAILED"; g_execution_ledger.MarkReconciliationRequired(request.attempt_id,"MarkSubmissionMayHaveOccurred failed; broker call aborted"); return; }
+if(!g_execution_ledger.MarkSubmissionMayHaveOccurred(request.attempt_id, "E2.6 retry broker boundary action="+g_retry_handoff.action_id))
+      { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_MAY_HAVE_OCCURRED_FAILED"; g_execution_ledger.MarkReconciliationRequired(request.attempt_id,"MarkSubmissionMayHaveOccurred failed; broker call aborted"); return; }
 
-   ExecutionResult result; ZeroMemory(result);
-   bool execution_ok = g_executor.Execute(request, result); // broker call only via executor (timer path)
+    ExecutionResult result; ZeroMemory(result);
+
+    // P0-2: Fresh External Risk Lock read at final broker boundary (closes intra-tick race)
+    if(InpExternalRiskLockEnabled)
+      {
+      string fresh_rejection_code, fresh_rejection_reason;
+      ExtRiskLockState fresh_lock = ReadExtRiskLockStateFresh();
+      CAlgoPortfolioRisk::ExtRiskLockState pr_fresh_lock = ToPortfolioRiskLockState(fresh_lock);
+      if(!g_portfolio_risk.CheckExternalRiskLock(pr_fresh_lock, fresh_rejection_code, fresh_rejection_reason))
+        {
+        g_logger.Event(LOG_ERROR, "EXECUTION", "EXTERNAL_RISK_LOCK_BLOCK_FINAL_RETRY",
+                       request.symbol, "", "", request.signal_id,
+                       "FAIL", "EXT_RISK_LOCK", fresh_rejection_reason);
+        // Bound intent was never sent to broker; resolve as terminal non-submission.
+        {
+        ExecutionAttemptRecord abort_rec;
+        if(g_execution_ledger.GetAttempt(request.attempt_id, abort_rec))
+           {
+           string release_reason = "ABORTED_NON_SUBMISSION:ExternalRiskLock:" + fresh_rejection_reason;
+           string rel_reason = "";
+           if(g_execution_ledger.ReleaseReservation(request.attempt_id, abort_rec.risk_reserve_revision, release_reason, rel_reason) != CExecutionLedger::RESERVATION_LIFECYCLE_OK)
+              {
+              g_logger.Event(LOG_WARNING, "EXECUTION", "RESERVATION_RELEASE_FAILED", request.symbol, "", "", request.signal_id, "WARN", "RESERVATION", "ReleaseReservation failed: " + rel_reason);
+              }
+           }
+        }
+        if(!g_execution_ledger.ResolveAttempt(request.attempt_id, EXEC_STATE_ABORTED, "External Risk Lock block at final retry gate: " + fresh_rejection_reason))
+          {
+          g_logger.Event(LOG_ERROR, "EXECUTION", "RESOLVE_ATTEMPT_FAILED", request.symbol, "", "", request.signal_id, "FAIL", "LEDGER_ERROR", "ResolveAttempt(ABORTED) failed after final retry gate block");
+          string block_reason="";
+          g_execution_ledger.HasBlockingUnresolved(block_reason);
+          }
+        g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_EXT_RISK_LOCK"; return;
+        }
+}
+ 
+    // SAFE MODE: Block all broker mutations when active
+    // Only allows Visual Tester execution; fail-closed elsewhere
+    if(IsSafeModeEnforced() && !IsSafeModeActive())
+      {
+      g_blocked_mutation_count++;
+      g_logger.Event(LOG_INFO, "SAFE_MODE", "MUTATION_BLOCKED",
+                     request.symbol, "", "", request.signal_id,
+                     "BLOCK", "SAFE_MODE",
+                     "Safe Dashboard-Only Mode: broker mutation blocked (blocked=" + IntegerToString(g_blocked_mutation_count) + " executed=" + IntegerToString(g_executed_mutation_count) + ")");
+      // Resolve attempt as ABORTED (non-submission) without broker call
+      if(!g_execution_ledger.ResolveAttempt(request.attempt_id, EXEC_STATE_ABORTED, "Safe Dashboard-Only Mode: broker mutation blocked"))
+        {
+        g_logger.Event(LOG_ERROR, "EXECUTION", "RESOLVE_ATTEMPT_FAILED", request.symbol, "", "", request.signal_id, "FAIL", "LEDGER_ERROR", "ResolveAttempt(ABORTED) failed after Safe Mode block");
+        string block_reason="";
+        g_execution_ledger.HasBlockingUnresolved(block_reason);
+        }
+      g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_SAFE_MODE_BLOCKED"; return;
+      }
+ 
+    bool execution_ok = g_executor.Execute(request, result); // broker call only via executor (timer path)
+   g_executed_mutation_count++;
    g_logger.Trade(result);
    if(!result.success && result.failure_class == "AUTHORIZATION_DENIED" && !result.reconciliation_required)
      {
@@ -4617,6 +5894,8 @@ bool IsForexSymbol(const string symbol)
       return false;
    if(StringFind(symbol,"^")>=0)
       return false;
+
+   // First try: get currencies from symbol specification (most reliable)
    string base="";
    string quote="";
    if(SymbolInfoString(symbol,SYMBOL_CURRENCY_BASE,base) && SymbolInfoString(symbol,SYMBOL_CURRENCY_PROFIT,quote))
@@ -4626,26 +5905,91 @@ bool IsForexSymbol(const string symbol)
       if(StringLen(base)==3 && StringLen(quote)==3 && base!=quote)
          return true;
      }
-   if(StringLen(symbol)>=6)
+
+   // Fix 4: Handle broker-specific suffixes/prefixes by extracting core symbol
+   // Common patterns: EURUSD.pro, EURUSD.ecn, EURUSD#, EURUSD.m, EURUSD+, EURUSDraw, etc.
+   string core_symbol = symbol;
+   // Remove common suffixes
+   string suffixes[] = {".pro", ".ecn", ".raw", ".std", ".m", ".demo", "#", "+", "_"};
+   for(int s=0; s<ArraySize(suffixes); s++)
      {
-      string c1=StringSubstr(symbol,0,3);
-      string c2=StringSubstr(symbol,3,3);
-      StringToUpper(c1);
-      StringToUpper(c2);
-      if(c1==c2) return false;
-      bool ok1=false, ok2=false;
+      string suffix = suffixes[s];
+      int pos = StringFind(core_symbol, suffix);
+      if(pos >= 0)
+        {
+         // Remove suffix and everything after it
+         core_symbol = StringSubstr(core_symbol, 0, pos);
+         break;
+        }
+     }
+   // Remove common prefixes (rare but possible)
+   string prefixes[] = {"m.", "raw.", "ecn.", "pro."};
+   for(int p=0; p<ArraySize(prefixes); p++)
+     {
+      string prefix = prefixes[p];
+      if(StringFind(core_symbol, prefix) == 0)
+        {
+         core_symbol = StringSubstr(core_symbol, StringLen(prefix));
+         break;
+        }
+     }
+
+// Fallback heuristic: check if core symbol follows 3+3 currency pair pattern
+    if(StringLen(core_symbol) == 6)
+      {
+       string c1 = StringSubstr(core_symbol, 0, 3);
+       string c2 = StringSubstr(core_symbol, 3, 3);
+       StringToUpper(c1);
+       StringToUpper(c2);
+       if(c1 == c2) return false;
+       bool ok1 = false, ok2 = false;
        // F17: static so the constant currency list is built once, not per symbol per discovery scan.
-       static string fx[]={"EUR","USD","GBP","JPY","AUD","NZD","CAD","CHF","SEK","NOK","DKK","MXN","ZAR","TRY","SGD","HKD","PLN","HUF","CZK","RUB","CNH","THB"};
-      for(int i=0;i<ArraySize(fx);i++) if(c1==fx[i]) { ok1=true; break; }
-      for(int i=0;i<ArraySize(fx);i++) if(c2==fx[i]) { ok2=true; break; }
+       static string fx[] = {"EUR","USD","GBP","JPY","AUD","NZD","CAD","CHF","SEK","NOK","DKK","MXN","ZAR","TRY","SGD","HKD","PLN","HUF","CZK","RUB","CNH","THB"};
+      for(int i=0; i<ArraySize(fx); i++) if(c1 == fx[i]) { ok1 = true; break; }
+      for(int i=0; i<ArraySize(fx); i++) if(c2 == fx[i]) { ok2 = true; break; }
       if(ok1 && ok2) return true;
      }
+
    return false;
   }
 
 //+------------------------------------------------------------------+
+//| Normalize symbol for comparison (remove suffixes/prefixes, upper) |
+//+------------------------------------------------------------------+
+string NormalizeSymbolForComparison(const string symbol)
+  {
+   if(symbol=="") return "";
+   string s = symbol;
+   // Remove common suffixes
+   string suffixes[] = {".pro", ".ecn", ".raw", ".std", ".m", ".demo", "#", "+", "_"};
+   for(int i=0; i<ArraySize(suffixes); i++)
+     {
+      string suffix = suffixes[i];
+      int pos = StringFind(s, suffix);
+      if(pos >= 0)
+        {
+         s = StringSubstr(s, 0, pos);
+         break;
+        }
+     }
+   // Remove common prefixes
+   string prefixes[] = {"m.", "raw.", "ecn.", "pro."};
+   for(int i=0; i<ArraySize(prefixes); i++)
+     {
+      string prefix = prefixes[i];
+      if(StringFind(s, prefix) == 0)
+        {
+         s = StringSubstr(s, StringLen(prefix));
+         break;
+        }
+     }
+   StringToUpper(s);
+   return s;
+  }
+
+//+------------------------------------------------------------------+
 //|                                                                  |
-//+------------------------------------------------------------------
+//+------------------------------------------------------------------+
 int DiscoverForexSymbols(string &symbols_out[])
   {
    ArrayResize(symbols_out,0);
@@ -4654,6 +5998,20 @@ int DiscoverForexSymbols(string &symbols_out[])
       if(InpGoldSymbol!="") { int sz=ArraySize(symbols_out); ArrayResize(symbols_out,sz+1); symbols_out[sz]=InpGoldSymbol; }
       if(InpSilverSymbol!="") { int sz=ArraySize(symbols_out); ArrayResize(symbols_out,sz+1); symbols_out[sz]=InpSilverSymbol; }
       if(InpBitcoinSymbol!="") { int sz=ArraySize(symbols_out); ArrayResize(symbols_out,sz+1); symbols_out[sz]=InpBitcoinSymbol; }
+// Fix 2: Ensure chart symbol is included even in static universe mode
+       string chart_sym = ChartSymbol(0);
+       if(chart_sym!="")
+         {
+          bool exists=false;
+          string chart_norm = NormalizeSymbolForComparison(chart_sym);
+          for(int j=0;j<ArraySize(symbols_out);j++) if(NormalizeSymbolForComparison(symbols_out[j])==chart_norm) { exists=true; break; }
+          if(!exists)
+            {
+             int sz=ArraySize(symbols_out);
+             ArrayResize(symbols_out,sz+1);
+             symbols_out[sz]=chart_sym;
+            }
+         }
       return ArraySize(symbols_out);
      }
    int total=SymbolsTotal(true);
@@ -4668,13 +6026,32 @@ int DiscoverForexSymbols(string &symbols_out[])
          if(StringFind(su,"XAU")>=0 || StringFind(su,"XAG")>=0 || StringFind(su,"GOLD")>=0 || StringFind(su,"SILVER")>=0 || StringFind(su,"BTC")>=0 || StringFind(su,"ETH")>=0 || StringFind(su,"BITCOIN")>=0) continue;
         }
       bool exists=false;
-      for(int j=0;j<ArraySize(symbols_out);j++) if(symbols_out[j]==sn) { exists=true; break; }
+      string sn_norm = NormalizeSymbolForComparison(sn);
+      for(int j=0;j<ArraySize(symbols_out);j++) if(NormalizeSymbolForComparison(symbols_out[j])==sn_norm) { exists=true; break; }
       if(exists) continue;
       int sz2=ArraySize(symbols_out);
       if(sz2>=InpForexMaxSymbols) break;
       ArrayResize(symbols_out,sz2+1);
       symbols_out[sz2]=sn;
      }
+// Fix 2: Explicitly ensure the chart symbol is in the universe
+    // This guarantees the chart the EA is attached to always gets a runtime
+    string chart_sym = ChartSymbol(0);
+    if(chart_sym!="")
+      {
+       bool exists=false;
+       string chart_norm = NormalizeSymbolForComparison(chart_sym);
+       for(int j=0;j<ArraySize(symbols_out);j++) if(NormalizeSymbolForComparison(symbols_out[j])==chart_norm) { exists=true; break; }
+       if(!exists)
+         {
+          int sz2=ArraySize(symbols_out);
+          if(sz2<InpForexMaxSymbols)
+            {
+             ArrayResize(symbols_out,sz2+1);
+             symbols_out[sz2]=chart_sym;
+            }
+         }
+      }
    if(ArraySize(symbols_out)==0)
      {
       if(InpGoldSymbol!="") { int sz=ArraySize(symbols_out); ArrayResize(symbols_out,sz+1); symbols_out[sz]=InpGoldSymbol; }

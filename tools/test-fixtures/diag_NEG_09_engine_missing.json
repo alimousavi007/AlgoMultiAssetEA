@@ -1,0 +1,95 @@
+{
+  "run_info": {
+    "run_id": "DIAG_NEG_09_ENGINE_MISSING",
+    "start_time": "2026-11-15 12:30:00",
+    "mode": 2
+  },
+  "snapshot_writes": [
+    {
+      "timestamp": "2026-11-15 12:30:05",
+      "symbol": "EURUSD",
+      "generation": 1,
+      "success": false,
+      "error_details": "Feature computation failed",
+      "key_length_max": 19,
+      "gv_keys_written": [],
+      "gv_keys_failed": [
+        "AHSS_a1b2c3d4_gen"
+      ]
+    }
+  ],
+  "snapshot_reads": [
+    {
+      "timestamp": "2026-11-15 12:30:06",
+      "symbol": "EURUSD",
+      "success": false,
+      "generation_read": 0,
+      "snapshot_age_seconds": -1,
+      "error_reason": "No valid snapshot to read",
+      "generation_mismatch": false
+    }
+  ],
+  "dashboard_applies": [
+    {
+      "timestamp": "2026-11-15 12:30:07",
+      "symbol": "EURUSD",
+      "success": false,
+      "current_stage": "NOT_EVALUATED",
+      "regime_text": "UNKNOWN",
+      "bias_text": "NEUTRAL",
+      "long_text": "NO_LONG",
+      "short_text": "NO_SHORT",
+      "snapshot_valid": false,
+      "generation": 0
+    }
+  ],
+  "config_checks": [
+    {
+      "timestamp": "2026-11-15 12:30:01",
+      "input_name": "InpDashboard",
+      "input_value": "true",
+      "effective_value": "true",
+      "mismatch": false
+    }
+  ],
+  "runtime_states": [
+    {
+      "timestamp": "2026-11-15 12:30:04",
+      "symbol": "EURUSD",
+      "runtime_index": 0,
+      "valid": false,
+      "generation": 0,
+      "last_process_time": "2026-11-15 12:30:03",
+      "last_data_time": "2026-11-15 12:30:02",
+      "last_feature_time": "2026-11-15 12:30:03",
+      "last_evaluation_time": "2026-11-15 12:30:04",
+      "last_snapshot_time": 0,
+      "current_stage": 0,
+      "regime_code": 0,
+      "bias_code": 0,
+      "long_code": 0,
+      "short_code": 0
+    }
+  ],
+  "snapshot_writes_count": 1,
+  "snapshot_reads_count": 1,
+  "dashboard_applies_count": 1,
+  "config_checks_count": 1,
+  "runtime_states_count": 1,
+  "run_info_full": {
+    "run_id": "DIAG_NEG_09_ENGINE_MISSING",
+    "source_sha256": "B932CE3B64C6F730F3C92E618EB7864E0702E785BBA4C8C96C820E1238D674BC",
+    "ex5_sha256": "B932CE3B64C6F730F3C92E618EB7864E0702E785BBA4C8C96C820E1238D674BC",
+    "terminal_build": 5370,
+    "ea_version": "1.002",
+    "runtime_mode": 2,
+    "chart_id": 78002631460386,
+    "chart_symbol": "EURUSD",
+    "strategy_group_key": "DASHBOARD_TEST_GROUP",
+    "config_fingerprint": "CFGV2_a1b2c3d4",
+    "coordinator_mode": 1,
+    "authority_epoch": 1,
+    "runtime_count": 1
+  },
+  "dashboard_verified": false
+}

@@ -1,0 +1,64 @@
+﻿{
+    "RunId":  "DIAG_NEG_11_RENDERING_MISSING",
+    "AnalysisTime":  "2026-11-16T01:08:34.4950931+03:30",
+    "SourceJson":  "C:\\Users\\mousa\\AppData\\Roaming\\MetaQuotes\\Terminal\\EBC70E542FD2519E5E0B3CC8F66A5C22\\MQL5\\tools\\test-fixtures\\diag_NEG_11_rendering_missing.json",
+    "TotalErrors":  1,
+    "TotalWarnings":  0,
+    "TotalAssertions":  23,
+    "PassedAssertions":  21,
+    "FailedAssertions":  2,
+    "FirstFailureStage":  "RENDER",
+    "DashboardVerified":  false,
+    "LifecycleChain":  [
+                           {
+                               "Detail":  "Input parameters received",
+                               "Name":  "INPUT",
+                               "Passed":  true
+                           },
+                           {
+                               "Detail":  "Config propagated without mismatch",
+                               "Name":  "CONFIG",
+                               "Passed":  true
+                           },
+                           {
+                               "Detail":  "At least one valid runtime",
+                               "Name":  "RUNTIME",
+                               "Passed":  true
+                           },
+                           {
+                               "Detail":  "Market data available for snapshot",
+                               "Name":  "DATA",
+                               "Passed":  true
+                           },
+                           {
+                               "Detail":  "Features computed for at least one write",
+                               "Name":  "FEATURES",
+                               "Passed":  true
+                           },
+                           {
+                               "Detail":  "Engine evaluation completed for at least one read",
+                               "Name":  "ENGINE",
+                               "Passed":  true
+                           },
+                           {
+                               "Detail":  "Complete snapshot write",
+                               "Name":  "SNAPSHOT_WRITE",
+                               "Passed":  true
+                           },
+                           {
+                               "Detail":  "Successful snapshot read",
+                               "Name":  "SNAPSHOT_READ",
+                               "Passed":  true
+                           },
+                           {
+                               "Detail":  "Dashboard apply with valid snapshot",
+                               "Name":  "APPLY",
+                               "Passed":  true
+                           },
+                           {
+                               "Detail":  "Dashboard verified flag true",
+                               "Name":  "RENDER",
+                               "Passed":  false
+                           }
+                       ]
+}

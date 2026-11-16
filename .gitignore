@@ -39,10 +39,16 @@
 
 !Experts/
 !Experts/AlgoMultiAssetEA.mq5
+!Experts/AlgoMultiAssetEA_DASH_A.set
+!Experts/AlgoMultiAssetEA_DASH_B.set
 
 !Include/
 !Include/AlgoSystem/
 !Include/AlgoSystem/**
+
+# Test fixtures for Dashboard diagnostics
+!tools/test-fixtures/
+!tools/test-fixtures/**
 
 # Ignore all .log files
 *.log

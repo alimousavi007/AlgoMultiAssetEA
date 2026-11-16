@@ -60,6 +60,19 @@ public:
       double equity_at_admission;     // F-002-P1: equity at CanAdmit time for revalidation drift check
       };
 
+    // P0-2: External Risk Lock state (passed from EA via Global Variables)
+    struct ExtRiskLockState
+      {
+      int        state;              // 0=DISABLED, 1=UNLOCKED, 2=LOCKED, 3=UNKNOWN
+      string     reason;             // Human-readable reason
+      string     source;             // Source identifier
+      datetime   updated_at;         // Last update timestamp
+      datetime   expiry;             // Expiry timestamp (0 = no expiry)
+      int        revision;           // Revision counter
+      bool       valid;              // True if state was successfully read
+      bool       fail_closed;        // True if fail-closed mode enabled
+      };
+
 private:
     // Helper: Get the active environment provider (native or test)
     // Returns non-const pointer from const method to allow selection methods
@@ -218,7 +231,7 @@ private:
        return MathAbs(loss)/equity*100.0;
       }
 
-    void Reject(const string code,const string reason)
+void Reject(const string code,const string reason)
       {
        m_last_rejection_code=code;
        m_last_rejection_reason=reason;
@@ -281,6 +294,52 @@ public:
        m_use_native_provider = (provider == NULL);
       }
 
+    // P0-2: Check External Risk Lock state
+    // Returns true if lock allows new entries, false if blocked
+    // Populates rejection_code and rejection_reason on failure
+    bool CheckExternalRiskLock(const ExtRiskLockState &lock_state,
+                               string &rejection_code,
+                               string &rejection_reason) const
+      {
+       if(!lock_state.valid)
+         {
+         rejection_code = "EXTERNAL_RISK_LOCK_INVALID";
+         rejection_reason = "External Risk Lock state read failed";
+         return false;
+         }
+
+       if(lock_state.state == 0) // DISABLED
+         {
+         return true; // Feature disabled - no block
+         }
+
+       if(lock_state.state == 2) // LOCKED
+         {
+         rejection_code = "EXTERNAL_RISK_LOCKED";
+         rejection_reason = "External Risk Lock active: " + lock_state.reason;
+         return false;
+         }
+
+       if(lock_state.state == 3) // UNKNOWN
+         {
+         if(lock_state.fail_closed)
+           {
+           rejection_code = "EXTERNAL_RISK_STATE_UNKNOWN";
+           rejection_reason = "External Risk Lock state unknown/unavailable (fail-closed): " + lock_state.reason;
+           return false;
+           }
+         else
+           {
+           rejection_code = "EXTERNAL_RISK_SOURCE_UNAVAILABLE";
+           rejection_reason = "External Risk Lock source unavailable: " + lock_state.reason;
+           return false;
+           }
+         }
+
+       // UNLOCKED (1) or any other state
+       return true;
+       }
+
     virtual bool Initialize() override
       {
        if(m_max_portfolio_risk<=0.0 ||
@@ -302,29 +361,29 @@ public:
        return true;
       }
 
-    virtual bool CanOpen(const StrategySignal &signal,
-                         const RiskDecision &risk) override
+virtual bool CanOpen(const StrategySignal &signal,
+                          const RiskDecision &risk) override
       {
        m_last_rejection_code="";
        m_last_rejection_reason="";
 
        if(!signal.valid)
          {
-          Reject("INVALID_SIGNAL","Strategy signal is invalid");
-          return false;
+         Reject("INVALID_SIGNAL","Strategy signal is invalid");
+         return false;
          }
 
        if(risk.decision!=RISK_APPROVED)
          {
-          Reject("RISK_NOT_APPROVED","Risk engine did not approve the trade");
-          return false;
+         Reject("RISK_NOT_APPROVED","Risk engine did not approve the trade");
+         return false;
          }
 
        IEnvironmentProvider* env = GetEnv();
        if(env == NULL)
          {
-          Reject("NO_ENV_PROVIDER","Environment provider not available");
-          return false;
+         Reject("NO_ENV_PROVIDER","Environment provider not available");
+         return false;
          }
 
        // F-002-R6: Check total managed position limit separately (not in shared helper)
@@ -545,33 +604,36 @@ public:
        if(ledger == NULL || !ledger.IsAvailable() || account_key == "")
           return false;
 
-       // Query execution_attempts for ACTIVE (2) and PARTIALLY_COVERED (3) reservations
-       // Only reservations with risk_reserve_known=true and risk_reserve_model_version=EXEC_RISK_RESERVE_MODEL_V1 count
-       string sql = "SELECT risk_reserve_remaining_amount, risk_reserve_equity_snapshot, risk_reserve_state, risk_reserve_known, risk_reserve_model_version, attempt_id "
-                    "FROM execution_attempts "
-                    "WHERE risk_reserve_state IN (" + IntegerToString(EXEC_RISK_RESERVE_STATE_ACTIVE) + "," + IntegerToString(EXEC_RISK_RESERVE_STATE_PARTIALLY_COVERED) + ") "
-                    "AND account_key = '" + CExecutionLedger::EscapeSQLStatic(account_key) + "';";
+// Query execution_attempts for ACTIVE (2) and PARTIALLY_COVERED (3) reservations
+        // Only reservations with model_version=EXEC_RISK_RESERVE_MODEL_V1 AND state > LEGACY_UNVERIFIED count (risk_reserve_known column doesn't exist)
+        string sql = "SELECT risk_reserve_remaining_amount, risk_reserve_equity_snapshot, risk_reserve_state, risk_reserve_model_version, attempt_id "
+                     "FROM execution_attempts "
+                     "WHERE risk_reserve_state IN (" + IntegerToString(EXEC_RISK_RESERVE_STATE_ACTIVE) + "," + IntegerToString(EXEC_RISK_RESERVE_STATE_PARTIALLY_COVERED) + ") "
+                     "AND risk_reserve_model_version = " + IntegerToString(EXEC_RISK_RESERVE_MODEL_V1) +
+                     " AND risk_reserve_state > " + IntegerToString(EXEC_RISK_RESERVE_STATE_LEGACY_UNVERIFIED) +
+                     " AND account_key = '" + CExecutionLedger::EscapeSQLStatic(account_key) + "';";
 
-       int handle = DatabasePrepare(ledger.GetDbHandle(), sql);
-       if(handle == INVALID_HANDLE)
-          return false;
+        int handle = DatabasePrepare(ledger.GetDbHandle(), sql);
+        if(handle == INVALID_HANDLE)
+           return false;
 
-       double equity_for_pct = (current_equity > 0.0) ? current_equity : 0.0; // will use equity_snapshot per-row if not provided
+        double equity_for_pct = (current_equity > 0.0) ? current_equity : 0.0; // will use equity_snapshot per-row if not provided
 
-       while(DatabaseRead(handle))
-         {
-         double remaining = DatabaseColumnDouble2(handle, 0);
-         double equity_snapshot = DatabaseColumnDouble2(handle, 1);
-         int state = (int)DatabaseColumnLong2(handle, 2);
-         int known = (int)DatabaseColumnLong2(handle, 3);
-         int model_version = (int)DatabaseColumnLong2(handle, 4);
-         string attempt_id = DatabaseColumnString(handle, 5);
+        while(DatabaseRead(handle))
+          {
+          double remaining = DatabaseColumnDouble2(handle, 0);
+          double equity_snapshot = DatabaseColumnDouble2(handle, 1);
+          int state = (int)DatabaseColumnLong2(handle, 2);
+          int model_version = (int)DatabaseColumnLong2(handle, 3);
+          string attempt_id = DatabaseColumnString(handle, 4);
 
-         if(exclude_attempt_id != "" && attempt_id == exclude_attempt_id)
-            continue; // exclude current attempt's own reservation
+          if(exclude_attempt_id != "" && attempt_id == exclude_attempt_id)
+             continue; // exclude current attempt's own reservation
 
-         if(known != 1 || model_version != EXEC_RISK_RESERVE_MODEL_V1)
-            continue;
+          // Derive known: V1 model AND state > LEGACY_UNVERIFIED
+          bool known = (model_version == EXEC_RISK_RESERVE_MODEL_V1) && (state > EXEC_RISK_RESERVE_STATE_LEGACY_UNVERIFIED);
+          if(!known || model_version != EXEC_RISK_RESERVE_MODEL_V1)
+             continue;
 
          if(remaining <= 0.0)
             continue;

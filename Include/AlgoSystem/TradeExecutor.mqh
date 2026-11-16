@@ -624,8 +624,11 @@ else if(request.intent==ORDER_INTENT_OPEN_SHORT)
        result.executed_price=
           m_trade.ResultPrice();
 
-       result.executed_volume=
-          m_trade.ResultVolume();
+result.executed_volume=
+           m_trade.ResultVolume(); // CTrade::ResultVolume() returns the executed volume for THIS order submission.
+                                 // Each attempt_id = one order submission. For partial fills (DONE_PARTIAL),
+                                 // this is the partial volume. There is no auto-resubmit for remaining volume
+                                 // per project policy; remaining exposure is handled via PARTIALLY_COVERED reservation.
 
        result.message=
           m_trade.ResultRetcodeDescription();
