@@ -1,0 +1,62 @@
+﻿{
+    "RunId":  "DIAG_NEG_11_RENDERING_MISSING",
+    "FirstFailureStage":  "RENDER",
+    "Chain":  [
+                  {
+                      "Detail":  "Input parameters received",
+                      "Name":  "INPUT",
+                      "Passed":  true
+                  },
+                  {
+                      "Detail":  "Config propagated without mismatch",
+                      "Name":  "CONFIG",
+                      "Passed":  true
+                  },
+                  {
+                      "Detail":  "At least one valid runtime",
+                      "Name":  "RUNTIME",
+                      "Passed":  true
+                  },
+                  {
+                      "Detail":  "Market data available for snapshot",
+                      "Name":  "DATA",
+                      "Passed":  true
+                  },
+                  {
+                      "Detail":  "Features computed for at least one write",
+                      "Name":  "FEATURES",
+                      "Passed":  true
+                  },
+                  {
+                      "Detail":  "Engine evaluation completed for at least one read",
+                      "Name":  "ENGINE",
+                      "Passed":  true
+                  },
+                  {
+                      "Detail":  "Complete snapshot write",
+                      "Name":  "SNAPSHOT_WRITE",
+                      "Passed":  true
+                  },
+                  {
+                      "Detail":  "Successful snapshot read",
+                      "Name":  "SNAPSHOT_READ",
+                      "Passed":  true
+                  },
+                  {
+                      "Detail":  "Dashboard apply with valid snapshot",
+                      "Name":  "APPLY",
+                      "Passed":  true
+                  },
+                  {
+                      "Detail":  "Dashboard verified flag true",
+                      "Name":  "RENDER",
+                      "Passed":  false
+                  }
+              ],
+    "Errors":  [
+                   "Lifecycle chain BROKEN at stage: RENDER"
+               ],
+    "Warnings":  [
+
+                 ]
+}

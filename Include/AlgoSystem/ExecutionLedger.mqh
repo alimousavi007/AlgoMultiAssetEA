@@ -236,9 +236,15 @@ bool               IsInitialized() const { return m_initialized && m_db_availabl
     bool               ReconcileAttempt(const string attempt_id);
     bool               ReconcileUnresolved(int max_attempts=10);
     int                RecoverUnresolved(int &out_count);
-    bool               HasBlockingUnresolved(string &blocking_reason);
-    // RS-02: conservative quarantine for INTENT_DURABLE_NOT_SUBMITTED (no auto-resubmit)
-    bool               QuarantineOrphanIntent(const ExecutionAttemptRecord &rec);
+bool               HasBlockingUnresolved(string &blocking_reason);
+     // RS-02: conservative quarantine for INTENT_DURABLE_NOT_SUBMITTED (no auto-resubmit)
+     bool               QuarantineOrphanIntent(const ExecutionAttemptRecord &rec);
+     // CR-01: Idempotent reservation reconciliation for restart safety
+     // Finds attempts with terminal state (COMPLETED/PARTIAL_FILL) but reservation still ACTIVE/PARTIALLY_COVERED
+     // and advances reservation to EXPOSURE_RECONCILED using current revision (CAS).
+     // account_key filter ensures cross-account isolation (R-06).
+     // For PARTIAL_FILL and COMPLETED: only reconciles when remaining_volume ≈ 0 (R-05).
+     int                ReconcileReservations(const string account_key, string &reason);
 
     // F-005.2: Magic ownership resolution — central authority for all consumers.
     // Range membership is only a candidate filter; exact ownership requires durable ledger lookup.
@@ -449,10 +455,13 @@ bool               IsInitialized() const { return m_initialized && m_db_availabl
     bool               HeartbeatAuthority(const string authority_key,
                                         const string owner_token,
                                         long current_epoch);
-    bool               ValidateAuthority(const string authority_key,
-                                       const string owner_token,
-                                       long current_epoch);
-    int                GetAuthorityState(const string authority_key);
+bool               ValidateAuthority(const string authority_key,
+                                        const string owner_token,
+                                        long current_epoch);
+     // CR-02: Expire stale authority lease (heartbeat timeout -> ORPHANED)
+     // Called periodically from OnTimer; safe to call concurrently with HeartbeatAuthority.
+     bool               ExpireStaleAuthority(const string authority_key, int lease_seconds, string &reason, const string owner_token="");
+     int                GetAuthorityState(const string authority_key);
 
     // State history
     bool               LogStateTransition(const string attempt_id, ENUM_EXEC_ATTEMPT_STATE old_state,
@@ -1483,7 +1492,7 @@ return true;
  //| Transition: ACTIVE(2) -> PARTIALLY_COVERED(3) with CAS/revision |
  //+------------------------------------------------------------------+
  CExecutionLedger::ENUM_RESERVATION_LIFECYCLE_RESULT CExecutionLedger::UpdateReservationToPartiallyCovered(
-     const string attempt_id, int expected_revision, double executed_volume, double new_remaining_amount, double new_remaining_volume, string &reason)
+const string attempt_id, int expected_revision, double executed_volume, double new_remaining_amount, double new_remaining_volume, string &reason)
    {
    reason = "";
    if(!m_db_available || m_db_handle == INVALID_HANDLE)
@@ -1493,7 +1502,8 @@ return true;
       { reason = "BEGIN_TX_FAILED"; return RESERVATION_LIFECYCLE_DB_ERROR; }
 
    // Read current state and revision for CAS
-   string sql = "SELECT risk_reserve_state, risk_reserve_revision, risk_reserve_known, risk_reserve_model_version "
+   // Derive "known" from model_version == V1 AND state > LEGACY_UNVERIFIED (since risk_reserve_known column doesn't exist)
+   string sql = "SELECT risk_reserve_state, risk_reserve_revision, risk_reserve_model_version "
                 "FROM execution_attempts WHERE attempt_id = '" + EscapeSQL(attempt_id) + "';";
    int handle = DatabasePrepare(m_db_handle, sql);
    if(handle == INVALID_HANDLE)
@@ -1501,20 +1511,21 @@ return true;
 
    int current_state = -1;
    int current_revision = 0;
-   int known = 0;
    int model_version = 0;
    if(DatabaseRead(handle))
       {
       current_state = (int)DatabaseColumnLong2(handle, 0);
       current_revision = (int)DatabaseColumnLong2(handle, 1);
-      known = (int)DatabaseColumnLong2(handle, 2);
-      model_version = (int)DatabaseColumnLong2(handle, 3);
+      model_version = (int)DatabaseColumnLong2(handle, 2);
       }
    DatabaseFinalize(handle);
 
-   if(current_state != EXEC_RISK_RESERVE_STATE_ACTIVE)
-      { DatabaseTransactionRollback(m_db_handle); reason = "INVALID_STATE_NOT_ACTIVE"; return RESERVATION_LIFECYCLE_INVALID_STATE; }
-   if(known != 1 || model_version != EXEC_RISK_RESERVE_MODEL_V1)
+   // Derive known: V1 model AND state > LEGACY_UNVERIFIED
+   bool known = (model_version == EXEC_RISK_RESERVE_MODEL_V1) && (current_state > EXEC_RISK_RESERVE_STATE_LEGACY_UNVERIFIED);
+
+if(current_state != EXEC_RISK_RESERVE_STATE_ACTIVE && current_state != EXEC_RISK_RESERVE_STATE_PARTIALLY_COVERED)
+       { DatabaseTransactionRollback(m_db_handle); reason = "INVALID_STATE_NOT_ACTIVE_OR_PARTIALLY_COVERED"; return RESERVATION_LIFECYCLE_INVALID_STATE; }
+   if(!known || model_version != EXEC_RISK_RESERVE_MODEL_V1)
       { DatabaseTransactionRollback(m_db_handle); reason = "LEGACY_UNVERIFIED"; return RESERVATION_LIFECYCLE_LEGACY_UNVERIFIED; }
    if(current_revision != expected_revision)
       { DatabaseTransactionRollback(m_db_handle); reason = "REVISION_MISMATCH"; return RESERVATION_LIFECYCLE_REVISION_MISMATCH; }
@@ -1549,41 +1560,43 @@ datetime now = TimeCurrent();
  //| F-002: Update Reservation to EXPOSURE_RECONCILED                |
  //| Transition: PARTIALLY_COVERED(3) -> EXPOSURE_RECONCILED(4)      |
  //+------------------------------------------------------------------+
- CExecutionLedger::ENUM_RESERVATION_LIFECYCLE_RESULT CExecutionLedger::UpdateReservationToExposureReconciled(
-     const string attempt_id, int expected_revision, string &reason)
-   {
-   reason = "";
-   if(!m_db_available || m_db_handle == INVALID_HANDLE)
-      { reason = "LEDGER_UNAVAILABLE"; return RESERVATION_LIFECYCLE_DB_ERROR; }
+CExecutionLedger::ENUM_RESERVATION_LIFECYCLE_RESULT CExecutionLedger::UpdateReservationToExposureReconciled(
+      const string attempt_id, int expected_revision, string &reason)
+    {
+    reason = "";
+    if(!m_db_available || m_db_handle == INVALID_HANDLE)
+       { reason = "LEDGER_UNAVAILABLE"; return RESERVATION_LIFECYCLE_DB_ERROR; }
 
-   if(!DatabaseTransactionBegin(m_db_handle))
-      { reason = "BEGIN_TX_FAILED"; return RESERVATION_LIFECYCLE_DB_ERROR; }
+    if(!DatabaseTransactionBegin(m_db_handle))
+       { reason = "BEGIN_TX_FAILED"; return RESERVATION_LIFECYCLE_DB_ERROR; }
 
-   string sql = "SELECT risk_reserve_state, risk_reserve_revision, risk_reserve_known, risk_reserve_model_version "
-                "FROM execution_attempts WHERE attempt_id = '" + EscapeSQL(attempt_id) + "';";
-   int handle = DatabasePrepare(m_db_handle, sql);
-   if(handle == INVALID_HANDLE)
-      { DatabaseTransactionRollback(m_db_handle); reason = "READ_PREPARE_FAILED"; return RESERVATION_LIFECYCLE_DB_ERROR; }
+    // Derive "known" from model_version == V1 AND state > LEGACY_UNVERIFIED
+    string sql = "SELECT risk_reserve_state, risk_reserve_revision, risk_reserve_model_version "
+                 "FROM execution_attempts WHERE attempt_id = '" + EscapeSQL(attempt_id) + "';";
+    int handle = DatabasePrepare(m_db_handle, sql);
+    if(handle == INVALID_HANDLE)
+       { DatabaseTransactionRollback(m_db_handle); reason = "READ_PREPARE_FAILED"; return RESERVATION_LIFECYCLE_DB_ERROR; }
 
-   int current_state = -1;
-   int current_revision = 0;
-   int known = 0;
-   int model_version = 0;
-   if(DatabaseRead(handle))
-      {
-      current_state = (int)DatabaseColumnLong2(handle, 0);
-      current_revision = (int)DatabaseColumnLong2(handle, 1);
-      known = (int)DatabaseColumnLong2(handle, 2);
-      model_version = (int)DatabaseColumnLong2(handle, 3);
-      }
-   DatabaseFinalize(handle);
+    int current_state = -1;
+    int current_revision = 0;
+    int model_version = 0;
+    if(DatabaseRead(handle))
+       {
+       current_state = (int)DatabaseColumnLong2(handle, 0);
+       current_revision = (int)DatabaseColumnLong2(handle, 1);
+       model_version = (int)DatabaseColumnLong2(handle, 2);
+       }
+    DatabaseFinalize(handle);
 
-   if(current_state != EXEC_RISK_RESERVE_STATE_PARTIALLY_COVERED)
-      { DatabaseTransactionRollback(m_db_handle); reason = "INVALID_STATE_NOT_PARTIALLY_COVERED"; return RESERVATION_LIFECYCLE_INVALID_STATE; }
-   if(known != 1 || model_version != EXEC_RISK_RESERVE_MODEL_V1)
-      { DatabaseTransactionRollback(m_db_handle); reason = "LEGACY_UNVERIFIED"; return RESERVATION_LIFECYCLE_LEGACY_UNVERIFIED; }
-   if(current_revision != expected_revision)
-      { DatabaseTransactionRollback(m_db_handle); reason = "REVISION_MISMATCH"; return RESERVATION_LIFECYCLE_REVISION_MISMATCH; }
+    // Derive known: V1 model AND state > LEGACY_UNVERIFIED
+    bool known = (model_version == EXEC_RISK_RESERVE_MODEL_V1) && (current_state > EXEC_RISK_RESERVE_STATE_LEGACY_UNVERIFIED);
+
+if(current_state != EXEC_RISK_RESERVE_STATE_PARTIALLY_COVERED && current_state != EXEC_RISK_RESERVE_STATE_ACTIVE)
+       { DatabaseTransactionRollback(m_db_handle); reason = "INVALID_STATE_NOT_ACTIVE_OR_PARTIALLY_COVERED"; return RESERVATION_LIFECYCLE_INVALID_STATE; }
+    if(!known || model_version != EXEC_RISK_RESERVE_MODEL_V1)
+       { DatabaseTransactionRollback(m_db_handle); reason = "LEGACY_UNVERIFIED"; return RESERVATION_LIFECYCLE_LEGACY_UNVERIFIED; }
+    if(current_revision != expected_revision)
+       { DatabaseTransactionRollback(m_db_handle); reason = "REVISION_MISMATCH"; return RESERVATION_LIFECYCLE_REVISION_MISMATCH; }
 
    datetime now = TimeCurrent();
    int new_revision = expected_revision + 1;
@@ -1613,41 +1626,43 @@ datetime now = TimeCurrent();
  //| F-002: Release Reservation                                       |
  //| Transition: ACTIVE(2)/PARTIALLY_COVERED(3) -> RELEASED(5)       |
  //+------------------------------------------------------------------+
- CExecutionLedger::ENUM_RESERVATION_LIFECYCLE_RESULT CExecutionLedger::ReleaseReservation(
-     const string attempt_id, int expected_revision, const string release_reason, string &reason)
-   {
-   reason = "";
-   if(!m_db_available || m_db_handle == INVALID_HANDLE)
-      { reason = "LEDGER_UNAVAILABLE"; return RESERVATION_LIFECYCLE_DB_ERROR; }
+CExecutionLedger::ENUM_RESERVATION_LIFECYCLE_RESULT CExecutionLedger::ReleaseReservation(
+      const string attempt_id, int expected_revision, const string release_reason, string &reason)
+    {
+    reason = "";
+    if(!m_db_available || m_db_handle == INVALID_HANDLE)
+       { reason = "LEDGER_UNAVAILABLE"; return RESERVATION_LIFECYCLE_DB_ERROR; }
 
-   if(!DatabaseTransactionBegin(m_db_handle))
-      { reason = "BEGIN_TX_FAILED"; return RESERVATION_LIFECYCLE_DB_ERROR; }
+    if(!DatabaseTransactionBegin(m_db_handle))
+       { reason = "BEGIN_TX_FAILED"; return RESERVATION_LIFECYCLE_DB_ERROR; }
 
-   string sql = "SELECT risk_reserve_state, risk_reserve_revision, risk_reserve_known, risk_reserve_model_version "
-                "FROM execution_attempts WHERE attempt_id = '" + EscapeSQL(attempt_id) + "';";
-   int handle = DatabasePrepare(m_db_handle, sql);
-   if(handle == INVALID_HANDLE)
-      { DatabaseTransactionRollback(m_db_handle); reason = "READ_PREPARE_FAILED"; return RESERVATION_LIFECYCLE_DB_ERROR; }
+    // Derive "known" from model_version == V1 AND state > LEGACY_UNVERIFIED
+    string sql = "SELECT risk_reserve_state, risk_reserve_revision, risk_reserve_model_version "
+                 "FROM execution_attempts WHERE attempt_id = '" + EscapeSQL(attempt_id) + "';";
+    int handle = DatabasePrepare(m_db_handle, sql);
+    if(handle == INVALID_HANDLE)
+       { DatabaseTransactionRollback(m_db_handle); reason = "READ_PREPARE_FAILED"; return RESERVATION_LIFECYCLE_DB_ERROR; }
 
-   int current_state = -1;
-   int current_revision = 0;
-   int known = 0;
-   int model_version = 0;
-   if(DatabaseRead(handle))
-      {
-      current_state = (int)DatabaseColumnLong2(handle, 0);
-      current_revision = (int)DatabaseColumnLong2(handle, 1);
-      known = (int)DatabaseColumnLong2(handle, 2);
-      model_version = (int)DatabaseColumnLong2(handle, 3);
-      }
-   DatabaseFinalize(handle);
+    int current_state = -1;
+    int current_revision = 0;
+    int model_version = 0;
+    if(DatabaseRead(handle))
+       {
+       current_state = (int)DatabaseColumnLong2(handle, 0);
+       current_revision = (int)DatabaseColumnLong2(handle, 1);
+       model_version = (int)DatabaseColumnLong2(handle, 2);
+       }
+    DatabaseFinalize(handle);
 
-   if(current_state != EXEC_RISK_RESERVE_STATE_ACTIVE && current_state != EXEC_RISK_RESERVE_STATE_PARTIALLY_COVERED)
-      { DatabaseTransactionRollback(m_db_handle); reason = "INVALID_STATE_FOR_RELEASE"; return RESERVATION_LIFECYCLE_INVALID_STATE; }
-   if(known != 1 || model_version != EXEC_RISK_RESERVE_MODEL_V1)
-      { DatabaseTransactionRollback(m_db_handle); reason = "LEGACY_UNVERIFIED"; return RESERVATION_LIFECYCLE_LEGACY_UNVERIFIED; }
-   if(current_revision != expected_revision)
-      { DatabaseTransactionRollback(m_db_handle); reason = "REVISION_MISMATCH"; return RESERVATION_LIFECYCLE_REVISION_MISMATCH; }
+    // Derive known: V1 model AND state > LEGACY_UNVERIFIED
+    bool known = (model_version == EXEC_RISK_RESERVE_MODEL_V1) && (current_state > EXEC_RISK_RESERVE_STATE_LEGACY_UNVERIFIED);
+
+    if(current_state != EXEC_RISK_RESERVE_STATE_ACTIVE && current_state != EXEC_RISK_RESERVE_STATE_PARTIALLY_COVERED)
+       { DatabaseTransactionRollback(m_db_handle); reason = "INVALID_STATE_FOR_RELEASE"; return RESERVATION_LIFECYCLE_INVALID_STATE; }
+    if(!known || model_version != EXEC_RISK_RESERVE_MODEL_V1)
+       { DatabaseTransactionRollback(m_db_handle); reason = "LEGACY_UNVERIFIED"; return RESERVATION_LIFECYCLE_LEGACY_UNVERIFIED; }
+    if(current_revision != expected_revision)
+       { DatabaseTransactionRollback(m_db_handle); reason = "REVISION_MISMATCH"; return RESERVATION_LIFECYCLE_REVISION_MISMATCH; }
 
    datetime now = TimeCurrent();
    int new_revision = expected_revision + 1;
@@ -1680,41 +1695,43 @@ datetime now = TimeCurrent();
  //| F-002: Mark Reservation RECONCILIATION_REQUIRED                 |
  //| Transition: ACTIVE(2)/PARTIALLY_COVERED(3) -> RECONCILIATION_REQUIRED(6) |
  //+------------------------------------------------------------------+
- CExecutionLedger::ENUM_RESERVATION_LIFECYCLE_RESULT CExecutionLedger::MarkReservationReconciliationRequired(
-     const string attempt_id, int expected_revision, const string reason, string &out_reason)
-   {
-   out_reason = "";
-   if(!m_db_available || m_db_handle == INVALID_HANDLE)
-      { out_reason = "LEDGER_UNAVAILABLE"; return RESERVATION_LIFECYCLE_DB_ERROR; }
+CExecutionLedger::ENUM_RESERVATION_LIFECYCLE_RESULT CExecutionLedger::MarkReservationReconciliationRequired(
+      const string attempt_id, int expected_revision, const string reason, string &out_reason)
+    {
+    out_reason = "";
+    if(!m_db_available || m_db_handle == INVALID_HANDLE)
+       { out_reason = "LEDGER_UNAVAILABLE"; return RESERVATION_LIFECYCLE_DB_ERROR; }
 
-   if(!DatabaseTransactionBegin(m_db_handle))
-      { out_reason = "BEGIN_TX_FAILED"; return RESERVATION_LIFECYCLE_DB_ERROR; }
+    if(!DatabaseTransactionBegin(m_db_handle))
+       { out_reason = "BEGIN_TX_FAILED"; return RESERVATION_LIFECYCLE_DB_ERROR; }
 
-   string sql = "SELECT risk_reserve_state, risk_reserve_revision, risk_reserve_known, risk_reserve_model_version "
-                "FROM execution_attempts WHERE attempt_id = '" + EscapeSQL(attempt_id) + "';";
-   int handle = DatabasePrepare(m_db_handle, sql);
-   if(handle == INVALID_HANDLE)
-      { DatabaseTransactionRollback(m_db_handle); out_reason = "READ_PREPARE_FAILED"; return RESERVATION_LIFECYCLE_DB_ERROR; }
+    // Derive "known" from model_version == V1 AND state > LEGACY_UNVERIFIED
+    string sql = "SELECT risk_reserve_state, risk_reserve_revision, risk_reserve_model_version "
+                 "FROM execution_attempts WHERE attempt_id = '" + EscapeSQL(attempt_id) + "';";
+    int handle = DatabasePrepare(m_db_handle, sql);
+    if(handle == INVALID_HANDLE)
+       { DatabaseTransactionRollback(m_db_handle); out_reason = "READ_PREPARE_FAILED"; return RESERVATION_LIFECYCLE_DB_ERROR; }
 
-   int current_state = -1;
-   int current_revision = 0;
-   int known = 0;
-   int model_version = 0;
-   if(DatabaseRead(handle))
-      {
-      current_state = (int)DatabaseColumnLong2(handle, 0);
-      current_revision = (int)DatabaseColumnLong2(handle, 1);
-      known = (int)DatabaseColumnLong2(handle, 2);
-      model_version = (int)DatabaseColumnLong2(handle, 3);
-      }
-   DatabaseFinalize(handle);
+    int current_state = -1;
+    int current_revision = 0;
+    int model_version = 0;
+    if(DatabaseRead(handle))
+       {
+       current_state = (int)DatabaseColumnLong2(handle, 0);
+       current_revision = (int)DatabaseColumnLong2(handle, 1);
+       model_version = (int)DatabaseColumnLong2(handle, 2);
+       }
+    DatabaseFinalize(handle);
 
-   if(current_state != EXEC_RISK_RESERVE_STATE_ACTIVE && current_state != EXEC_RISK_RESERVE_STATE_PARTIALLY_COVERED)
-      { DatabaseTransactionRollback(m_db_handle); out_reason = "INVALID_STATE_FOR_RECONCILIATION"; return RESERVATION_LIFECYCLE_INVALID_STATE; }
-   if(known != 1 || model_version != EXEC_RISK_RESERVE_MODEL_V1)
-      { DatabaseTransactionRollback(m_db_handle); out_reason = "LEGACY_UNVERIFIED"; return RESERVATION_LIFECYCLE_LEGACY_UNVERIFIED; }
-   if(current_revision != expected_revision)
-      { DatabaseTransactionRollback(m_db_handle); out_reason = "REVISION_MISMATCH"; return RESERVATION_LIFECYCLE_REVISION_MISMATCH; }
+    // Derive known: V1 model AND state > LEGACY_UNVERIFIED
+    bool known = (model_version == EXEC_RISK_RESERVE_MODEL_V1) && (current_state > EXEC_RISK_RESERVE_STATE_LEGACY_UNVERIFIED);
+
+    if(current_state != EXEC_RISK_RESERVE_STATE_ACTIVE && current_state != EXEC_RISK_RESERVE_STATE_PARTIALLY_COVERED)
+       { DatabaseTransactionRollback(m_db_handle); out_reason = "INVALID_STATE_FOR_RECONCILIATION"; return RESERVATION_LIFECYCLE_INVALID_STATE; }
+    if(!known || model_version != EXEC_RISK_RESERVE_MODEL_V1)
+       { DatabaseTransactionRollback(m_db_handle); out_reason = "LEGACY_UNVERIFIED"; return RESERVATION_LIFECYCLE_LEGACY_UNVERIFIED; }
+    if(current_revision != expected_revision)
+       { DatabaseTransactionRollback(m_db_handle); out_reason = "REVISION_MISMATCH"; return RESERVATION_LIFECYCLE_REVISION_MISMATCH; }
 
    datetime now = TimeCurrent();
    int new_revision = expected_revision + 1;
@@ -2328,11 +2345,131 @@ bool CExecutionLedger::ReconcileUnresolved(int max_attempts)
    for(int i = 0; i < count; i++)
       ReconcileAttempt(attempts[i]);
 
-   return true;
+return true;
    }
 
 //+------------------------------------------------------------------+
-//| Has Blocking Unresolved                                           |
+  //| CR-01: Reconcile Reservations                                    |
+  //| Idempotent reconciliation for restart safety.                    |
+  //| Finds attempts with terminal state (COMPLETED/PARTIAL_FILL) but  |
+  //| reservation still ACTIVE/PARTIALLY_COVERED and advances them.    |
+  //| For PARTIAL_FILL and COMPLETED: only reconciles when             |
+  //| remaining_volume is 0 (fully filled) or negligible.              |
+  //| Returns count of reservations reconciled.                        |
+  //+------------------------------------------------------------------+
+  int CExecutionLedger::ReconcileReservations(const string account_key, string &reason)
+    {
+    reason = "";
+    if(!m_db_available || m_db_handle == INVALID_HANDLE)
+       {
+       reason = "LEDGER_UNAVAILABLE";
+       return 0;
+       }
+    if(account_key == "")
+       {
+       reason = "EMPTY_ACCOUNT_KEY";
+       return 0;
+       }
+
+    // Find attempts where:
+    // - attempt state is COMPLETED (19) or PARTIAL_FILL (18)
+    // - reservation state is ACTIVE (2) or PARTIALLY_COVERED (3)
+    // - reservation is known (model_version=V1 AND state > LEGACY_UNVERIFIED) -- risk_reserve_known column doesn't exist
+    // - account_key matches (R-06: cross-account isolation)
+    // For PARTIAL_FILL and COMPLETED, we also check remaining_volume to ensure
+    // the position is fully covered (remaining ≈ 0).
+    string sql = "SELECT attempt_id, risk_reserve_state, risk_reserve_revision, risk_reserve_model_version, state, remaining_volume "
+                 "FROM execution_attempts "
+                 "WHERE (state = " + IntegerToString((int)EXEC_STATE_COMPLETED) +
+                 " OR state = " + IntegerToString((int)EXEC_STATE_PARTIAL_FILL) + ") "
+                 "AND (risk_reserve_state = " + IntegerToString(EXEC_RISK_RESERVE_STATE_ACTIVE) +
+                 " OR risk_reserve_state = " + IntegerToString(EXEC_RISK_RESERVE_STATE_PARTIALLY_COVERED) + ") "
+                 "AND risk_reserve_model_version = " + IntegerToString(EXEC_RISK_RESERVE_MODEL_V1) +
+                 " AND risk_reserve_state > " + IntegerToString(EXEC_RISK_RESERVE_STATE_LEGACY_UNVERIFIED) +
+                 " AND account_key = '" + EscapeSQL(account_key) + "';";
+
+    int handle = DatabasePrepare(m_db_handle, sql);
+    if(handle == INVALID_HANDLE)
+       {
+       reason = "QUERY_PREPARE_FAILED";
+       return 0;
+       }
+
+    string attempt_ids[];
+    int revs[];
+    int res_states[];
+    int attempt_states[];
+    double remaining_volumes[];
+    int count = 0;
+
+while(DatabaseRead(handle))
+        {
+        ArrayResize(attempt_ids, count + 1);
+        ArrayResize(revs, count + 1);
+        ArrayResize(res_states, count + 1);
+        ArrayResize(attempt_states, count + 1);
+        ArrayResize(remaining_volumes, count + 1);
+        attempt_ids[count] = DatabaseColumnString(handle, 0);
+        res_states[count] = (int)DatabaseColumnLong2(handle, 1);
+        revs[count] = (int)DatabaseColumnLong2(handle, 2);
+        // model_version at 3 skipped
+        attempt_states[count] = (int)DatabaseColumnLong2(handle, 4);
+        remaining_volumes[count] = DatabaseColumnDouble2(handle, 5);
+        count++;
+        }
+    DatabaseFinalize(handle);
+
+    int reconciled = 0;
+    for(int i = 0; i < count; i++)
+       {
+       // R-05: Only reconcile PARTIAL_FILL and COMPLETED when remaining_volume is effectively 0
+       // (within tick-size tolerance). Otherwise leave as PARTIALLY_COVERED/ACTIVE for
+       // explicit remaining-exposure handling.
+       if(attempt_states[i] == EXEC_STATE_PARTIAL_FILL || attempt_states[i] == EXEC_STATE_COMPLETED)
+          {
+          if(remaining_volumes[i] > 0.0000001) // negligible tolerance
+             {
+             // Skip - genuine partial fill or incomplete fill with remaining exposure
+             continue;
+             }
+          }
+
+       string res_reason = "";
+       CExecutionLedger::ENUM_RESERVATION_LIFECYCLE_RESULT res;
+       if(res_states[i] == EXEC_RISK_RESERVE_STATE_PARTIALLY_COVERED)
+          {
+          // PARTIALLY_COVERED -> EXPOSURE_RECONCILED
+          res = UpdateReservationToExposureReconciled(attempt_ids[i], revs[i], res_reason);
+          }
+       else
+          {
+          // ACTIVE -> EXPOSURE_RECONCILED (direct full fill from ACTIVE)
+          res = UpdateReservationToExposureReconciled(attempt_ids[i], revs[i], res_reason);
+          }
+if(res == CExecutionLedger::RESERVATION_LIFECYCLE_OK)
+           {
+           reconciled++;
+           }
+        else
+           {
+           // Accumulate first failure detail into reason for caller to log
+           if(reconciled == 0 && StringLen(reason) == 0)
+              {
+              reason = "SKIP_" + attempt_ids[i] + "_res=" + res_reason;
+              }
+           }
+       }
+
+    if(reconciled > 0)
+       reason = "RECONCILED_" + IntegerToString(reconciled) + "_RESERVATIONS";
+    else
+       reason = "NO_RESERVATIONS_TO_RECONCILE";
+
+    return reconciled;
+    }
+
+ //+------------------------------------------------------------------+
+ //| Has Blocking Unresolved                                           |
 //| RS-02: INTENT_DURABLE_NOT_SUBMITTED is treated as unresolved/    |
 //| blocking (fail-closed). Its real SQLite/MQL5 crash durability    |
 //| relative to broker invocation is not proven, so it must never     |
@@ -3670,23 +3807,29 @@ bool CExecutionLedger::AcquireAuthority(const string authority_key, const string
       // MQL5 DatabaseColumnLong exists
      }
    DatabaseFinalize(handle);
-   if(state == (int)GATEWAY_AUTHORITY_ORPHANED)
-      return false; // blocks acquisition
-   if(state != (int)GATEWAY_AUTHORITY_UNCLAIMED && state != (int)GATEWAY_AUTHORITY_RELEASED)
-      return false; // already owned
-   // Conditional acquisition
-   if(!DatabaseTransactionBegin(m_db_handle))
-      return false;
-   datetime now = TimeCurrent();
-   string sql = "UPDATE account_authority SET claim_state=" + IntegerToString((int)GATEWAY_AUTHORITY_CLAIMED) +
-                ", owner_instance_token='" + EscapeSQL(owner_token) + "'," +
-                " authority_epoch=authority_epoch+1," +
-                " claimed_at=" + IntegerToString((long)now) + "," +
-                " heartbeat_at=" + IntegerToString((long)now) + "," +
-                " last_reason='ACQUIRED' " +
-                "WHERE GatewayAuthorityKey='" + EscapeSQL(authority_key) + "' " +
-                "AND (claim_state=" + IntegerToString((int)GATEWAY_AUTHORITY_UNCLAIMED) +
-                " OR claim_state=" + IntegerToString((int)GATEWAY_AUTHORITY_RELEASED) + ");";
+if(state == (int)GATEWAY_AUTHORITY_ORPHANED)
+       {
+       // CR-02: ORPHANED is a valid state for re-acquisition (expired lease)
+       // Fall through to acquisition logic
+       }
+    else if(state != (int)GATEWAY_AUTHORITY_UNCLAIMED && state != (int)GATEWAY_AUTHORITY_RELEASED)
+       {
+       return false; // already owned by another instance
+       }
+// Conditional acquisition
+    if(!DatabaseTransactionBegin(m_db_handle))
+       return false;
+    datetime now = TimeCurrent();
+    string sql = "UPDATE account_authority SET claim_state=" + IntegerToString((int)GATEWAY_AUTHORITY_CLAIMED) +
+                 ", owner_instance_token='" + EscapeSQL(owner_token) + "'," +
+                 " authority_epoch=authority_epoch+1," +
+                 " claimed_at=" + IntegerToString((long)now) + "," +
+                 " heartbeat_at=" + IntegerToString((long)now) + "," +
+                 " last_reason='ACQUIRED' " +
+                 "WHERE GatewayAuthorityKey='" + EscapeSQL(authority_key) + "' " +
+                 "AND (claim_state=" + IntegerToString((int)GATEWAY_AUTHORITY_UNCLAIMED) +
+                 " OR claim_state=" + IntegerToString((int)GATEWAY_AUTHORITY_RELEASED) +
+                 " OR claim_state=" + IntegerToString((int)GATEWAY_AUTHORITY_ORPHANED) + ");";
    if(!ExecuteSQL(sql))
      {
       DatabaseTransactionRollback(m_db_handle);
@@ -3837,10 +3980,82 @@ bool CExecutionLedger::ValidateAuthority(const string authority_key, const strin
       return false;
    if(epoch != current_epoch)
       return false;
-   return true;
-  }
+return true;
+   }
 
-int CExecutionLedger::GetAuthorityState(const string authority_key)
+// CR-02: Expire stale authority lease (heartbeat timeout -> ORPHANED)
+  // Called periodically from OnTimer; safe to call concurrently with HeartbeatAuthority.
+  // Returns true if authority was expired (transitioned to ORPHANED), false if not expired or error.
+  // R-03: If owner_token is provided (non-empty), the lease of that owner is NOT expired
+  // (prevents coordinator from expiring its own lease).
+  bool CExecutionLedger::ExpireStaleAuthority(const string authority_key, int lease_seconds, string &reason, const string owner_token="")
+    {
+    reason = "";
+    if(!m_db_available || m_db_handle == INVALID_HANDLE)
+       {
+       reason = "LEDGER_UNAVAILABLE";
+       return false;
+       }
+    if(authority_key == "" || lease_seconds <= 0)
+       {
+       reason = "INVALID_PARAMS";
+       return false;
+       }
+    if(!DatabaseTransactionBegin(m_db_handle))
+       {
+       reason = "BEGIN_TX_FAILED";
+       return false;
+       }
+    datetime now = TimeCurrent();
+    datetime lease_cutoff = now - lease_seconds;
+    string sql = "UPDATE account_authority SET "
+                 "claim_state = " + IntegerToString((int)GATEWAY_AUTHORITY_ORPHANED) + ", "
+                 "released_at = " + IntegerToString((long)now) + ", "
+                 "last_reason = 'HEARTBEAT_EXPIRED' "
+                 "WHERE GatewayAuthorityKey = '" + EscapeSQL(authority_key) + "' "
+                 "AND claim_state = " + IntegerToString((int)GATEWAY_AUTHORITY_CLAIMED) + " "
+                 "AND heartbeat_at > 0 "  // only expire if heartbeat was ever set
+                 "AND heartbeat_at < " + IntegerToString((long)lease_cutoff);
+    // R-03: If owner_token provided, exclude that owner from expiry (prevent self-expiry)
+    if(owner_token != "")
+       {
+       sql += " AND owner_instance_token != '" + EscapeSQL(owner_token) + "'";
+       }
+    sql += ";";
+
+    if(!ExecuteSQL(sql))
+       {
+       DatabaseTransactionRollback(m_db_handle);
+       reason = "UPDATE_FAILED";
+       return false;
+       }
+
+    // Check if any row was affected (authority was expired)
+    int changes_handle = DatabasePrepare(m_db_handle, "SELECT changes();");
+    bool expired = false;
+    if(changes_handle != INVALID_HANDLE)
+       {
+       if(DatabaseRead(changes_handle))
+          {
+          int affected = 0;
+          DatabaseColumnInteger(changes_handle, 0, affected);
+          expired = (affected > 0);
+          }
+       DatabaseFinalize(changes_handle);
+       }
+
+    if(!DatabaseTransactionCommit(m_db_handle))
+       {
+       reason = "COMMIT_FAILED";
+       return false;
+       }
+
+    if(expired)
+       reason = "AUTHORITY_EXPIRED_TO_ORPHANED";
+    return expired;
+    }
+
+ int CExecutionLedger::GetAuthorityState(const string authority_key)
   {
    if(!m_db_available || m_db_handle == INVALID_HANDLE || authority_key == "")
       return -1;

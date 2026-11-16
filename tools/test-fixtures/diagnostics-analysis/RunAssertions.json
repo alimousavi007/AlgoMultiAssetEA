@@ -1,0 +1,117 @@
+﻿[
+    {
+        "Name":  "Schema.run_info",
+        "Passed":  true,
+        "Detail":  "Present"
+    },
+    {
+        "Name":  "Schema.snapshot_writes",
+        "Passed":  true,
+        "Detail":  "Present"
+    },
+    {
+        "Name":  "Schema.snapshot_reads",
+        "Passed":  true,
+        "Detail":  "Present"
+    },
+    {
+        "Name":  "Schema.dashboard_applies",
+        "Passed":  true,
+        "Detail":  "Present"
+    },
+    {
+        "Name":  "Schema.config_checks",
+        "Passed":  true,
+        "Detail":  "Present"
+    },
+    {
+        "Name":  "Schema.runtime_states",
+        "Passed":  true,
+        "Detail":  "Present"
+    },
+    {
+        "Name":  "Write.EURUSD.Gen1.Success",
+        "Passed":  true,
+        "Detail":  "KeyLen=19, Written=2, Failed=0"
+    },
+    {
+        "Name":  "Read.EURUSD.Gen1.Success",
+        "Passed":  true,
+        "Detail":  "Age=1s"
+    },
+    {
+        "Name":  "Correlation.EURUSD.Gen1",
+        "Passed":  true,
+        "Detail":  "Writer/Reader generation match"
+    },
+    {
+        "Name":  "Apply.Last.Success",
+        "Passed":  true,
+        "Detail":  "Stage=EVALUATED, Gen=1, Valid=True"
+    },
+    {
+        "Name":  "Apply.DashboardVerified",
+        "Passed":  false,
+        "Detail":  "From JSON flag"
+    },
+    {
+        "Name":  "Config.AllMatch",
+        "Passed":  true,
+        "Detail":  "No mismatches in 1 checks"
+    },
+    {
+        "Name":  "Runtime.EURUSD.Idx0.Valid",
+        "Passed":  true,
+        "Detail":  "Gen=1, Stage=3"
+    },
+    {
+        "Name":  "Chain.INPUT",
+        "Passed":  true,
+        "Detail":  "Input parameters received"
+    },
+    {
+        "Name":  "Chain.CONFIG",
+        "Passed":  true,
+        "Detail":  "Config propagated without mismatch"
+    },
+    {
+        "Name":  "Chain.RUNTIME",
+        "Passed":  true,
+        "Detail":  "At least one valid runtime"
+    },
+    {
+        "Name":  "Chain.DATA",
+        "Passed":  true,
+        "Detail":  "Market data available for snapshot"
+    },
+    {
+        "Name":  "Chain.FEATURES",
+        "Passed":  true,
+        "Detail":  "Features computed for at least one write"
+    },
+    {
+        "Name":  "Chain.ENGINE",
+        "Passed":  true,
+        "Detail":  "Engine evaluation completed for at least one read"
+    },
+    {
+        "Name":  "Chain.SNAPSHOT_WRITE",
+        "Passed":  true,
+        "Detail":  "Complete snapshot write"
+    },
+    {
+        "Name":  "Chain.SNAPSHOT_READ",
+        "Passed":  true,
+        "Detail":  "Successful snapshot read"
+    },
+    {
+        "Name":  "Chain.APPLY",
+        "Passed":  true,
+        "Detail":  "Dashboard apply with valid snapshot"
+    },
+    {
+        "Name":  "Chain.RENDER",
+        "Passed":  false,
+        "Detail":  "Dashboard verified flag true"
+    }
+]

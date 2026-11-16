@@ -392,9 +392,13 @@ void LogAlert(const AlertRecord& alert)
           level = LOG_ERROR;
        
 m_logger.Event(level, "ALERT", "ALERT_RAISED", alert.symbol, "", "", "", 
-                      "", alert.category + ": " + alert.message, 
-                      0, 0, 
-                      (double)alert.value, (double)alert.threshold, 0.0);
+                      "", alert.category,                          // reason_code
+                      alert.message,                               // reason
+                      0,                                           // last_error
+                      0,                                           // trade_retcode (uint)
+                      alert.value,                                 // value1
+                      alert.threshold,                             // value2
+                      0.0);                                        // value3
     }
    
    void ShowOnChart(const AlertRecord& alert)
