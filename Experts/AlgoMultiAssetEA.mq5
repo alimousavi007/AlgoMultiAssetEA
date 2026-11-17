@@ -54,12 +54,7 @@ input(name="Flush Log on Each Write")      bool               InpLogFlushEachWri
 input(name="Log Summary Interval (Seconds)") int              InpLogSummarySeconds=60;
 
 input group "02. Trading Symbols"
-input(name="Use Dynamic Forex Universe")   bool               InpUseDynamicForex=true;
-input(name="Forex Universe Max Symbols")   int                InpForexMaxSymbols=80;
-input(name="Include Gold/Silver/Crypto")   bool               InpIncludeMetalsCrypto=false;
-input(name="Gold Symbol")                  string             InpGoldSymbol="XAUUSDb";
-input(name="Silver Symbol")                string             InpSilverSymbol="XAGUSDb";
-input(name="Bitcoin Symbol")               string             InpBitcoinSymbol="BTCUSD";
+// Broker-discovered symbol universe is automatic (asset-agnostic). No user toggle or fixed symbol list required.
 
 input group "03. Hybrid Decision"
 input(name="Minimum Reward/Risk Ratio")    double             InpMinRR=1.50;
@@ -117,7 +112,6 @@ input(name="Max Total Open Positions")     int                InpMaxPositionsTot
 input(name="Max Positions Per Symbol")     int                InpMaxPositionsPerSymbol=1;
 input(name="Max Positions Per Strategy")   int                InpMaxPositionsPerStrategy=1;
 input(name="Max Portfolio Risk (%)")       double             InpMaxPortfolioRisk=3.0;
-input(name="Max Precious Metals Risk (%)") double             InpMaxPreciousMetalsRisk=2.0;
 input(name="Margin Safety Fraction")       double             InpMarginSafetyFraction=0.80;
 input(name="Maximum Execution Deviation (Points)") ulong      InpDeviationPoints=20;
 
@@ -292,11 +286,6 @@ bool ResolveFreshnessForSymbol(const string symbol,
 
 bool ValidInputSet()
   {
-   if(InpGoldSymbol=="" &&
-      InpSilverSymbol=="" &&
-      InpBitcoinSymbol=="")
-      return false;
-
    if(InpRiskPercent<=0.0 ||
       InpDailyLossLimit<=0.0 ||
       InpMonthlyLossLimit<=0.0 ||
@@ -723,6 +712,7 @@ long   g_snapshot_sequence = 0;
 long   g_attempt_counter = 0;
 enum ENUM_COORDINATOR_MODE { COORD_MODE_UNINITIALIZED, COORD_MODE_COORDINATOR, COORD_MODE_CHART_CONTEXT, COORD_MODE_UNAVAILABLE };
 ENUM_COORDINATOR_MODE g_coordinator_mode = COORD_MODE_UNINITIALIZED;
+string g_coordinator_unavailable_reason = "";
 string g_owner_instance_token = "";
 long   g_authority_epoch = 0;
 // Registration state for Chart Context
@@ -2146,9 +2136,61 @@ if(ReadGVSnapshot(chart_symbol, gv_snap))
          }
       }
 
-   // Not Coordinator, not registered Chart Context, or no snapshot available
-   g_dashboard.ShowStatus(
-      "CHART SYMBOL NOT CONFIGURED | "+chart_symbol);
+    // No local runtime for chart symbol and no coordinator snapshot path available.
+    // Report truthful readiness/registration state instead of a misleading configuration error.
+    bool chart_symbol_in_universe=false;
+    string discovered_symbols[];
+    DiscoverTradableSymbols(discovered_symbols);
+    string chart_norm = NormalizeSymbolForComparison(chart_symbol);
+    for(int di=0; di<ArraySize(discovered_symbols); di++)
+      {
+       if(NormalizeSymbolForComparison(discovered_symbols[di]) == chart_norm)
+         {
+          chart_symbol_in_universe=true;
+          break;
+         }
+      }
+
+    if(g_coordinator_mode == COORD_MODE_CHART_CONTEXT)
+      {
+       if(g_reg_state == REG_STATE_PENDING || g_reg_state == REG_STATE_UNREGISTERED)
+         {
+          g_dashboard.ShowStatus("WAITING FOR COORDINATOR REGISTRATION | "+chart_symbol);
+          return;
+         }
+       if(g_reg_state == REG_STATE_REJECTED)
+         {
+          g_dashboard.ShowStatus("CHART CONTEXT REGISTRATION REJECTED | "+chart_symbol);
+          return;
+         }
+       if(g_reg_state == REG_STATE_REGISTERED)
+         {
+          g_dashboard.ShowStatus("WAITING FOR COORDINATOR SNAPSHOT | "+chart_symbol);
+          return;
+         }
+      }
+
+    if(g_coordinator_mode == COORD_MODE_UNAVAILABLE)
+      {
+       string reason = g_coordinator_unavailable_reason;
+       if(reason=="") reason = "UNKNOWN";
+       g_dashboard.ShowStatus("COORDINATOR UNAVAILABLE | "+reason+" | "+chart_symbol);
+       return;
+      }
+
+    if(g_coordinator_mode == COORD_MODE_UNINITIALIZED)
+      {
+       g_dashboard.ShowStatus("SYSTEM INITIALIZING | "+chart_symbol);
+       return;
+      }
+
+    if(chart_symbol_in_universe)
+      {
+       g_dashboard.ShowStatus("WAITING FOR SYMBOL RUNTIME | "+chart_symbol);
+       return;
+      }
+
+    g_dashboard.ShowStatus("CHART SYMBOL NOT DISCOVERED | "+chart_symbol);
   }
 
 //+------------------------------------------------------------------+
@@ -3417,6 +3459,26 @@ void ProcessRuntime(CSymbolRuntime& runtime)
     }
 
 //==================================================================
+// Shared bounded retry for pending runtime initialization (idempotent)
+//==================================================================
+datetime g_last_runtime_init_retry = 0;
+const int RUNTIME_INIT_RETRY_SECONDS = 30;
+
+void TryInitializePendingRuntimesBounded(const string source)
+  {
+   datetime now = TimeCurrent();
+   if(g_last_runtime_init_retry != 0 && (now - g_last_runtime_init_retry) < RUNTIME_INIT_RETRY_SECONDS)
+      return;
+   g_last_runtime_init_retry = now;
+   int initialized = InitializePendingRuntimes();
+   if(initialized > 0)
+     {
+      g_logger.Event(LOG_INFO,"INIT","RUNTIME_INIT_RETRY", "", "", source, "", "OK", "PENDING_RUNTIMES",
+                     "Initialized pending runtimes count=" + IntegerToString(initialized));
+     }
+  }
+
+//==================================================================
 // Initialization
 //==================================================================
 bool ValidateConfiguredSymbol(const string role,
@@ -3461,11 +3523,11 @@ enum ENUM_SYSTEM_INIT_STATUS
 int InitializePendingRuntimes()
   {
    string symbols[];
-   DiscoverForexSymbols(symbols);
+   DiscoverTradableSymbols(symbols);
 
    string roles[];
    ArrayResize(roles,ArraySize(symbols));
-   for(int r=0;r<ArraySize(roles);r++) roles[r]="FX";
+   for(int r=0;r<ArraySize(roles);r++) roles[r]="SYM";
 
     ENUM_TIMEFRAMES context_tf;
     ENUM_TIMEFRAMES structure_tf;
@@ -3482,7 +3544,6 @@ int InitializePendingRuntimes()
     timeframes[0]=context_tf;
     timeframes[1]=structure_tf;
     timeframes[2]=setup_tf;
-    timeframes[3]=entry_tf;
     timeframes[3]=entry_tf;
 
    bool tester_single_symbol =
@@ -3548,6 +3609,9 @@ int InitializePendingRuntimes()
          runtime_count++;
          continue;
         }
+
+      // Asset-agnostic runtime setup: rely on MarketData/indicator initialization and sync checks.
+      // No forex/asset-family assumptions here; unsupported or unsynchronized symbols remain pending.
 
       if(!SymbolIsSynchronized(symbols[i]))
         {
@@ -3697,10 +3761,7 @@ ENUM_SYSTEM_INIT_STATUS InitializeSystemWhenReady()
       InpMaxPortfolioRisk,
       InpMaxPositionsTotal,
       InpMaxPositionsPerSymbol,
-      InpMaxPositionsPerStrategy,
-      InpMaxPreciousMetalsRisk,
-      InpGoldSymbol,
-      InpSilverSymbol);
+      InpMaxPositionsPerStrategy);
 
    if(!g_portfolio_risk.Initialize())
      {
@@ -3827,30 +3888,47 @@ g_execution_ledger.ExpireStaleAuthority(authority_key, 30, expire_reason, g_owne
        if(astate == (int)GATEWAY_AUTHORITY_ORPHANED)
          {
          g_coordinator_mode = COORD_MODE_UNAVAILABLE;
+         g_coordinator_unavailable_reason = "AUTHORITY_ORPHANED";
          g_executor.SyncAuthority(g_authority_epoch, false);
          g_logger.Event(LOG_WARNING, "INIT", "COORDINATOR_UNAVAILABLE", _Symbol, "", "", "", "FAIL", "AUTHORITY", "Authority is ORPHANED (expired lease) - blocking state, no automatic re-acquisition. Explicit recovery required.");
          }
-       else if(astate == -1)
-         {
-         g_coordinator_mode = COORD_MODE_UNAVAILABLE;
-         g_executor.SyncAuthority(g_authority_epoch, false);
-         g_logger.Event(LOG_WARNING, "INIT", "COORDINATOR_UNAVAILABLE", _Symbol, "", "", "", "FAIL", "AUTHORITY", "Authority unavailable (no row)");
-         }
        else
          {
+          // Unclaimed/released/missing row: let ledger provision+acquire atomically (fail-closed on contention).
+          // If another instance currently owns CLAIMED authority, acquisition fails and this becomes CHART_CONTEXT.
           long epoch = 0;
            if(g_execution_ledger.AcquireAuthority(authority_key, g_owner_instance_token, epoch))
              {
               g_coordinator_mode = COORD_MODE_COORDINATOR;
               g_authority_epoch = epoch;
+              g_coordinator_unavailable_reason = "";
               g_executor.SyncAuthority(g_authority_epoch, true);
               runtime_count = InitializePendingRuntimes();
              }
            else
              {
-              g_coordinator_mode = COORD_MODE_CHART_CONTEXT;
-              g_executor.SyncAuthority(g_authority_epoch, false);
-              g_logger.Event(LOG_INFO, "INIT", "CHART_CONTEXT_ONLY", _Symbol, "", "", "", "INFO", "AUTHORITY", "Another coordinator owns authority");
+              int astate_after = g_execution_ledger.GetAuthorityState(authority_key);
+              if(astate_after == (int)GATEWAY_AUTHORITY_ORPHANED)
+                {
+                 g_coordinator_mode = COORD_MODE_UNAVAILABLE;
+                 g_coordinator_unavailable_reason = "AUTHORITY_ORPHANED";
+                 g_executor.SyncAuthority(g_authority_epoch, false);
+                 g_logger.Event(LOG_WARNING, "INIT", "COORDINATOR_UNAVAILABLE", _Symbol, "", "", "", "FAIL", "AUTHORITY", "Authority became ORPHANED; explicit recovery required.");
+                }
+              else if(astate_after == -1)
+                {
+                 g_coordinator_mode = COORD_MODE_UNAVAILABLE;
+                 g_coordinator_unavailable_reason = "AUTHORITY_UNAVAILABLE";
+                 g_executor.SyncAuthority(g_authority_epoch, false);
+                 g_logger.Event(LOG_WARNING, "INIT", "COORDINATOR_UNAVAILABLE", _Symbol, "", "", "", "FAIL", "AUTHORITY", "Authority provisioning/acquisition failed (no authority state)");
+                }
+              else
+                {
+                 g_coordinator_mode = COORD_MODE_CHART_CONTEXT;
+                 g_coordinator_unavailable_reason = "";
+                 g_executor.SyncAuthority(g_authority_epoch, false);
+                 g_logger.Event(LOG_INFO, "INIT", "CHART_CONTEXT_ONLY", _Symbol, "", "", "", "INFO", "AUTHORITY", "Another coordinator owns authority");
+                }
              }
          }
       }
@@ -3858,6 +3936,7 @@ g_execution_ledger.ExpireStaleAuthority(authority_key, 30, expire_reason, g_owne
       {
        // Ledger unavailable: fail-closed, no coordinator
        g_coordinator_mode = COORD_MODE_UNAVAILABLE;
+       g_coordinator_unavailable_reason = "LEDGER_UNAVAILABLE";
        g_executor.SyncAuthority(g_authority_epoch, false);
       }
 
@@ -3930,7 +4009,6 @@ string ComputeConfigFingerprint()
    s += "MAX_POS_PER_SYM=" + IntegerToString(InpMaxPositionsPerSymbol) + "|";
    s += "MAX_POS_PER_STRAT=" + IntegerToString(InpMaxPositionsPerStrategy) + "|";
    s += "MAX_PORTF_RISK=" + DoubleToString(InpMaxPortfolioRisk, 2) + "|";
-   s += "MAX_PM_RISK=" + DoubleToString(InpMaxPreciousMetalsRisk, 2) + "|";
    s += "MARGIN_SAFETY=" + DoubleToString(InpMarginSafetyFraction, 2) + "|";
    s += "DEVIATION=" + IntegerToString(InpDeviationPoints) + "|";
    
@@ -4008,13 +4086,7 @@ string ComputeConfigFingerprint()
    // P2-1: Include freshness overrides
    s += "FRESH_OVERRIDES=" + InpFreshnessOverrides + "|";
    
-   // Fix 3: Include symbol universe params
-   s += "DYN_FOREX=" + (InpUseDynamicForex ? "1" : "0") + "|";
-   s += "MAX_SYMS=" + IntegerToString(InpForexMaxSymbols) + "|";
-   s += "INC_METALS=" + (InpIncludeMetalsCrypto ? "1" : "0") + "|";
-   s += "GOLD_SYM=" + InpGoldSymbol + "|";
-   s += "SILVER_SYM=" + InpSilverSymbol + "|";
-   s += "BTC_SYM=" + InpBitcoinSymbol + "|";
+   // Symbol universe: automatic broker-discovered discovery (no user toggle in fingerprint).
    
    // Magic for style
    s += "MAGIC=" + IntegerToString((int)MagicForStyle(InpTradingStyle)) + "|";
@@ -4082,15 +4154,6 @@ int OnInit()
          "FAIL", "INIT", "MODE_BACKTEST requires Strategy Tester", 0);
       return INIT_PARAMETERS_INCORRECT;
      }
-
-   if(!ValidateConfiguredSymbol("GOLD", InpGoldSymbol))
-      return INIT_FAILED;
-
-   if(!ValidateConfiguredSymbol("SILVER", InpSilverSymbol))
-      return INIT_FAILED;
-
-   if(!ValidateConfiguredSymbol("BITCOIN", InpBitcoinSymbol))
-      return INIT_FAILED;
 
    g_dashboard.Enable(InpDashboard);
    g_dashboard.SetTitle("ALGO HYBRID");
@@ -4287,14 +4350,17 @@ g_logger.MaybeWriteSummary(false);
     if(!risk_state_ready)
       return;
 
- if(g_coordinator_mode == COORD_MODE_COORDINATOR)
+if(g_coordinator_mode == COORD_MODE_COORDINATOR)
       {
-       for(int i=0;i<g_runtime.Total();i++)
-         {
-          CSymbolRuntime *runtime = g_runtime.At(i);
-          if(runtime && runtime.valid)
-             ProcessRuntime(runtime);
-         }
+        // Periodically retry initialization of pending symbols (e.g., waiting for SymbolIsSynchronized)
+        TryInitializePendingRuntimesBounded("OnTick");
+
+        for(int i=0;i<g_runtime.Total();i++)
+          {
+           CSymbolRuntime *runtime = g_runtime.At(i);
+           if(runtime && runtime.valid)
+              ProcessRuntime(runtime);
+          }
       }
   }
 
@@ -4323,68 +4389,71 @@ void OnTimer()
      }
 
 if(g_coordinator_mode == COORD_MODE_COORDINATOR)
-      {
-       // F8: Discovery is rate-limited to 5s; the throttle must NOT gate heartbeat/authority
-       // validation, reconciliation, retry handoff, position management or runtime processing.
-       static datetime last_discovery = 0;
-       if(TimeCurrent() - last_discovery >= 5)
-         {
-          last_discovery = TimeCurrent();
-          // Discovery: enumerate charts and send discovery probe
-          long chart = ChartFirst();
-          string nonce = "N" + IntegerToString((long)TimeCurrent()) + IntegerToString((long)ChartID());
-          g_pending_nonce = nonce;
-          while(chart >= 0)
+       {
+        // F8: Discovery is rate-limited to 5s; the throttle must NOT gate heartbeat/authority
+        // validation, reconciliation, retry handoff, position management or runtime processing.
+        static datetime last_discovery = 0;
+        if(TimeCurrent() - last_discovery >= 5)
+          {
+           last_discovery = TimeCurrent();
+           // Discovery: enumerate charts and send discovery probe
+           long chart = ChartFirst();
+           string nonce = "N" + IntegerToString((long)TimeCurrent()) + IntegerToString((long)ChartID());
+           g_pending_nonce = nonce;
+           while(chart >= 0)
+             {
+              if(chart != ChartID())
+                {
+                 string auth_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
+                 string probe = "D|" + IntegerToString(CHARTREG_PROTOCOL_VERSION) + "|" + auth_key + "|" + IntegerToString((long)ChartID()) + "|" + IntegerToString(g_authority_epoch) + "|" + nonce;
+                 if(StringLen(probe) <= 63)
+                   {
+                    if(!EventChartCustom(chart, CHARTREG_DISCOVERY, (long)ChartID(), 0.0, probe))
+                      {
+                       // enqueue failed; retry next cycle
+                      }
+                   }
+                }
+              chart = ChartNext(chart);
+             }
+          // Canonical state comparison based on time + subscriber count (placeholder for full dashboard hash)
+          static string last_canonical = "";
+          int sub_count = g_subscriber_registry.Count();
+          string canonical = IntegerToString((long)TimeCurrent()) + "_" + IntegerToString(sub_count) + "_" + IntegerToString(g_authority_epoch);
+          if(canonical == last_canonical)
             {
-             if(chart != ChartID())
+             // unchanged; skip
+            }
+          else
+            {
+             last_canonical = canonical;
+             g_snapshot_sequence++;
+             // Use thread-safe subscriber registry (WP-05)
+             SubscriberRecord subs[64];
+             int count = g_subscriber_registry.GetSubscribers(subs);
+             for(int i = 0; i < count; i++)
                {
-                string auth_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
-                string probe = "D|" + IntegerToString(CHARTREG_PROTOCOL_VERSION) + "|" + auth_key + "|" + IntegerToString((long)ChartID()) + "|" + IntegerToString(g_authority_epoch) + "|" + nonce;
-                if(StringLen(probe) <= 63)
+                long target_chart = subs[i].chart_id;
+                string obj_name = "AlgoEA_Dashboard";
+                ObjectCreate(target_chart, obj_name, OBJ_LABEL, 0, 0, 0);
+                ObjectSetInteger(target_chart, obj_name, OBJPROP_XDISTANCE, 10);
+                ObjectSetInteger(target_chart, obj_name, OBJPROP_YDISTANCE, 20);
+                ObjectSetString(target_chart, obj_name, OBJPROP_TEXT, "CoordSnap=" + IntegerToString(g_snapshot_sequence) + " Epoch=" + IntegerToString(g_authority_epoch));
+                ChartRedraw(target_chart);
+                string notify = "S|" + IntegerToString(CHARTREG_PROTOCOL_VERSION) + "|" + IntegerToString(g_authority_epoch) + "|" + IntegerToString(g_snapshot_sequence);
+                if(StringLen(notify) <= 63)
                   {
-                   if(!EventChartCustom(chart, CHARTREG_DISCOVERY, (long)ChartID(), 0.0, probe))
+                   if(!EventChartCustom(target_chart, SNAPREG_NOTIFY, (long)ChartID(), 0.0, notify))
                      {
-                      // enqueue failed; retry next cycle
+                      // enqueue failed
                      }
                   }
                }
-             chart = ChartNext(chart);
-            }
-         // Canonical state comparison based on time + subscriber count (placeholder for full dashboard hash)
-         static string last_canonical = "";
-         int sub_count = g_subscriber_registry.Count();
-         string canonical = IntegerToString((long)TimeCurrent()) + "_" + IntegerToString(sub_count) + "_" + IntegerToString(g_authority_epoch);
-         if(canonical == last_canonical)
-           {
-            // unchanged; skip
-           }
-         else
-           {
-            last_canonical = canonical;
-            g_snapshot_sequence++;
-            // Use thread-safe subscriber registry (WP-05)
-            SubscriberRecord subs[64];
-            int count = g_subscriber_registry.GetSubscribers(subs);
-            for(int i = 0; i < count; i++)
-              {
-               long target_chart = subs[i].chart_id;
-               string obj_name = "AlgoEA_Dashboard";
-               ObjectCreate(target_chart, obj_name, OBJ_LABEL, 0, 0, 0);
-               ObjectSetInteger(target_chart, obj_name, OBJPROP_XDISTANCE, 10);
-               ObjectSetInteger(target_chart, obj_name, OBJPROP_YDISTANCE, 20);
-               ObjectSetString(target_chart, obj_name, OBJPROP_TEXT, "CoordSnap=" + IntegerToString(g_snapshot_sequence) + " Epoch=" + IntegerToString(g_authority_epoch));
-               ChartRedraw(target_chart);
-               string notify = "S|" + IntegerToString(CHARTREG_PROTOCOL_VERSION) + "|" + IntegerToString(g_authority_epoch) + "|" + IntegerToString(g_snapshot_sequence);
-               if(StringLen(notify) <= 63)
-                 {
-                  if(!EventChartCustom(target_chart, SNAPREG_NOTIFY, (long)ChartID(), 0.0, notify))
-                    {
-                     // enqueue failed
-                    }
-                 }
-              }
-            }
-} // end rate-limited discovery block (F8)
+             }
+ } // end rate-limited discovery block (F8)
+        // Bounded retry for pending runtime initialization (e.g. waiting for history/sync).
+        // Timer-driven recovery does not rely on chart ticks and preserves idempotency.
+        TryInitializePendingRuntimesBounded("OnTimer");
 string authority_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
            // CR-02: Expire stale authority lease before heartbeat/validation (30s lease)
            // R-03: Pass owner_token to prevent coordinator from expiring its own lease
@@ -4405,6 +4474,7 @@ string authority_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString
              !g_execution_ledger.ValidateAuthority(authority_key, g_owner_instance_token, g_authority_epoch))
             {
              g_coordinator_mode = COORD_MODE_UNAVAILABLE;
+             g_coordinator_unavailable_reason = "AUTHORITY_HEARTBEAT_FAILED";
              g_executor.SyncAuthority(g_authority_epoch, false);
              g_logger.Event(LOG_WARNING, "SYSTEM", "COORDINATOR_LOST", _Symbol, "", "", "", "FAIL", "AUTHORITY", "Heartbeat/validation failed");
 }
@@ -5284,9 +5354,11 @@ bool RetryUIRevalidateFreshPlan(CSymbolRuntime &runtime,
                                 TradePlan &out_plan,
                                 StrategySignal &out_legacy,
                                 RiskDecision &out_risk,
+                                CAlgoPortfolioRisk::AdmissionDecision &out_admission,
                                 string &reason)
   {
    reason="";
+   ZeroMemory(out_admission);
    if(!runtime.valid || runtime.symbol!=new_att.symbol) { reason="RUNTIME_SYMBOL_MISMATCH"; return false; }
    if(expected_group_key=="" || expected_lsk=="" || expected_group_key!=g_strategy_group_key) { reason="GROUP_KEY_MISMATCH"; return false; }
    if(expected_config_fingerprint!=g_config_fingerprint) { reason="CONFIG_FINGERPRINT_CHANGED"; return false; }
@@ -5358,34 +5430,43 @@ bool RetryUIRevalidateFreshPlan(CSymbolRuntime &runtime,
    double max_entry_dist = GetEntryDistanceTolerance(runtime.style, runtime.hybrid_engine.GetPoint());
    if(MathAbs(normalized_plan.entry-current_price) > max_entry_dist) { reason="ENTRY_TOO_FAR"; return false; }
 
-// Preserve normal Risk/Portfolio/News gate chain (shared logic path) without duplicating alternate policy.
-    StrategySignal legacy_signal;
-    if(!RetryUIBuildLegacySignal(normalized_plan, decision, legacy_signal)) { reason="LEGACY_SIGNAL_BUILD_FAILED"; return false; }
-    RiskDecision risk;
-    if(!g_risk_engine.Evaluate(legacy_signal, risk)) { reason="RISK_ENGINE_REJECT:"+EnumToString(risk.rejection_reason); return false; }
+   // Preserve normal Risk/Portfolio/News gate chain (shared logic path) without duplicating alternate policy.
+   StrategySignal legacy_signal;
+   if(!RetryUIBuildLegacySignal(normalized_plan, decision, legacy_signal)) { reason="LEGACY_SIGNAL_BUILD_FAILED"; return false; }
+   RiskDecision risk;
+   if(!g_risk_engine.Evaluate(legacy_signal, risk)) { reason="RISK_ENGINE_REJECT:"+EnumToString(risk.rejection_reason); return false; }
 
-    // P0-2: External Risk Lock check in retry validation path
-    if(g_ext_risk_lock_state_valid && InpExternalRiskLockEnabled)
-      {
-      string rejection_code, rejection_reason;
-      CAlgoPortfolioRisk::ExtRiskLockState pr_lock_state = ToPortfolioRiskLockState(g_ext_risk_lock_state);
-      
-      if(!g_portfolio_risk.CheckExternalRiskLock(pr_lock_state, rejection_code, rejection_reason))
-        {
-        reason = "EXTERNAL_RISK_LOCK_BLOCK_RETRY:" + rejection_reason;
-        return false;
-        }
-      }
+   // P0-2: External Risk Lock check in retry validation path
+   if(g_ext_risk_lock_state_valid && InpExternalRiskLockEnabled)
+     {
+     string rejection_code, rejection_reason;
+     CAlgoPortfolioRisk::ExtRiskLockState pr_lock_state = ToPortfolioRiskLockState(g_ext_risk_lock_state);
+     
+     if(!g_portfolio_risk.CheckExternalRiskLock(pr_lock_state, rejection_code, rejection_reason))
+       {
+       reason = "EXTERNAL_RISK_LOCK_BLOCK_RETRY:" + rejection_reason;
+       return false;
+       }
+     }
 
-    if(!g_portfolio_risk.CanOpen(legacy_signal, risk)) { reason="PORTFOLIO_RISK_REJECT:"+g_portfolio_risk.LastRejectionReason(); return false; }
-   // News gate is inside HybridEngine CheckHardGates for Evaluate; decision reached candidate => entry news clear.
-   // We still fail closed if engine marked news block in decision status (defensive).
+   if(!g_portfolio_risk.CanOpen(legacy_signal, risk)) { reason="PORTFOLIO_RISK_REJECT:"+g_portfolio_risk.LastRejectionReason(); return false; }
+
+   // Fail-closed news gate: candidate evaluation reached a plan, but retry submission must not proceed if blocked.
    if(decision.status == DECISION_NEWS_BLOCKED) { reason="NEWS_ENTRY_BLOCKED"; return false; }
 
-   if(risk.calculated_volume <= 0.0) { reason="RISK_VOLUME_INVALID"; return false; }
+   // F-002/P2: full admission + pre-submit revalidation on fresh state before any retry submission (exclude own attempt reservation).
+   CAlgoPortfolioRisk::AdmissionDecision admission_decision;
+   ZeroMemory(admission_decision);
+   if(!g_portfolio_risk.CanAdmit(legacy_signal, risk, admission_decision, new_att.attempt_id))
+     { reason = "ADMISSION_REJECTED:" + admission_decision.rejection_code + ":" + admission_decision.rejection_reason; return false; }
+   string reval_admission_reason="";
+   if(!g_portfolio_risk.RevalidateAdmission(legacy_signal, risk, admission_decision, reval_admission_reason, new_att.attempt_id))
+     { reason = "ADMISSION_REVALIDATION_FAILED:" + reval_admission_reason; return false; }
+
+   if(risk.calculated_volume <= 0.0 || !MathIsValidNumber(risk.calculated_volume)) { reason="RISK_VOLUME_INVALID"; return false; }
    // Ensure fresh plan is not consumed marker in probe result.
    normalized_plan.consumed=false;
-   out_plan = normalized_plan; out_legacy = legacy_signal; out_risk = risk;
+   out_plan = normalized_plan; out_legacy = legacy_signal; out_risk = risk; out_admission = admission_decision;
    reason = "FRESH_REVALIDATION_OK binding="+expected_binding+" lsk="+fresh_lsk+" can="+fresh_can;
    return true;
   }
@@ -5432,9 +5513,22 @@ void ProcessRetryPendingHandoff()
     if(rt_idx < 0) { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_RUNTIME_NOT_FOUND"; g_retry_ui_detail="No valid runtime for approved symbol; committed intent remains non-submitted/quarantined by operator workflow (no auto-retry)."; return; }
     CSymbolRuntime *runtime = g_runtime.At(rt_idx);
     if(!runtime) { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_RUNTIME_NOT_FOUND"; return; }
-    TradePlan fresh_plan; StrategySignal fresh_signal; RiskDecision fresh_risk; string reval_reason="";
+
+    // P2: fail-closed terminal-failure proof for prior attempt before any retry submission path.
+    ExecutionAttemptRecord prior_att;
+    ZeroMemory(prior_att);
+    if(g_retry_handoff.prior_attempt_id == "" || !g_execution_ledger.GetAttempt(g_retry_handoff.prior_attempt_id, prior_att))
+      { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_PRIOR_ATTEMPT_UNAVAILABLE"; g_retry_ui_detail="Cannot prove prior terminal failure; no submit."; g_execution_ledger.MarkReconciliationRequired(g_retry_handoff.new_attempt_id,"Prior attempt unavailable for retry proof"); return; }
+    string prior_why="";
+    if(!g_execution_ledger.IsRetryEligibleFinalFailure(prior_att, prior_why))
+      { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_PRIOR_NOT_TERMINAL_PROVEN"; g_retry_ui_detail="Prior attempt not proven terminal non-execution: "+prior_why; g_execution_ledger.MarkReconciliationRequired(g_retry_handoff.new_attempt_id,"Prior attempt not proven terminal failure: "+prior_why); return; }
+    if(prior_att.state == EXEC_STATE_SUBMISSION_MAY_HAVE_OCCURRED || prior_att.state == EXEC_STATE_RECONCILIATION_REQUIRED || prior_att.state == EXEC_STATE_PARTIAL_FILL || prior_att.state == EXEC_STATE_SUBMITTED || prior_att.state == EXEC_STATE_COMPLETED)
+      { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_PRIOR_AMBIGUOUS_OR_EXECUTED"; g_retry_ui_detail="Prior attempt ambiguous/executed; retry forbidden."; g_execution_ledger.MarkReconciliationRequired(g_retry_handoff.new_attempt_id,"Prior attempt ambiguous/executed"); return; }
+
+    TradePlan fresh_plan; StrategySignal fresh_signal; RiskDecision fresh_risk; CAlgoPortfolioRisk::AdmissionDecision fresh_admission; string reval_reason="";
+    ZeroMemory(fresh_admission);
     if(!RetryUIRevalidateFreshPlan(runtime, new_att, g_retry_handoff.strategy_group_key, g_retry_handoff.logical_setup_key, g_retry_handoff.config_fingerprint,
-                                   fresh_plan, fresh_signal, fresh_risk, reval_reason))
+                                   fresh_plan, fresh_signal, fresh_risk, fresh_admission, reval_reason))
      {
       // One-shot handoff consumed on this explicit-confirm session attempt; do NOT auto-retry/reuse confirmation.
       // Committed new intent remains durable/non-submitted; not marked FINAL_FAILURE (no terminal failure evidence).
@@ -5454,6 +5548,14 @@ void ProcessRetryPendingHandoff()
    if(!g_execution_ledger.ValidateAuthority(auth_key, g_owner_instance_token, g_authority_epoch))
      { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_FINAL_AUTHORITY_FAILED"; g_execution_ledger.MarkReconciliationRequired(g_retry_handoff.new_attempt_id,"Final authority validation failed before submit"); return; }
    g_executor.SyncAuthority(g_authority_epoch, true);
+
+   // P2: final admission revalidation immediately before submit boundary (fresh state drift protection).
+   {
+    string final_reval_admission="";
+    if(!g_portfolio_risk.RevalidateAdmission(fresh_signal, fresh_risk, fresh_admission, final_reval_admission, g_retry_handoff.new_attempt_id))
+      { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_FINAL_ADMISSION_FAILED"; g_retry_ui_detail=final_reval_admission; g_execution_ledger.MarkReconciliationRequired(g_retry_handoff.new_attempt_id,"Final admission revalidation failed: "+final_reval_admission); return; }
+   }
+
    if(g_execution_ledger.HasBlockingUnresolved(g_retry_ui_detail) || g_execution_ledger.HasUnresolvedForSymbol(new_att.symbol, true))
      { g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_FINAL_UNRESOLVED_BLOCK"; g_execution_ledger.MarkReconciliationRequired(g_retry_handoff.new_attempt_id,"Unresolved/ledger block before submit"); return; }
 // Re-read attempt immediately before bind/submit.
@@ -5840,6 +5942,94 @@ double OnTester()
 //==================================================================
 // Optimization initialization
 //==================================================================
+
+//+------------------------------------------------------------------+
+//| Normalize symbol for comparison (remove suffixes/prefixes, upper) |
+//+------------------------------------------------------------------+
+string NormalizeSymbolForComparison(const string symbol)
+  {
+   if(symbol=="") return "";
+   string s = symbol;
+   string suffixes[] = {".pro", ".ecn", ".raw", ".std", ".m", ".demo", "#", "+", "_"};
+   for(int i=0; i<ArraySize(suffixes); i++)
+     {
+      string suffix = suffixes[i];
+      int pos = StringFind(s, suffix);
+      if(pos >= 0)
+        {
+         s = StringSubstr(s, 0, pos);
+         break;
+        }
+     }
+   string prefixes[] = {"m.", "raw.", "ecn.", "pro."};
+   for(int i=0; i<ArraySize(prefixes); i++)
+     {
+      string prefix = prefixes[i];
+      if(StringFind(s, prefix) == 0)
+        {
+         s = StringSubstr(s, StringLen(prefix));
+         break;
+        }
+     }
+   StringToUpper(s);
+   return s;
+  }
+
+//+------------------------------------------------------------------+
+//| Asset-agnostic broker-discovered candidate check                 |
+//+------------------------------------------------------------------+
+bool IsSymbolTradableCandidate(const string symbol)
+  {
+   if(symbol=="") return false;
+   ENUM_SYMBOL_TRADE_MODE trade_mode=(ENUM_SYMBOL_TRADE_MODE)SymbolInfoInteger(symbol,SYMBOL_TRADE_MODE);
+   if(trade_mode==SYMBOL_TRADE_MODE_DISABLED)
+      return false;
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Discover broker-provided symbols (server-wide, asset-agnostic)   |
+//+------------------------------------------------------------------+
+int DiscoverTradableSymbols(string &symbols_out[])
+  {
+   ArrayResize(symbols_out,0);
+   string chart_sym = ChartSymbol(0);
+   int total=SymbolsTotal(false);
+   for(int i=0;i<total;i++)
+     {
+      string sn=SymbolName(i,false);
+      if(sn=="") continue;
+      if(!IsSymbolTradableCandidate(sn)) continue;
+      bool exists=false;
+      string sn_norm = NormalizeSymbolForComparison(sn);
+      for(int j=0;j<ArraySize(symbols_out);j++)
+         if(NormalizeSymbolForComparison(symbols_out[j])==sn_norm) { exists=true; break; }
+      if(exists) continue;
+      int sz2=ArraySize(symbols_out);
+      ArrayResize(symbols_out,sz2+1);
+      symbols_out[sz2]=sn;
+     }
+   if(chart_sym!="")
+     {
+      bool exists=false;
+      string chart_norm = NormalizeSymbolForComparison(chart_sym);
+      for(int j=0;j<ArraySize(symbols_out);j++)
+         if(NormalizeSymbolForComparison(symbols_out[j])==chart_norm) { exists=true; break; }
+      if(!exists)
+        {
+         int sz2=ArraySize(symbols_out);
+         ArrayResize(symbols_out,sz2+1);
+         symbols_out[sz2]=chart_sym;
+        }
+     }
+   if(ArraySize(symbols_out)==0 && chart_sym!="")
+     {
+      ArrayResize(symbols_out,1);
+      symbols_out[0]=chart_sym;
+     }
+   return ArraySize(symbols_out);
+  }
+
 int OnTesterInit()
   {
    if(MQLInfoInteger(MQL_OPTIMIZATION))
@@ -5886,185 +6076,6 @@ int OnTesterInit()
 //+------------------------------------------------------------------+
 //|                                                                  |
 //+------------------------------------------------------------------
-bool IsForexSymbol(const string symbol)
-  {
-   if(symbol=="")
-      return false;
-   if(StringFind(symbol,"=")>=0)
-      return false;
-   if(StringFind(symbol,"^")>=0)
-      return false;
-
-   // First try: get currencies from symbol specification (most reliable)
-   string base="";
-   string quote="";
-   if(SymbolInfoString(symbol,SYMBOL_CURRENCY_BASE,base) && SymbolInfoString(symbol,SYMBOL_CURRENCY_PROFIT,quote))
-     {
-      StringToUpper(base);
-      StringToUpper(quote);
-      if(StringLen(base)==3 && StringLen(quote)==3 && base!=quote)
-         return true;
-     }
-
-   // Fix 4: Handle broker-specific suffixes/prefixes by extracting core symbol
-   // Common patterns: EURUSD.pro, EURUSD.ecn, EURUSD#, EURUSD.m, EURUSD+, EURUSDraw, etc.
-   string core_symbol = symbol;
-   // Remove common suffixes
-   string suffixes[] = {".pro", ".ecn", ".raw", ".std", ".m", ".demo", "#", "+", "_"};
-   for(int s=0; s<ArraySize(suffixes); s++)
-     {
-      string suffix = suffixes[s];
-      int pos = StringFind(core_symbol, suffix);
-      if(pos >= 0)
-        {
-         // Remove suffix and everything after it
-         core_symbol = StringSubstr(core_symbol, 0, pos);
-         break;
-        }
-     }
-   // Remove common prefixes (rare but possible)
-   string prefixes[] = {"m.", "raw.", "ecn.", "pro."};
-   for(int p=0; p<ArraySize(prefixes); p++)
-     {
-      string prefix = prefixes[p];
-      if(StringFind(core_symbol, prefix) == 0)
-        {
-         core_symbol = StringSubstr(core_symbol, StringLen(prefix));
-         break;
-        }
-     }
-
-// Fallback heuristic: check if core symbol follows 3+3 currency pair pattern
-    if(StringLen(core_symbol) == 6)
-      {
-       string c1 = StringSubstr(core_symbol, 0, 3);
-       string c2 = StringSubstr(core_symbol, 3, 3);
-       StringToUpper(c1);
-       StringToUpper(c2);
-       if(c1 == c2) return false;
-       bool ok1 = false, ok2 = false;
-       // F17: static so the constant currency list is built once, not per symbol per discovery scan.
-       static string fx[] = {"EUR","USD","GBP","JPY","AUD","NZD","CAD","CHF","SEK","NOK","DKK","MXN","ZAR","TRY","SGD","HKD","PLN","HUF","CZK","RUB","CNH","THB"};
-      for(int i=0; i<ArraySize(fx); i++) if(c1 == fx[i]) { ok1 = true; break; }
-      for(int i=0; i<ArraySize(fx); i++) if(c2 == fx[i]) { ok2 = true; break; }
-      if(ok1 && ok2) return true;
-     }
-
-   return false;
-  }
-
-//+------------------------------------------------------------------+
-//| Normalize symbol for comparison (remove suffixes/prefixes, upper) |
-//+------------------------------------------------------------------+
-string NormalizeSymbolForComparison(const string symbol)
-  {
-   if(symbol=="") return "";
-   string s = symbol;
-   // Remove common suffixes
-   string suffixes[] = {".pro", ".ecn", ".raw", ".std", ".m", ".demo", "#", "+", "_"};
-   for(int i=0; i<ArraySize(suffixes); i++)
-     {
-      string suffix = suffixes[i];
-      int pos = StringFind(s, suffix);
-      if(pos >= 0)
-        {
-         s = StringSubstr(s, 0, pos);
-         break;
-        }
-     }
-   // Remove common prefixes
-   string prefixes[] = {"m.", "raw.", "ecn.", "pro."};
-   for(int i=0; i<ArraySize(prefixes); i++)
-     {
-      string prefix = prefixes[i];
-      if(StringFind(s, prefix) == 0)
-        {
-         s = StringSubstr(s, StringLen(prefix));
-         break;
-        }
-     }
-   StringToUpper(s);
-   return s;
-  }
-
-//+------------------------------------------------------------------+
-//|                                                                  |
-//+------------------------------------------------------------------+
-int DiscoverForexSymbols(string &symbols_out[])
-  {
-   ArrayResize(symbols_out,0);
-   if(!InpUseDynamicForex)
-     {
-      if(InpGoldSymbol!="") { int sz=ArraySize(symbols_out); ArrayResize(symbols_out,sz+1); symbols_out[sz]=InpGoldSymbol; }
-      if(InpSilverSymbol!="") { int sz=ArraySize(symbols_out); ArrayResize(symbols_out,sz+1); symbols_out[sz]=InpSilverSymbol; }
-      if(InpBitcoinSymbol!="") { int sz=ArraySize(symbols_out); ArrayResize(symbols_out,sz+1); symbols_out[sz]=InpBitcoinSymbol; }
-// Fix 2: Ensure chart symbol is included even in static universe mode
-       string chart_sym = ChartSymbol(0);
-       if(chart_sym!="")
-         {
-          bool exists=false;
-          string chart_norm = NormalizeSymbolForComparison(chart_sym);
-          for(int j=0;j<ArraySize(symbols_out);j++) if(NormalizeSymbolForComparison(symbols_out[j])==chart_norm) { exists=true; break; }
-          if(!exists)
-            {
-             int sz=ArraySize(symbols_out);
-             ArrayResize(symbols_out,sz+1);
-             symbols_out[sz]=chart_sym;
-            }
-         }
-      return ArraySize(symbols_out);
-     }
-   int total=SymbolsTotal(true);
-   for(int i=0;i<total;i++)
-     {
-      string sn=SymbolName(i,true);
-      if(sn=="") continue;
-      if(!IsForexSymbol(sn)) continue;
-      if(!InpIncludeMetalsCrypto)
-        {
-         string su=sn; StringToUpper(su);
-         if(StringFind(su,"XAU")>=0 || StringFind(su,"XAG")>=0 || StringFind(su,"GOLD")>=0 || StringFind(su,"SILVER")>=0 || StringFind(su,"BTC")>=0 || StringFind(su,"ETH")>=0 || StringFind(su,"BITCOIN")>=0) continue;
-        }
-      bool exists=false;
-      string sn_norm = NormalizeSymbolForComparison(sn);
-      for(int j=0;j<ArraySize(symbols_out);j++) if(NormalizeSymbolForComparison(symbols_out[j])==sn_norm) { exists=true; break; }
-      if(exists) continue;
-      int sz2=ArraySize(symbols_out);
-      if(sz2>=InpForexMaxSymbols) break;
-      ArrayResize(symbols_out,sz2+1);
-      symbols_out[sz2]=sn;
-     }
-// Fix 2: Explicitly ensure the chart symbol is in the universe
-    // This guarantees the chart the EA is attached to always gets a runtime
-    string chart_sym = ChartSymbol(0);
-    if(chart_sym!="")
-      {
-       bool exists=false;
-       string chart_norm = NormalizeSymbolForComparison(chart_sym);
-       for(int j=0;j<ArraySize(symbols_out);j++) if(NormalizeSymbolForComparison(symbols_out[j])==chart_norm) { exists=true; break; }
-       if(!exists)
-         {
-          int sz2=ArraySize(symbols_out);
-          if(sz2<InpForexMaxSymbols)
-            {
-             ArrayResize(symbols_out,sz2+1);
-             symbols_out[sz2]=chart_sym;
-            }
-         }
-      }
-   if(ArraySize(symbols_out)==0)
-     {
-      if(InpGoldSymbol!="") { int sz=ArraySize(symbols_out); ArrayResize(symbols_out,sz+1); symbols_out[sz]=InpGoldSymbol; }
-      if(InpSilverSymbol!="") { int sz=ArraySize(symbols_out); ArrayResize(symbols_out,sz+1); symbols_out[sz]=InpSilverSymbol; }
-      if(InpBitcoinSymbol!="") { int sz=ArraySize(symbols_out); ArrayResize(symbols_out,sz+1); symbols_out[sz]=InpBitcoinSymbol; }
-     }
-   return ArraySize(symbols_out);
-  }
-
-//+------------------------------------------------------------------+
-//|                                                                  |
-//+------------------------------------------------------------------+
-
 
 //+------------------------------------------------------------------+
 //|                                                                  |
@@ -6073,5 +6084,4 @@ void OnTesterDeinit()
   {
   }
 //+------------------------------------------------------------------+
-
 

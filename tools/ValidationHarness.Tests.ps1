@@ -673,12 +673,12 @@ Run-TestSuite 'VH-10: JSON Report Atomic Write & Round-Trip' {
             )
             Environment = @{ TerminalInstallRoot='C:\MT5'; ProjectMql5Root='C:\Project' }
         }
-        
+
         $tempPath = [System.IO.Path]::GetTempFileName()
         try {
             $success = Write-JsonReport -Report $report -Path $tempPath
             Assert-Equal $true $success
-            
+
             $content = Get-Content -LiteralPath $tempPath -Raw
             $parsed = $content | ConvertFrom-Json
             Assert-Equal '1.0.0' $parsed.Version
@@ -729,13 +729,13 @@ $tempPath = Join-Path ([System.IO.Path]::GetTempPath()) ("EA-Atomic-" + [guid]::
             )
             Environment = @{ TerminalInstallRoot='C:\MT5'; ProjectMql5Root='C:\Project' }
         }
-        
+
         $tempPath = [System.IO.Path]::GetTempFileName()
         try {
             $success = Write-JsonReport -Report $report -Path $tempPath
             $content = Get-Content -LiteralPath $tempPath -Raw
             $parsed = $content | ConvertFrom-Json
-            
+
             Assert-True ($parsed.PSObject.Properties.Name -contains 'Version')
             Assert-True ($parsed.PSObject.Properties.Name -contains 'ValidationStartUtc')
             Assert-True ($parsed.PSObject.Properties.Name -contains 'ValidationEndUtc')
@@ -751,7 +751,7 @@ $tempPath = Join-Path ([System.IO.Path]::GetTempPath()) ("EA-Atomic-" + [guid]::
 }
 
 Run-TestSuite 'VH-11: UTC Timestamp Handling' {
-    
+
     Run-Test 'Produces ISO 8601 with offset' {
         $ts = Get-UtcTimestamp
         if (-not $ts -or $ts -eq '') {
@@ -1161,9 +1161,46 @@ Run-TestSuite 'EA source regression guards' {
         Assert-True (-not ($ea -match 'RetryUIInvalidate\("CHART_GEOMETRY_CHANGED"\);\s+if\(id == CHARTEVENT_CHART_CHANGE\)'))
     }
 
-    Run-Test 'F17: IsForexSymbol currency list is static' {
+    Run-Test 'F17: broker symbol discovery is asset-agnostic and server-wide' {
         $ea = Get-Content -LiteralPath $eaPath -Raw
-        Assert-Match $ea 'static string fx\[\]'
+        Assert-Match $ea 'int\s+DiscoverTradableSymbols\s*\('
+        Assert-Match $ea 'SymbolsTotal\(false\)'
+        Assert-Match $ea 'SymbolName\(i,false\)'
+        Assert-True (-not ($ea -match 'bool\s+IsForexSymbol\s*\('))
+    }
+
+    Run-Test 'P1: asset-neutral concentration cap integrated and fail-closed' {
+        $pr = Get-Content -LiteralPath $prPath -Raw
+        Assert-Match $pr 'm_max_concentration_risk_pct\s*=\s*2\.0'
+        Assert-Match $pr 'GetConcentrationBucketKey'
+        Assert-Match $pr 'ConcentrationRiskPercentForSymbol'
+        Assert-Match $pr 'MAX_CONCENTRATION_RISK'
+        Assert-Match $pr 'CONCENTRATION_RISK_UNAVAILABLE'
+        Assert-True (-not ($pr -match 'IsPrecious|InpMaxPreciousMetalsRisk|MAX_PRECIOUS_METALS_RISK'))
+        # admission paths must consult concentration helper
+        Assert-True ($pr -match 'CanOpen[\s\S]*ConcentrationRiskPercentForSymbol')
+        Assert-True ($pr -match 'CanAdmit[\s\S]*ConcentrationRiskPercentForSymbol')
+        Assert-True ($pr -match 'RevalidateAdmission[\s\S]*ConcentrationRiskPercentForSymbol')
+    }
+
+    Run-Test 'P2: retry handoff proves terminal failure and uses full admission revalidation' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'IsRetryEligibleFinalFailure'
+        Assert-Match $ea 'HANDOFF_PRIOR_NOT_TERMINAL_PROVEN'
+        Assert-Match $ea 'HANDOFF_PRIOR_AMBIGUOUS_OR_EXECUTED'
+        Assert-Match $ea 'CanAdmit\(legacy_signal,\s*risk,\s*admission_decision,\s*new_att\.attempt_id\)'
+        Assert-Match $ea 'RevalidateAdmission\(legacy_signal,\s*risk,\s*admission_decision,\s*reval_admission_reason,\s*new_att\.attempt_id\)'
+        Assert-Match $ea 'HANDOFF_FINAL_ADMISSION_FAILED'
+        Assert-Match $ea 'TryInitializePendingRuntimesBounded'
+    }
+
+    Run-Test 'P3: invalid risk sentinel handling is fail-closed (DBL_MAX not valid risk)' {
+        $pr = Get-Content -LiteralPath $prPath -Raw
+        Assert-Match $pr 'IsFiniteRiskPercent'
+        Assert-Match $pr 'v\s*<\s*DBL_MAX'
+        Assert-Match $pr 'PositionRiskPercent[\s\S]*return DBL_MAX'
+        # snapshot/admission should fail closed on invalid/uncomputable risk rather than permissive cap substitution
+        Assert-Match $pr 'CONCENTRATION_POSITION_RISK_INVALID|INVALID_OPEN_POSITION_RISK|exposure snapshot failed|POSITION_SELECT_FAILED'
     }
 
     Run-Test 'F2: busy_timeout PRAGMA set on ledger open' {

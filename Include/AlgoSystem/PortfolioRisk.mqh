@@ -10,12 +10,10 @@ class CAlgoPortfolioRisk : public IPortfolioRisk
   {
 private:
     double m_max_portfolio_risk;
+    double m_max_concentration_risk_pct; // asset-neutral per-bucket concentration cap (preserves prior 2% independent protection)
     int    m_max_positions_total;
     int    m_max_positions_symbol;
     int    m_max_positions_strategy;
-    double m_max_precious_metals_risk;
-    string m_gold_symbol;
-    string m_silver_symbol;
 
     string m_last_rejection_code;
     string m_last_rejection_reason;
@@ -83,6 +81,156 @@ private:
        return (IEnvironmentProvider*)m_env_provider;
        }
 
+    // Derive an asset-neutral concentration bucket key from broker symbol metadata.
+    // Uses generic metadata so no symbol-name/family hardcoding. Designed to group instruments sharing
+    // the same broker risk/exposure characteristics; fails closed if required metadata is unavailable.
+    bool GetConcentrationBucketKey(const string symbol, string &bucket_key) const
+      {
+       bucket_key = "";
+       if(symbol == "")
+          return false;
+
+       long sector = 0;
+       long industry = 0;
+       long calc_mode = 0;
+       string ccy_base = "";
+       string ccy_profit = "";
+       string ccy_margin = "";
+       ResetLastError();
+       bool ok = SymbolInfoInteger(symbol, SYMBOL_SECTOR, sector);
+       ok = ok && SymbolInfoInteger(symbol, SYMBOL_INDUSTRY, industry);
+       ok = ok && SymbolInfoInteger(symbol, SYMBOL_TRADE_CALC_MODE, calc_mode);
+       ok = ok && SymbolInfoString(symbol, SYMBOL_CURRENCY_BASE, ccy_base);
+       ok = ok && SymbolInfoString(symbol, SYMBOL_CURRENCY_PROFIT, ccy_profit);
+       ok = ok && SymbolInfoString(symbol, SYMBOL_CURRENCY_MARGIN, ccy_margin);
+       if(!ok)
+          return false;
+
+       // Metadata-based, asset-agnostic bucket; independent 2% concentration control remains enforced.
+       bucket_key = "SEC=" + IntegerToString((long)sector) +
+                    "|IND=" + IntegerToString((long)industry) +
+                    "|CALC=" + IntegerToString((long)calc_mode) +
+                    "|B=" + ccy_base +
+                    "|P=" + ccy_profit +
+                    "|M=" + ccy_margin;
+       return (bucket_key != "");
+      }
+
+    // Sum existing exposure risk (%) for all positions and pending orders in the same concentration bucket.
+    // Returns false on any calculation/metadata failure (fail closed).
+    bool ConcentrationRiskPercentForSymbol(const string signal_symbol,
+                                           double &concentration_risk_pct,
+                                           string &failure_reason) const
+      {
+       concentration_risk_pct = 0.0;
+       failure_reason = "";
+       IEnvironmentProvider* env = GetEnv();
+       if(env == NULL)
+         {
+          failure_reason = "NO_ENV_PROVIDER";
+          return false;
+         }
+
+       string signal_bucket = "";
+       if(!GetConcentrationBucketKey(signal_symbol, signal_bucket))
+         {
+          failure_reason = "CONCENTRATION_BUCKET_UNKNOWN";
+          return false;
+         }
+
+       double equity = env.GetAccountEquity();
+       if(equity <= 0.0 || !MathIsValidNumber(equity))
+         {
+          failure_reason = "EQUITY_UNAVAILABLE";
+          return false;
+         }
+
+       // Positions: include managed and unknown/ambiguous exposure (same scope as prior concentration protection intent).
+       for(int i=0; i<env.GetPositionsTotal(); i++)
+         {
+          ulong ticket = env.GetPositionTicket(i);
+          if(ticket == 0) continue;
+          if(!env.PositionSelectByTicket(ticket))
+            {
+             failure_reason = "CONCENTRATION_POSITION_SELECT_FAILED";
+             return false;
+            }
+
+          string sym = env.PositionGetSymbol();
+          if(sym == "") continue;
+          string bucket = "";
+          if(!GetConcentrationBucketKey(sym, bucket))
+            {
+             failure_reason = "CONCENTRATION_BUCKET_UNKNOWN:" + sym;
+             return false;
+            }
+          if(bucket != signal_bucket)
+             continue;
+
+          double pr = PositionRiskPercent(ticket);
+          if(!IsFiniteRiskPercent(pr))
+            {
+             failure_reason = "CONCENTRATION_POSITION_RISK_INVALID";
+             return false;
+            }
+          concentration_risk_pct += pr;
+         }
+
+       // Pending orders: include orders in same bucket with calculatable SL risk (consistent with exposure snapshot inputs).
+       for(int i=0; i<env.GetOrdersTotal(); i++)
+         {
+          ulong ticket = env.GetOrderTicket(i);
+          if(ticket == 0) continue;
+          if(!env.OrderSelect(ticket)) continue;
+
+          string sym = env.OrderGetSymbol();
+          if(sym == "") continue;
+          string bucket = "";
+          if(!GetConcentrationBucketKey(sym, bucket))
+            {
+             failure_reason = "CONCENTRATION_BUCKET_UNKNOWN:" + sym;
+             return false;
+            }
+          if(bucket != signal_bucket)
+             continue;
+
+          ENUM_ORDER_TYPE order_type = env.OrderGetType();
+          double volume = env.OrderGetVolumeCurrent();
+          double price = env.OrderGetPriceOpen();
+          double sl = env.OrderGetSL();
+          if(sl <= 0.0 || volume <= 0.0 || price <= 0.0)
+             continue;
+
+          double loss = 0.0;
+          if(!env.OrderCalcProfit(order_type, sym, volume, price, sl, loss))
+            {
+             failure_reason = "CONCENTRATION_ORDER_RISK_CALC_FAILED";
+             return false;
+            }
+
+          double pr = MathAbs(loss) / equity * 100.0;
+          if(!IsFiniteRiskPercent(pr) || pr < 0.0)
+            {
+             failure_reason = "CONCENTRATION_ORDER_RISK_INVALID";
+             return false;
+            }
+          concentration_risk_pct += pr;
+         }
+
+       if(!IsFiniteRiskPercent(concentration_risk_pct) || concentration_risk_pct < 0.0)
+         {
+          failure_reason = "CONCENTRATION_RISK_INVALID";
+          return false;
+         }
+       return true;
+      }
+
+    bool IsFiniteRiskPercent(const double v) const
+      {
+       // DBL_MAX is a failure sentinel in risk paths, not a valid risk percentage.
+       return (MathIsValidNumber(v) && v >= 0.0 && v < DBL_MAX);
+      }
+
     // F-002-R6: Shared limit checking helper to eliminate CanOpen/CanAdmit duplication
     // Returns true if all limits pass, false otherwise. Populates rejection code/reason on failure.
     bool CheckPortfolioLimits(const string signal_symbol,
@@ -90,7 +238,7 @@ private:
                               const double total_account_risk_pct,
                               const int symbol_count,
                               const int strategy_count,
-                              const double precious_risk_pct,
+                              const double concentration_risk_pct,
                               const double new_risk_pct,
                               string &rejection_code,
                               string &rejection_reason) const
@@ -122,15 +270,23 @@ private:
          return false;
          }
 
-      // 4. Precious metals concentration risk (managed + unknown per F-005.2.4)
-      if(IsPrecious(signal_symbol) &&
-         precious_risk_pct + new_risk_pct > m_max_precious_metals_risk)
+      // 4. Asset-neutral concentration cap per broker-derived risk bucket (preserves prior independent 2% protection).
+      if(m_max_concentration_risk_pct > 0.0)
          {
-         rejection_code = "MAX_PRECIOUS_METALS_RISK";
-         rejection_reason = "Precious-metals concentration risk limit exceeded: " +
-                            DoubleToString(precious_risk_pct + new_risk_pct, 2) + "% > " +
-                            DoubleToString(m_max_precious_metals_risk, 2) + "%";
-         return false;
+          if(!IsFiniteRiskPercent(concentration_risk_pct) || !IsFiniteRiskPercent(new_risk_pct))
+            {
+             rejection_code = "CONCENTRATION_RISK_UNAVAILABLE";
+             rejection_reason = "Concentration risk unavailable or invalid";
+             return false;
+            }
+          if(concentration_risk_pct + new_risk_pct > m_max_concentration_risk_pct)
+            {
+             rejection_code = "MAX_CONCENTRATION_RISK";
+             rejection_reason = "Risk-bucket concentration limit exceeded: " +
+                                DoubleToString(concentration_risk_pct + new_risk_pct, 2) + "% > " +
+                                DoubleToString(m_max_concentration_risk_pct, 2) + "%";
+             return false;
+            }
          }
 
       return true;
@@ -169,11 +325,6 @@ private:
        return false;
       }
 
-    bool IsPrecious(const string symbol) const
-      {
-       return symbol==m_gold_symbol || symbol==m_silver_symbol;
-      }
-
     ENUM_STRATEGY_ID StrategyFromMagic(const long magic) const
       {
        if(magic==MAGIC_TREND) return STRATEGY_TREND_PULLBACK;
@@ -181,7 +332,7 @@ private:
        if(magic==MAGIC_MOMENTUM) return STRATEGY_MOMENTUM;
        if(magic==MAGIC_MEAN_REVERSION) return STRATEGY_MEAN_REVERSION;
        if(magic==MAGIC_RELATIVE_VALUE) return STRATEGY_RELATIVE_VALUE;
-             // Hybrid requests currently use STRATEGY_TREND_PULLBACK.
+       // Hybrid requests currently use STRATEGY_TREND_PULLBACK.
        // Count Hybrid magic IDs against the same per-strategy position cap.
        if(magic==MAGIC_HYBRID_SCALP ||
           magic==MAGIC_HYBRID_DAY ||
@@ -193,10 +344,10 @@ private:
     double PositionRiskPercent(const ulong ticket) const
       {
        IEnvironmentProvider* env = GetEnv();
-       if(env == NULL) return 0.0;
+       if(env == NULL) return DBL_MAX;
 
        if(!env.PositionSelectByTicket(ticket))
-          return 0.0;
+          return DBL_MAX;
 
        string symbol = env.PositionGetSymbol();
        long magic = env.PositionGetMagic();
@@ -206,7 +357,8 @@ private:
        double open_price = env.PositionGetPriceOpen();
        ENUM_POSITION_TYPE type = env.PositionGetType();
 
-       if(sl<=0.0 || volume<=0.0 || open_price<=0.0)
+       if(sl<=0.0 || volume<=0.0 || open_price<=0.0 ||
+          !MathIsValidNumber(sl) || !MathIsValidNumber(volume) || !MathIsValidNumber(open_price))
           return DBL_MAX;
 
        ENUM_ORDER_TYPE order_type =
@@ -225,10 +377,13 @@ private:
 
        double equity = env.GetAccountEquity();
 
-       if(equity<=0.0)
+       if(equity<=0.0 || !MathIsValidNumber(equity))
           return DBL_MAX;
 
-       return MathAbs(loss)/equity*100.0;
+       double pr = MathAbs(loss)/equity*100.0;
+       if(!IsFiniteRiskPercent(pr))
+          return DBL_MAX;
+       return pr;
       }
 
 void Reject(const string code,const string reason)
@@ -241,12 +396,10 @@ public:
     CAlgoPortfolioRisk()
       {
        m_max_portfolio_risk=3.0;
+       m_max_concentration_risk_pct=2.0;
        m_max_positions_total=3;
        m_max_positions_symbol=1;
        m_max_positions_strategy=1;
-       m_max_precious_metals_risk=2.0;
-       m_gold_symbol="XAUUSD";
-       m_silver_symbol="XAGUSD";
        m_last_rejection_code="";
        m_last_rejection_reason="";
        m_execution_ledger=NULL;
@@ -258,18 +411,12 @@ public:
     void SetParameters(const double max_portfolio_risk,
                        const int max_positions_total,
                        const int max_positions_symbol,
-                       const int max_positions_strategy,
-                       const double max_precious_metals_risk,
-                       const string gold_symbol,
-                       const string silver_symbol)
+                       const int max_positions_strategy)
       {
        m_max_portfolio_risk=max_portfolio_risk;
        m_max_positions_total=max_positions_total;
        m_max_positions_symbol=max_positions_symbol;
        m_max_positions_strategy=max_positions_strategy;
-       m_max_precious_metals_risk=max_precious_metals_risk;
-       m_gold_symbol=gold_symbol;
-       m_silver_symbol=silver_symbol;
        m_last_rejection_code="";
        m_last_rejection_reason="";
       }
@@ -343,10 +490,10 @@ public:
     virtual bool Initialize() override
       {
        if(m_max_portfolio_risk<=0.0 ||
+          m_max_concentration_risk_pct<=0.0 ||
           m_max_positions_total<=0 ||
           m_max_positions_symbol<=0 ||
-          m_max_positions_strategy<=0 ||
-          m_max_precious_metals_risk<=0.0)
+          m_max_positions_strategy<=0)
          {
           Reject("INVALID_CONFIG","Invalid portfolio risk configuration");
           return false;
@@ -393,65 +540,66 @@ virtual bool CanOpen(const StrategySignal &signal,
           return false;
          }
 
-       // Compute current portfolio state for shared limit check
-       int symbol_count=0;
-       int strategy_count=0;
-       double precious_risk=0.0;
-       double total_account_risk=0.0; // F-005.2.4: includes ALL positions for total risk
+        // Compute current portfolio state for shared limit check
+        int symbol_count=0;
+        int strategy_count=0;
+        double total_account_risk=0.0; // F-005.2.4: includes ALL positions for total risk
 
-       for(int i=0; i<env.GetPositionsTotal(); i++)
-         {
-          ulong ticket = env.GetPositionTicket(i);
-          if(ticket==0) continue;
-
-          string symbol = env.PositionGetSymbol();
-          long magic = env.PositionGetMagic();
-
-          bool is_managed = IsManagedMagic(magic);
-
-          double pr = PositionRiskPercent(ticket);
-
-          if(pr==DBL_MAX)
-            {
-             Reject("INVALID_OPEN_POSITION_RISK",
-                    "Cannot calculate existing position risk");
-             return false;
-            }
-
-          // F-005.2.4: Total portfolio risk MUST include ALL positions (managed + unknown/ambiguous)
-          // to prevent understating account exposure when ownership cannot be resolved.
-          total_account_risk += pr;
-
-          // Per-symbol/strategy limits only apply to managed positions
-          if(is_managed)
-            {
-             if(symbol==signal.symbol)
-                symbol_count++;
-
-             if(StrategyFromMagic(magic)==signal.strategy)
-                strategy_count++;
-
-             if(IsPrecious(symbol))
-                precious_risk += pr;
+        for(int i=0; i<env.GetPositionsTotal(); i++)
+          {
+           ulong ticket = env.GetPositionTicket(i);
+           if(ticket==0) continue;
+           if(!env.PositionSelectByTicket(ticket))
+             {
+              Reject("INVALID_OPEN_POSITION_SELECT", "Cannot select existing position");
+              return false;
              }
-          else
-            {
-             // Unknown/ambiguous positions: include in total risk, track precious metals separately
-             if(IsPrecious(symbol))
-                precious_risk += pr;
-             }
-         }
 
-       // F-002-R6: Use shared limit checking helper
-       string rej_code, rej_reason;
-       if(!CheckPortfolioLimits(signal.symbol, signal.strategy,
-                                total_account_risk, symbol_count, strategy_count,
-                                precious_risk, risk.risk_percent,
-                                rej_code, rej_reason))
-         {
-          Reject(rej_code, rej_reason);
-          return false;
+           string symbol = env.PositionGetSymbol();
+           long magic = env.PositionGetMagic();
+
+           bool is_managed = IsManagedMagic(magic);
+
+           double pr = PositionRiskPercent(ticket);
+
+           if(!IsFiniteRiskPercent(pr))
+             {
+              Reject("INVALID_OPEN_POSITION_RISK",
+                     "Cannot calculate existing position risk");
+              return false;
+             }
+
+           total_account_risk += pr;
+
+           if(!is_managed)
+              continue;
+
+           if(symbol==signal.symbol)
+              symbol_count++;
+
+           if(StrategyFromMagic(magic)==signal.strategy)
+              strategy_count++;
           }
+
+        // F-002-R6: Use shared limit checking helper (asset-neutral concentration cap; fail-closed if unavailable)
+        string concentration_fail = "";
+        double concentration_risk = 0.0;
+        if(m_max_concentration_risk_pct > 0.0 &&
+           !ConcentrationRiskPercentForSymbol(signal.symbol, concentration_risk, concentration_fail))
+          {
+           Reject("CONCENTRATION_RISK_UNAVAILABLE", concentration_fail);
+           return false;
+          }
+
+        string rej_code, rej_reason;
+        if(!CheckPortfolioLimits(signal.symbol, signal.strategy,
+                                 total_account_risk, symbol_count, strategy_count,
+                                 concentration_risk, risk.risk_percent,
+                                 rej_code, rej_reason))
+          {
+           Reject(rej_code, rej_reason);
+           return false;
+           }
 
        return true;
       }
@@ -469,7 +617,7 @@ virtual bool CanOpen(const StrategySignal &signal,
     virtual double CurrentRiskPercent() const override
       {
        IEnvironmentProvider* env = GetEnv();
-       if(env == NULL) return 0.0;
+       if(env == NULL) return DBL_MAX;
 
        double total=0.0;
 
@@ -479,7 +627,7 @@ virtual bool CanOpen(const StrategySignal &signal,
           if(ticket==0) continue;
 
           double risk = PositionRiskPercent(ticket);
-          if(risk==DBL_MAX)
+          if(!IsFiniteRiskPercent(risk))
              return DBL_MAX;
 
           total+=risk;
@@ -504,39 +652,42 @@ virtual bool CanOpen(const StrategySignal &signal,
        if(snapshot.equity <= 0.0 || snapshot.currency == "")
           return false;
 
-        // Positions: include ALL (managed + unknown/ambiguous) per F-005.2.4
-        // F9: single pass — accumulate risk and count evaluatable positions together
-        // (the previous second pass recomputed PositionRiskPercent over the same positions).
-        int valid_positions = 0;
-        int evaluated_positions = 0;
-        for(int i=0; i<env.GetPositionsTotal(); i++)
-          {
-          ulong ticket = env.GetPositionTicket(i);
-          if(ticket == 0) continue;
+         // Positions: include ALL (managed + unknown/ambiguous) per F-005.2.4
+         // F9: single pass — accumulate risk and count evaluatable positions together
+         // (the previous second pass recomputed PositionRiskPercent over the same positions).
+         int valid_positions = 0;
+         int evaluated_positions = 0;
+         for(int i=0; i<env.GetPositionsTotal(); i++)
+           {
+           ulong ticket = env.GetPositionTicket(i);
+           if(ticket == 0) continue;
+           if(!env.PositionSelectByTicket(ticket))
+              return false;
 
-          string symbol = env.PositionGetSymbol();
-          long magic = env.PositionGetMagic();
+           string symbol = env.PositionGetSymbol();
+           long magic = env.PositionGetMagic();
 
-          bool is_managed = IsManagedMagic(magic);
-          if(!is_managed)
-             snapshot.unknown_exposure = true;
+           bool is_managed = IsManagedMagic(magic);
+           if(!is_managed)
+              snapshot.unknown_exposure = true;
 
-          double pr = PositionRiskPercent(ticket);
-          if(MathIsValidNumber(pr) && pr >= 0.0)
-             evaluated_positions++;
-          if(pr == DBL_MAX)
-             {
-             // F-002-P1: Conservative handling - use max portfolio risk as cap for uncalculatable position
-             // instead of failing entire snapshot. Log the ticket for diagnostics.
-             pr = m_max_portfolio_risk; // cap at portfolio limit
-// Note: In production, consider logging the ticket here
-             }
-          if(MathIsValidNumber(pr) && pr > 0.0)
-             {
-             snapshot.positions_risk_pct += pr;
-             valid_positions++;
-             }
-          }
+           double pr = PositionRiskPercent(ticket);
+           if(IsFiniteRiskPercent(pr))
+              evaluated_positions++;
+
+           if(!IsFiniteRiskPercent(pr))
+              {
+              // Conservative handling: invalid/uncomputable position risk cannot be represented safely.
+              // Fail snapshot so admission paths fail closed (no permissive cap substitution).
+              return false;
+              }
+
+           if(pr > 0.0)
+              {
+              snapshot.positions_risk_pct += pr;
+              valid_positions++;
+              }
+           }
 
         // If no positions could be evaluated (all uncalculatable), fail
         // But allow positions with zero risk (e.g., SL at open price)
@@ -733,73 +884,54 @@ virtual bool CanOpen(const StrategySignal &signal,
          return false;
          }
 
-       // 5. Compute symbol/strategy/precious counts for shared limit check
-       int symbol_count = 0;
-       int strategy_count = 0;
-       double precious_risk = 0.0;
-       double total_account_risk = total_exposure_pct + agg.total_reserved_pct; // already includes all positions + pending + reservations
+        // 5. Compute symbol/strategy counts for shared limit check (asset-agnostic)
+        int symbol_count = 0;
+        int strategy_count = 0;
+        double total_account_risk = total_exposure_pct + agg.total_reserved_pct; // already includes all positions + pending + reservations
 
-       // Iterate positions to count per-symbol/strategy and precious metals (managed + unknown)
-       for(int i=0; i<env.GetPositionsTotal(); i++)
-         {
-         ulong ticket = env.GetPositionTicket(i);
-         if(ticket == 0) continue;
-         string sym = env.PositionGetSymbol();
-         long magic = env.PositionGetMagic();
-         double pr = PositionRiskPercent(ticket);
-         if(pr == DBL_MAX) continue; // skip invalid, already in total_account_risk via snapshot
-         if(IsManagedMagic(magic))
+        // Iterate positions to count per-symbol/strategy (managed only)
+        for(int i=0; i<env.GetPositionsTotal(); i++)
+          {
+          ulong ticket = env.GetPositionTicket(i);
+          if(ticket == 0) continue;
+          if(!env.PositionSelectByTicket(ticket))
             {
-            if(sym == signal.symbol) symbol_count++;
-            if(StrategyFromMagic(magic) == signal.strategy) strategy_count++;
-            if(IsPrecious(sym)) precious_risk += pr;
+             decision.rejection_code = "POSITION_SELECT_FAILED";
+             decision.rejection_reason = "Admission: cannot select existing position";
+             return false;
             }
-         else
-            {
-            if(IsPrecious(sym)) precious_risk += pr; // unknown precious also counted
-            }
-         }
+          string sym = env.PositionGetSymbol();
+          long magic = env.PositionGetMagic();
+          bool is_managed = IsManagedMagic(magic);
+          if(is_managed)
+             {
+             if(sym == signal.symbol) symbol_count++;
+             if(StrategyFromMagic(magic) == signal.strategy) strategy_count++;
+             }
+          }
 
-       // Note: GetExposureSnapshot already includes all positions (managed + unknown) in positions_risk_pct
-       // and ALL pending orders (managed + unknown) in pending_risk_pct.
-       // We need to add precious metals from ALL pending orders to precious_risk.
-       // The shared helper expects precious_risk to include all precious (managed + unknown).
-       // Use ORDER_VOLUME_CURRENT for consistency with GetExposureSnapshot.
-       for(int i=0; i<env.GetOrdersTotal(); i++)
-         {
-         ulong ticket = env.GetOrderTicket(i);
-         if(ticket == 0) continue;
-         if(!env.OrderSelect(ticket)) continue;
-         string sym = env.OrderGetSymbol();
-         long magic = env.OrderGetMagic();
-         if(IsPrecious(sym))
-            {
-            ENUM_ORDER_TYPE order_type = env.OrderGetType();
-            double volume = env.OrderGetVolumeCurrent();
-            double price = env.OrderGetPriceOpen();
-            double sl = env.OrderGetSL();
-            if(sl <= 0.0 || volume <= 0.0 || price <= 0.0) continue;
-            double loss = 0.0;
-            if(env.OrderCalcProfit(order_type, sym, volume, price, sl, loss))
-               {
-               double pr = MathAbs(loss) / snapshot.equity * 100.0;
-               if(MathIsValidNumber(pr) && pr > 0.0)
-                  precious_risk += pr;
-               }
-            }
-         }
+        // 6. Asset-neutral concentration cap (independent protection; fail-closed if unavailable)
+        string concentration_fail = "";
+        double concentration_risk = 0.0;
+        if(m_max_concentration_risk_pct > 0.0 &&
+           !ConcentrationRiskPercentForSymbol(signal.symbol, concentration_risk, concentration_fail))
+          {
+          decision.rejection_code = "CONCENTRATION_RISK_UNAVAILABLE";
+          decision.rejection_reason = "Admission: " + concentration_fail;
+          return false;
+          }
 
-       // 6. F-002-R6: Use shared limit checking helper
-       string rej_code, rej_reason;
-       if(!CheckPortfolioLimits(signal.symbol, signal.strategy,
-                                total_account_risk, symbol_count, strategy_count,
-                                precious_risk, new_risk_pct,
-                                rej_code, rej_reason))
-         {
-         decision.rejection_code = rej_code;
-         decision.rejection_reason = rej_reason;
-         return false;
-         }
+        // 7. F-002-R6: Use shared limit checking helper
+        string rej_code, rej_reason;
+        if(!CheckPortfolioLimits(signal.symbol, signal.strategy,
+                                 total_account_risk, symbol_count, strategy_count,
+                                 concentration_risk, new_risk_pct,
+                                 rej_code, rej_reason))
+          {
+          decision.rejection_code = rej_code;
+          decision.rejection_reason = rej_reason;
+          return false;
+          }
 
        // All checks passed
        decision.admitted = true;
@@ -899,63 +1031,48 @@ virtual bool CanOpen(const StrategySignal &signal,
          return false;
          }
 
-       // 5. Compute symbol/strategy/precious counts for shared limit check
-       int symbol_count = 0, strategy_count = 0;
-       double precious_risk = 0.0;
-       double total_account_risk = total_exposure_pct + agg.total_reserved_pct;
+        // 5. Compute symbol/strategy counts for shared limit check (asset-agnostic)
+        int symbol_count = 0, strategy_count = 0;
+        double total_account_risk = total_exposure_pct + agg.total_reserved_pct;
 
-       for(int i=0; i<env.GetPositionsTotal(); i++)
-         {
-         ulong ticket = env.GetPositionTicket(i);
-         if(ticket == 0) continue;
-         string sym = env.PositionGetSymbol();
-         long magic = env.PositionGetMagic();
-         double pr = PositionRiskPercent(ticket);
-         if(pr == DBL_MAX) continue; // skip invalid, risk already capped in snapshot
-         if(IsManagedMagic(magic))
+        for(int i=0; i<env.GetPositionsTotal(); i++)
+          {
+          ulong ticket = env.GetPositionTicket(i);
+          if(ticket == 0) continue;
+          if(!env.PositionSelectByTicket(ticket))
             {
-            if(sym == signal.symbol) symbol_count++;
-            if(StrategyFromMagic(magic) == signal.strategy) strategy_count++;
-            if(IsPrecious(sym)) precious_risk += pr;
+             reason = "Revalidation: cannot select existing position";
+             return false;
             }
-         else
-            {
-            if(IsPrecious(sym)) precious_risk += pr; // unknown precious also counted
-            }
-         }
-       // Add ALL pending precious metals (managed + unknown) using ORDER_VOLUME_CURRENT
-       for(int i=0; i<env.GetOrdersTotal(); i++)
-         {
-         ulong ticket = env.GetOrderTicket(i);
-         if(ticket == 0) continue;
-         if(!env.OrderSelect(ticket)) continue;
-         string sym = env.OrderGetSymbol();
-         long magic = env.OrderGetMagic();
-         if(!IsPrecious(sym)) continue;
-         ENUM_ORDER_TYPE order_type = env.OrderGetType();
-         double volume = env.OrderGetVolumeCurrent();
-         double price = env.OrderGetPriceOpen();
-         double sl = env.OrderGetSL();
-         if(sl <= 0.0 || volume <= 0.0 || price <= 0.0) continue;
-         double loss = 0.0;
-         if(env.OrderCalcProfit(order_type, sym, volume, price, sl, loss))
-            {
-            double pr = MathAbs(loss) / equity_now * 100.0;
-            if(MathIsValidNumber(pr) && pr > 0.0)
-               precious_risk += pr;
-            }
-         }
+          string sym = env.PositionGetSymbol();
+          long magic = env.PositionGetMagic();
+          if(IsManagedMagic(magic))
+             {
+             if(sym == signal.symbol) symbol_count++;
+             if(StrategyFromMagic(magic) == signal.strategy) strategy_count++;
+             }
+          }
 
-       // F-002-R6: Use shared limit checking helper
-       string rej_code, rej_reason;
-       if(!CheckPortfolioLimits(signal.symbol, signal.strategy,
-                                total_account_risk, symbol_count, strategy_count,
-                                precious_risk, new_risk_pct,
-                                rej_code, rej_reason))
-         {
-         reason = "Revalidation: " + rej_reason;
-         return false;
-         }
+        // 6. Asset-neutral concentration cap revalidation (fail-closed)
+        string concentration_fail = "";
+        double concentration_risk = 0.0;
+        if(m_max_concentration_risk_pct > 0.0 &&
+           !ConcentrationRiskPercentForSymbol(signal.symbol, concentration_risk, concentration_fail))
+          {
+          reason = "Revalidation: " + concentration_fail;
+          return false;
+          }
+
+        // F-002-R6: Use shared limit checking helper
+        string rej_code, rej_reason;
+        if(!CheckPortfolioLimits(signal.symbol, signal.strategy,
+                                 total_account_risk, symbol_count, strategy_count,
+                                 concentration_risk, new_risk_pct,
+                                 rej_code, rej_reason))
+          {
+          reason = "Revalidation: " + rej_reason;
+          return false;
+          }
 
        return true;
       }
