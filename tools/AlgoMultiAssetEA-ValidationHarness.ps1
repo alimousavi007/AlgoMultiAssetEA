@@ -567,6 +567,7 @@ function Validate-SetFile {
     # SET files have two formats:
     # 1. Constant: ParameterName=Value
     # 2. Optimization: ParameterName=Value||Description||Type||Min||Max||Step
+    #    (some optimization/range exports use Param||... without '='; accept as valid entries)
     $lines = $Content -split "`r?`n"
     $hasValidAssignment = $false
     $lineNum = 0
@@ -576,6 +577,16 @@ function Validate-SetFile {
         $lineNum++
         $trimmed = $line.Trim()
         if (-not $trimmed -or $trimmed.StartsWith(';') -or $trimmed.StartsWith('#')) {
+            continue
+        }
+        # Optimization/range export without '=' (Param||Desc||Type||Start||Stop||Step)
+        if ($trimmed -match '^[A-Za-z_][A-Za-z0-9_]*\|\|') {
+            $hasValidAssignment = $true
+            $paramCount++
+            $optParts = $trimmed -split '\|\|'
+            if ($optParts.Count -lt 6) {
+                $warnings += "Line ${lineNum}: Optimization parameter may have incomplete fields (expected 6 '||' separated values): $trimmed"
+            }
             continue
         }
         # Basic assignment check: ParameterName=Value...

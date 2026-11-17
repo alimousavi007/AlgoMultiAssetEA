@@ -22,12 +22,6 @@ InpLogFlushEachWrite=true
 InpLogSummarySeconds=60
 
 ; === 02. Trading Symbols ===
-InpUseDynamicForex=true
-InpForexMaxSymbols=60
-InpIncludeMetalsCrypto=false
-InpGoldSymbol=XAUUSDb
-InpSilverSymbol=XAGUSDb
-InpBitcoinSymbol=BTCUSD
 
 ; === 03. Hybrid Decision ===
 InpMinRR=1.80
@@ -85,7 +79,6 @@ InpMaxPositionsTotal=8
 InpMaxPositionsPerSymbol=1
 InpMaxPositionsPerStrategy=1
 InpMaxPortfolioRisk=2.0
-InpMaxPreciousMetalsRisk=1.5
 InpMarginSafetyFraction=0.85
 InpDeviationPoints=15
 

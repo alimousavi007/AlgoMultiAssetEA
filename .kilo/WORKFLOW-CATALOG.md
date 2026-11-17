@@ -36,7 +36,7 @@ A composite Workflow in this repository is a **single invoked command** that rea
 | `/ea-investigate-fix-validate` | `ea-investigate` → authorization/root-cause gate → `ea-implement` → `mt5-validate` | A reported EA defect where the user asks to diagnose and fix it |
 | `/hybrid-lifecycle-implement-validate` | `ea-implement` + `hybrid-lifecycle` → Hybrid/risk review → `mt5-validate` | Setup/Attempt/authority/durable intent/reconciliation lifecycle changes |
 | `/ea-quality-cycle` | `ea-implement` + `mt5-validate` → baseline compile → scoped audit → repair → justified refactor → regression repair → final compile/tests | Complete the compile/audit/repair/refactor cycle in one Kilo session |
-| `/ea-dashboard-runtime-validate` | `ea-dashboard-runtime` → `ea-implement` (fixes) → `mt5-validate` | Complete Dashboard runtime validation with fix/verify cycle |
+| `/ea-dashboard-runtime-validate` | `ea-dashboard-runtime` → `ea-implement` (fixes) → `mt5-validate` | Complete composite Dashboard diagnosis, implementation, compile/repair, controlled visual validation, and independent reviews |
 
 ## 4. Which command should I use?
 
@@ -50,7 +50,7 @@ A composite Workflow in this repository is a **single invoked command** that rea
 - **Compile/test only:** `/mt5-validate`
 - **Safely update the local project from GitHub:** `/repo-update`. By default it updates only the current branch's verified upstream; an explicitly named remote branch can be supplied as an argument.
 - **Prepare Git delivery:** `/git-delivery`; it does not grant commit/push permission.
-- **Complete Dashboard Runtime validation (Safe Mode, A/B Tester, diagnostics, root-cause, reviews):** `/ea-dashboard-runtime` (standalone) or `/ea-dashboard-runtime-validate` (with fix/verify cycle)
+- **Complete Dashboard Runtime validation (Safe Mode, A/B Tester, diagnostics, root-cause, reviews):** `/ea-dashboard-runtime` (standalone Dashboard runtime requirements) or `/ea-dashboard-runtime-validate` (complete composite diagnosis, implementation, compile/repair, controlled visual validation, and independent reviews)
 
 Do not invoke multiple slash commands in a single prompt and assume they will execute sequentially. Use the relevant composite command instead.
 
