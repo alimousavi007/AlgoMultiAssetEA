@@ -1,5 +1,5 @@
 ; AlgoMultiAssetEA Dashboard Test SET A
-; Generated: 2026-11-15
+; Generated: 2026-11-19
 ; Version: 1.002
 ; Purpose: Visual Strategy Tester A/B test - Dashboard configuration A
 ; Safe Dashboard-Only Mode: ENABLED (blocks all broker mutations)
@@ -59,13 +59,13 @@ InpRangeLookback=20
 InpHysteresisBars=3
 
 ; === 08. News Filter ===
-InpNewsBlackoutBefore=30
-InpNewsBlackoutAfter=30
-InpNewsCooldown=60
-InpNewsImpactThreshold=3
-InpNewsPreventEntries=true
-InpNewsCloseOnNews=false
 InpNewsEnabled=true
+InpNewsPreventNewEntries=true
+InpNewsBlackoutMinutesBefore=30
+InpNewsBlackoutMinutesAfter=30
+InpNewsCooldownMinutes=60
+InpNewsImpactThreshold=3
+InpNewsClosePositions=false
 
 ; === 09. Risk Management ===
 InpRiskPercent=1.0
@@ -93,10 +93,6 @@ InpUseSpreadFilter=true
 InpMaxSpreadPoints=50
 
 ; === 11. Dashboard & Diagnostics ===
-InpDashboardViewMode=1
-InpDashboard=true
-InpDashboardDiagnostics=true
-InpDashboardSafeMode=true
 InpEnforceSafeModeInTester=true
 
 ; === 12. Position Management ===

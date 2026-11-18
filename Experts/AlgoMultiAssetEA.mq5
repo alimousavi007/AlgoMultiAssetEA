@@ -742,153 +742,184 @@ struct SubscriberRecord
  CDashboardDiag g_dashboard_diag;
  bool g_dashboard_diag_enabled = false;
 
- //==================================================================
-// Concurrency Engine (WP-05)
 //==================================================================
-// Fair Lock using Global Variables (ticket-based FIFO) — atomic via GlobalVariableSetOnCondition
-struct CFairLock
-  {
-   string lock_name;
-   long   my_ticket;
-   bool   acquired;
+ // Concurrency Engine (WP-05)
+ //==================================================================
+ // Fair Lock using Global Variables (ticket-based FIFO) — atomic via GlobalVariableSetOnCondition
+ // F01/F06: Improved atomicity, bounded waiting, owner-safe release
+ struct CFairLock
+   {
+    string lock_name;
+    long   my_ticket;
+    bool   acquired;
 
-                      CFairLock(): lock_name(""), my_ticket(0), acquired(false) {}
-                      CFairLock(const string name): lock_name(name), my_ticket(0), acquired(false) {}
+                       CFairLock(): lock_name(""), my_ticket(0), acquired(false) {}
+                       CFairLock(const string name): lock_name(name), my_ticket(0), acquired(false) {}
 
-   // Atomic ticket allocation using GlobalVariableSetOnCondition (CAS loop)
-   bool AllocateTicket(string &ticket_key, long &out_ticket)
-     {
-      long expected = 0;
-      long desired = 1;
-      if(GlobalVariableCheck(ticket_key))
-        {
-         expected = (long)GlobalVariableGet(ticket_key);
-         desired = expected + 1;
-        }
-      // CAS loop: retry until we successfully set the new value
-      for(int attempt = 0; attempt < 5; attempt++)
-        {
-         if(GlobalVariableSetOnCondition(ticket_key, (double)desired, (double)expected))
-           {
-            out_ticket = desired;
-            return true;
-           }
-         // Failed: value changed, re-read and retry
-         if(GlobalVariableCheck(ticket_key))
-           {
-            expected = (long)GlobalVariableGet(ticket_key);
-            desired = expected + 1;
-           }
-         else
-           {
-            expected = 0;
-            desired = 1;
-           }
-         Sleep(1);
-        }
-      return false;
-     }
+    // Atomic ticket allocation using GlobalVariableSetOnCondition (CAS loop with exponential backoff)
+    bool AllocateTicket(string &ticket_key, long &out_ticket)
+      {
+       // Ensure variable exists before CAS (GlobalVariableSetOnCondition requires pre-existing variable)
+       if(!GlobalVariableCheck(ticket_key))
+         {
+          ResetLastError();
+          if(!GlobalVariableSet(ticket_key, 0.0))
+            {
+             return false; // Creation failed
+            }
+         }
+       long expected = 0;
+       long desired = 1;
+       if(GlobalVariableCheck(ticket_key))
+         {
+          expected = (long)GlobalVariableGet(ticket_key);
+          desired = expected + 1;
+         }
+       // CAS loop with exponential backoff: max 20 attempts
+       int base_sleep_ms = 1;
+       for(int attempt = 0; attempt < 20; attempt++)
+         {
+          if(GlobalVariableSetOnCondition(ticket_key, (double)desired, (double)expected))
+            {
+             out_ticket = desired;
+             return true;
+            }
+          // Failed: value changed, re-read and retry
+          if(GlobalVariableCheck(ticket_key))
+            {
+             expected = (long)GlobalVariableGet(ticket_key);
+             desired = expected + 1;
+            }
+          else
+            {
+             expected = 0;
+             desired = 1;
+            }
+          // Exponential backoff: 1, 2, 4, 8, 16, 32... max 100ms
+          int sleep_ms = base_sleep_ms * (1 << attempt);
+          if(sleep_ms > 100) sleep_ms = 100;
+          Sleep(sleep_ms);
+         }
+       return false;
+      }
 
-   bool Acquire(const int timeout_ms=5000)
-     {
-      if(lock_name=="") return false;
-      string ticket_key = lock_name + "_ticket";
-      string serving_key = lock_name + "_serving";
-      string owner_key = lock_name + "_owner";
+    bool Acquire(const int timeout_ms=5000)
+      {
+       if(lock_name=="") return false;
+       string ticket_key = lock_name + "_ticket";
+       string serving_key = lock_name + "_serving";
+       string owner_key = lock_name + "_owner";
 
-      // 1) Atomically allocate our ticket
-      long ticket = 0;
-      if(!AllocateTicket(ticket_key, ticket))
-        {
-         ResetLastError();
-         return false; // allocation failed (race)
-        }
-      my_ticket = ticket;
+// 1) Atomically allocate our ticket
+        long ticket = 0;
+        if(!AllocateTicket(ticket_key, ticket))
+          {
+           ResetLastError();
+           return false; // allocation failed (race)
+          }
+        my_ticket = ticket;
 
-      // 2) Wait for our turn using GetTickCount64 for accurate timeout
-      ulong start_tick = GetTickCount64();
-      while((int)(GetTickCount64() - start_tick) < timeout_ms)
-        {
-         long serving = 0;
-         if(GlobalVariableCheck(serving_key))
-            serving = (long)GlobalVariableGet(serving_key);
-         
-         if(serving + 1 == my_ticket)
-           {
-            // 3) Atomically claim ownership: set serving to my_ticket only if still serving+1
-            long expected_serving = my_ticket - 1;
-            long new_serving = my_ticket;
-            if(GlobalVariableSetOnCondition(serving_key, (double)new_serving, (double)expected_serving))
-              {
-               // 4) Atomically set owner only if unowned (owner_key == 0 or empty)
-               double my_chart_id = (double)ChartID();
-               // First try to set from 0 (unowned)
-               if(GlobalVariableSetOnCondition(owner_key, my_chart_id, 0.0))
-                 {
-                  acquired = true;
-                  return true;
-                 }
-               // If owner_key exists but has our chart_id, we already own it
-               if(GlobalVariableCheck(owner_key))
-                 {
-                  double current_owner = GlobalVariableGet(owner_key);
-                  if((long)current_owner == ChartID())
-                    {
-                     acquired = true;
-                     return true;
-                    }
-                 }
-               // Failed to claim owner — rollback serving (best effort)
-               GlobalVariableSetOnCondition(serving_key, (double)expected_serving, (double)new_serving);
-               // Fall through to retry
-              }
-            // CAS failed: another owner slipped in, re-read serving and retry
-           }
-         
-         // Short sleep to yield; use GetTickCount64 for elapsed
-         Sleep(1);
-        }
-      
-      // Timeout: best-effort cleanup of our ticket (not strictly needed; ticket gap is harmless)
-      return false;
-     }
+        // Ensure serving_key and owner_key exist before CAS (GlobalVariableSetOnCondition requires pre-existing variables)
+        if(!GlobalVariableCheck(serving_key))
+          {
+           ResetLastError();
+           GlobalVariableSet(serving_key, 0.0);
+          }
+        if(!GlobalVariableCheck(owner_key))
+          {
+           ResetLastError();
+           GlobalVariableSet(owner_key, 0.0);
+          }
 
-   void Release()
-     {
-      if(!acquired || lock_name=="") return;
-      string serving_key = lock_name + "_serving";
-      string owner_key = lock_name + "_owner";
-      
-      // Atomically verify we're still the owner and release
-      double my_chart_id = (double)ChartID();
-      if(GlobalVariableCheck(owner_key))
-        {
-         double current_owner = GlobalVariableGet(owner_key);
-         if((long)current_owner == ChartID())
-           {
-            // We are the owner; clear owner atomically (set to 0)
-            if(GlobalVariableSetOnCondition(owner_key, 0.0, my_chart_id))
-              {
-               // Advance serving ticket atomically
-               long expected_serving = my_ticket;
-               long new_serving = my_ticket + 1;
-               GlobalVariableSetOnCondition(serving_key, (double)new_serving, (double)expected_serving);
-              }
-           }
-        }
-      // If we weren't the owner, do nothing — another owner holds the lock
-      acquired = false;
-      my_ticket = 0;
-     }
+        // 2) Wait for our turn using GetTickCount64 for accurate timeout
+       ulong start_tick = GetTickCount64();
+       int backoff_ms = 1;
+       
+       while((int)(GetTickCount64() - start_tick) < timeout_ms)
+         {
+          long serving = 0;
+          if(GlobalVariableCheck(serving_key))
+             serving = (long)GlobalVariableGet(serving_key);
+           
+          if(serving + 1 == my_ticket)
+            {
+             // 3) Atomically claim ownership: set serving to my_ticket only if still serving+1
+             long expected_serving = my_ticket - 1;
+             long new_serving = my_ticket;
+             if(GlobalVariableSetOnCondition(serving_key, (double)new_serving, (double)expected_serving))
+               {
+                // 4) Atomically set owner only if unowned (owner_key == 0 or empty)
+                double my_chart_id = (double)ChartID();
+                if(GlobalVariableSetOnCondition(owner_key, my_chart_id, 0.0))
+                  {
+                   acquired = true;
+                   return true;
+                  }
+                // If owner_key exists but has our chart_id, we already own it
+                if(GlobalVariableCheck(owner_key))
+                  {
+                   double current_owner = GlobalVariableGet(owner_key);
+                   if((long)current_owner == ChartID())
+                     {
+                      acquired = true;
+                      return true;
+                     }
+                  }
+                // Failed to claim owner — rollback serving (best effort CAS)
+                GlobalVariableSetOnCondition(serving_key, (double)expected_serving, (double)new_serving);
+                // Fall through to retry
+               }
+             // CAS failed: another owner slipped in, re-read serving and retry
+            }
+           
+          // Exponential backoff with jitter: 1, 2, 4, 8, 16... max 50ms
+          Sleep(backoff_ms);
+          backoff_ms = backoff_ms * 2;
+          if(backoff_ms > 50) backoff_ms = 50;
+         }
+       
+       // Timeout: ticket gap is harmless (FIFO order preserved), no cleanup needed
+       return false;
+      }
 
-   bool IsOwner() const
-     {
-      if(lock_name=="") return false;
-      string owner_key = lock_name + "_owner";
-      if(!GlobalVariableCheck(owner_key)) return false;
-      return ((long)GlobalVariableGet(owner_key) == ChartID());
-     }
-  };
+    // F06: Owner-safe release with double-check CAS and serving verification
+    void Release()
+      {
+       if(!acquired || lock_name=="") return;
+       string serving_key = lock_name + "_serving";
+       string owner_key = lock_name + "_owner";
+       
+       // Atomically verify we're still the owner and release
+       double my_chart_id = (double)ChartID();
+       
+       // Double-check CAS: only clear owner if we still own it
+       if(GlobalVariableSetOnCondition(owner_key, 0.0, my_chart_id))
+         {
+          // We successfully cleared owner; now verify serving before advancing
+          long current_serving = 0;
+          if(GlobalVariableCheck(serving_key))
+            current_serving = (long)GlobalVariableGet(serving_key);
+          
+          // Only advance serving if it's still our ticket (prevents stale restart from skipping real holder)
+          if(current_serving == my_ticket)
+            {
+             GlobalVariableSetOnCondition(serving_key, (double)(my_ticket + 1), (double)my_ticket);
+            }
+         }
+       // If CAS failed, another owner took over - do not advance serving
+       
+       acquired = false;
+       my_ticket = 0;
+      }
+
+    bool IsOwner() const
+      {
+       if(lock_name=="") return false;
+       string owner_key = lock_name + "_owner";
+       if(!GlobalVariableCheck(owner_key)) return false;
+       return ((long)GlobalVariableGet(owner_key) == ChartID());
+      }
+   };
 
 // Chart Message Queue
 class ChartMessage : public CObject
@@ -992,18 +1023,35 @@ bool Enqueue(const ChartMessage& msg)
 // Thread-safe Subscriber Registry (extends fixed array with fair lock)
 class CSubscriberRegistry : public CObject
   {
-private:
+ private:
    SubscriberRecord m_subscribers[64];
    int              m_count;
    CFairLock        m_lock;
 
-public:
-                     CSubscriberRegistry(): m_count(0), m_lock("ALGO_SUB_REGISTRY") {}
-   
+ public:
+                       CSubscriberRegistry(): m_count(0), m_lock("ALGO_SUB_REGISTRY") {}
+
+   // Internal: acquire lock with retries for read operations
+   bool AcquireReadLock(const int timeout_ms=1000)
+     {
+      ulong start = GetTickCount64();
+      int backoff = 1;
+      while((int)(GetTickCount64() - start) < timeout_ms)
+        {
+         int remaining = timeout_ms - (int)(GetTickCount64() - start);
+         if(remaining <= 0) break;
+         if(m_lock.Acquire(remaining)) return true;
+         Sleep(backoff);
+         backoff = backoff * 2;
+         if(backoff > 50) backoff = 50;
+        }
+      return false;
+     }
+
    bool Register(const long chart_id, const string& owner_token, const string& group_key, const string& config_fp)
      {
       if(!m_lock.Acquire(1000)) return false;
-      
+
       // Check for conflicts
       for(int i = 0; i < m_count; i++)
         {
@@ -1014,7 +1062,7 @@ public:
             return false; // config conflict
            }
         }
-      
+
       // Check if already registered
       for(int i = 0; i < m_count; i++)
         {
@@ -1024,16 +1072,16 @@ public:
             return true; // idempotent
            }
         }
-      
+
       if(m_count >= 64) { m_lock.Release(); return false; }
-      
+
       m_subscribers[m_count].chart_id = chart_id;
       m_subscribers[m_count].owner_token = owner_token;
       m_subscribers[m_count].strategy_group_key = group_key;
       m_subscribers[m_count].config_fingerprint = config_fp;
       m_subscribers[m_count].registered = true;
       m_count++;
-      
+
       m_lock.Release();
       return true;
      }
@@ -1041,7 +1089,7 @@ public:
    bool Unregister(const long chart_id, const string& owner_token)
      {
       if(!m_lock.Acquire(1000)) return false;
-      
+
       for(int i = 0; i < m_count; i++)
         {
          if(m_subscribers[i].chart_id == chart_id && m_subscribers[i].owner_token == owner_token)
@@ -1058,45 +1106,48 @@ public:
       return false;
      }
 
-bool IsRegistered(const long chart_id)
-      {
-       if(!m_lock.Acquire(100)) return false;
-       
-       bool result = false;
-       for(int i = 0; i < m_count; i++)
-         {
-          if(m_subscribers[i].chart_id == chart_id && m_subscribers[i].registered)
-            {
-             result = true;
-             break;
-            }
-         }
-       m_lock.Release();
-       return result;
-      }
+ bool IsRegistered(const long chart_id)
+     {
+      // Use read lock with retry for fail-safe: if lock fails, return false (conservative)
+      if(!AcquireReadLock(100)) return false;
 
-    int GetSubscribers(SubscriberRecord& out[])
-      {
-       if(!m_lock.Acquire(100)) return 0;
-       
-       // Caller must allocate array of at least 64
-       int copied = 0;
-       for(int i = 0; i < m_count; i++)
-         {
-          if(m_subscribers[i].registered)
-             out[copied++] = m_subscribers[i];
+      bool result = false;
+      for(int i = 0; i < m_count; i++)
+        {
+         if(m_subscribers[i].chart_id == chart_id && m_subscribers[i].registered)
+           {
+            result = true;
+            break;
+           }
          }
-       m_lock.Release();
-       return copied;
-      }
+      m_lock.Release();
+      return result;
+     }
 
-    int Count()
-      {
-       if(!m_lock.Acquire(100)) return 0;
-       int result = m_count;
-       m_lock.Release();
-       return result;
-      }
+   int GetSubscribers(SubscriberRecord& out[])
+     {
+      // Use read lock with retry
+      if(!AcquireReadLock(500)) return 0;
+
+      // Caller must allocate array of at least 64
+      int copied = 0;
+      for(int i = 0; i < m_count; i++)
+        {
+         if(m_subscribers[i].registered)
+            out[copied++] = m_subscribers[i];
+         }
+      m_lock.Release();
+      return copied;
+     }
+
+   int Count()
+     {
+      // Use read lock with retry
+      if(!AcquireReadLock(500)) return 0;
+      int result = m_count;
+      m_lock.Release();
+      return result;
+     }
 
    virtual int Type(void) const { return 0x777A; }
   };
@@ -4292,7 +4343,7 @@ int OnInit()
          }
 }
  
-    // Safe Dashboard-Only Mode status
+// Safe Dashboard-Only Mode status
     bool safe_mode_active = IsSafeModeActive();
     bool safe_mode_enforced = IsSafeModeEnforced();
     g_logger.Event(LOG_INFO, "INIT", "SAFE_MODE_STATUS", "", "", "", "",
@@ -4302,10 +4353,17 @@ int OnInit()
                    " MQL_VISUAL_MODE=" + (MQLInfoInteger(MQL_VISUAL_MODE) ? "true" : "false") +
                    " Enforced=" + (safe_mode_enforced ? "true" : "false") +
                    " Active=" + (safe_mode_active ? "true" : "false"));
- 
+
+    // Initial dashboard render after config applied
+    if(InpDashboard)
+      {
+       g_dashboard.ShowStatus("SYSTEM INITIALIZING");
+       g_dashboard.Render();
+      }
+
     ResetLastError();
     if(!EventSetTimer(5))
-     {
+      {
       g_logger.Event(
          LOG_ERROR, "INIT", "INIT_FAILED",
          "", "", "EventSetTimer", "",
@@ -4461,7 +4519,11 @@ void OnTimer()
       ENUM_SYSTEM_INIT_STATUS init_status=
          InitializeSystemWhenReady();
       if(init_status==SYSTEM_INIT_WAITING)
+        {
+         // Render dashboard during initialization waiting phase to show progress
+         UpdateDashboardForChart();
          return;
+        }
 
       if(init_status==SYSTEM_INIT_FAILED)
         {
@@ -4470,8 +4532,8 @@ void OnTimer()
          g_dashboard.ShowStatus("SYSTEM INITIALIZATION FAILED");
          g_dashboard.Render();
          return;
-        }
-     }
+         }
+      }
 
 if(g_coordinator_mode == COORD_MODE_COORDINATOR)
        {

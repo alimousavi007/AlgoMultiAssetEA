@@ -72,6 +72,9 @@
 !.kilo/rules/
 !.kilo/rules/mql5.md
 
+# Local Kilo/agent configuration (per-user, not committed)
+.kilo/opencode.json
+
 # Kilo project agents (when present)
 !.kilo/agents/
 !.kilo/agents/*.md

@@ -16,7 +16,10 @@ private:
    datetime            m_last_write_time;
    int                 m_write_interval_seconds;
    
-   // Metrics counters
+// F19: File rotation parameters
+    long                m_max_file_size_bytes;
+    
+    // Metrics counters
    ulong               m_total_ticks_processed;
    ulong               m_total_signals_generated;
    ulong               m_total_signals_approved;
@@ -57,10 +60,29 @@ private:
    int                 m_news_events_pending;
    int                 m_news_blackout_active;
    
-   bool InitializeFile()
+bool InitializeFile()
    {
       if(m_file_handle != INVALID_HANDLE)
          return true;
+      
+      // F19: Check file size before opening (warn only, no rotation needed as file is rewritten)
+      if(FileIsExist(m_metrics_file))
+      {
+         ResetLastError();
+         int temp_handle = FileOpen(m_metrics_file, FILE_READ|FILE_TXT|FILE_ANSI, '\t');
+         if(temp_handle != INVALID_HANDLE)
+         {
+            ulong file_size = FileSize(temp_handle);
+            FileClose(temp_handle);
+            
+            if(file_size >= (ulong)m_max_file_size_bytes)
+            {
+               if(m_logger)
+                  m_logger.Warning("Metrics file size (" + IntegerToString((long)file_size) + " bytes) exceeds limit (" + 
+                               IntegerToString(m_max_file_size_bytes) + " bytes). File will be truncated on write.");
+            }
+         }
+      }
       
       FolderCreate(m_metrics_dir);
       
@@ -70,21 +92,21 @@ private:
          FILE_WRITE|FILE_TXT|FILE_ANSI,
          '\t');
       
-if(m_file_handle == INVALID_HANDLE)
-       {
-          int err = GetLastError();
-          if(m_logger)
-             m_logger.Error("Metrics file open failed: " + m_metrics_file + " LastError=" + IntegerToString(err));
-          ResetLastError();
-          return false;
-       }
+      if(m_file_handle == INVALID_HANDLE)
+      {
+         int err = GetLastError();
+         if(m_logger)
+            m_logger.Error("Metrics file open failed: " + m_metrics_file + " LastError=" + IntegerToString(err));
+         ResetLastError();
+         return false;
+      }
       
       // Write Prometheus format header
       WriteHeader();
-      return true;
-   }
-   
-void WriteHeader()
+return true;
+    }
+    
+ void WriteHeader()
     {
        if(m_file_handle == INVALID_HANDLE)
           return;
@@ -155,15 +177,15 @@ void WriteHeader()
    }
    
 void WriteMetrics()
-    {
-       if(m_file_handle == INVALID_HANDLE)
-          return;
-       
-       string instance_label = (m_instance_id != "") ? "{instance=\"" + m_instance_id + "\"}" : "";
-       
-       FileSeek(m_file_handle, 0, SEEK_SET);
-       WriteHeader();
+   {
+      if(m_file_handle == INVALID_HANDLE)
+         return;
       
+      string instance_label = (m_instance_id != "") ? "{instance=\"" + m_instance_id + "\"}" : "";
+      
+      FileSeek(m_file_handle, 0, SEEK_SET);
+      WriteHeader();
+     
       FileWriteString(m_file_handle, "algo_ticks_processed_total" + instance_label + " " + IntegerToString(m_total_ticks_processed) + "\n");
       FileWriteString(m_file_handle, "algo_signals_generated_total" + instance_label + " " + IntegerToString(m_total_signals_generated) + "\n");
       FileWriteString(m_file_handle, "algo_signals_approved_total" + instance_label + " " + IntegerToString(m_total_signals_approved) + "\n");
@@ -199,15 +221,16 @@ void WriteMetrics()
 
 public:
    CMetricsExporter() : m_logger(NULL), m_metrics_dir("AlgoSystem/Metrics"), m_instance_id(""), 
-                        m_file_handle(INVALID_HANDLE), m_last_write_time(0), m_write_interval_seconds(10),
-                        m_total_ticks_processed(0), m_total_signals_generated(0), m_total_signals_approved(0),
-                        m_total_signals_rejected(0), m_total_orders_submitted(0), m_total_orders_filled(0),
-                        m_total_orders_rejected(0), m_total_positions_open(0), m_total_positions_closed(0),
-                        m_total_errors(0), m_total_warnings(0),
-                        m_account_balance(0), m_account_equity(0), m_account_margin(0), m_account_free_margin(0),
-                        m_account_margin_level(0),
-                        m_portfolio_exposure_pct(0), m_portfolio_unrealized_pnl(0), m_portfolio_realized_pnl(0),
-                        m_portfolio_active_positions(0), m_portfolio_pending_orders(0),
+                         m_file_handle(INVALID_HANDLE), m_last_write_time(0), m_write_interval_seconds(10),
+                         m_max_file_size_bytes(10 * 1024 * 1024), // 10 MB default
+                         m_total_ticks_processed(0), m_total_signals_generated(0), m_total_signals_approved(0),
+                         m_total_signals_rejected(0), m_total_orders_submitted(0), m_total_orders_filled(0),
+                         m_total_orders_rejected(0), m_total_positions_open(0), m_total_positions_closed(0),
+                         m_total_errors(0), m_total_warnings(0),
+                         m_account_balance(0), m_account_equity(0), m_account_margin(0), m_account_free_margin(0),
+                         m_account_margin_level(0),
+                         m_portfolio_exposure_pct(0), m_portfolio_unrealized_pnl(0), m_portfolio_realized_pnl(0),
+                         m_portfolio_active_positions(0), m_portfolio_pending_orders(0),
                         m_risk_daily_loss_pct(0), m_risk_drawdown_pct(0), m_risk_var_95(0),
                         m_engine_uptime_seconds(0), m_engine_avg_tick_latency_ms(0), m_engine_active_symbols(0),
                         m_news_events_pending(0), m_news_blackout_active(0) {}
@@ -221,14 +244,16 @@ public:
       }
    }
    
-   void Initialize(CAlgoLogger* logger, const string instance_id = "", const int write_interval_seconds = 10)
-   {
-      m_logger = logger;
-      m_instance_id = instance_id;
-      m_write_interval_seconds = write_interval_seconds;
-      m_metrics_file = m_metrics_dir + "/metrics" + (m_instance_id != "" ? "_" + m_instance_id : "") + ".prom";
-      InitializeFile();
-   }
+void Initialize(CAlgoLogger* logger, const string instance_id = "", const int write_interval_seconds = 10,
+                  const long max_file_size_bytes = 10 * 1024 * 1024)
+    {
+       m_logger = logger;
+       m_instance_id = instance_id;
+       m_write_interval_seconds = write_interval_seconds;
+       m_max_file_size_bytes = max_file_size_bytes;
+       m_metrics_file = m_metrics_dir + "/metrics" + (m_instance_id != "" ? "_" + m_instance_id : "") + ".prom";
+       InitializeFile();
+    }
    
    void SetLogger(CAlgoLogger* logger) { m_logger = logger; }
    
