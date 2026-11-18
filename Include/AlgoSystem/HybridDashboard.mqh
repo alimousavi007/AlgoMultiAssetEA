@@ -11,6 +11,7 @@ bool               m_enabled;
     int                m_view_mode;
     bool               m_show_diagnostics;
     bool               m_show_overlay;
+    bool               m_safe_mode;
 
     // D2: snapshot-driven analytical fields (consumer only)
     string             m_snap_style;
@@ -67,10 +68,11 @@ bool               m_enabled;
  public:
     CHybridDashboard()
       {
-       m_enabled=true;
-       m_view_mode=0;
-       m_show_diagnostics=true;
-       m_show_overlay=true;
+m_enabled=true;
+        m_view_mode=0;
+        m_show_diagnostics=true;
+        m_show_overlay=true;
+        m_safe_mode=false;
        m_snap_style="NOT EVALUATED";
        m_snap_regime="NOT EVALUATED";
        m_snap_bias="NOT EVALUATED";
@@ -122,6 +124,7 @@ bool               m_enabled;
       }
     void ShowDiagnostics(bool show){ m_show_diagnostics=show; }
     void ShowOverlay(bool show){ m_show_overlay=show; }
+    void SetSafeMode(bool safe){ m_safe_mode=safe; }
     void SetTitle(const string title){ m_title=title; }
     void SetCompactView(bool compact){ m_view_mode=compact?1:0; }
 
@@ -212,46 +215,42 @@ ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_BGCOLOR,clrWhite);
          }
       }
 
-    void RecalculateDashboardLayout()
+void RecalculateDashboardLayout()
       {
-       m_layout.valid=false;
-       long w=0,h=0;
-       bool ok_w=ChartGetInteger(m_chart_id,CHART_WIDTH_IN_PIXELS,0,w)&&w>0;
-       bool ok_h=ChartGetInteger(m_chart_id,CHART_HEIGHT_IN_PIXELS,0,h)&&h>0;
-       if(!ok_w||!ok_h)
-         {
-          // No fabricated dimensions: defer rendering until valid geometry
-          m_layout.valid=false;
-          return;
-         }
-       m_layout.chart_width=(int)w; m_layout.chart_height=(int)h;
-       if(m_layout.chart_width<260||m_layout.chart_height<160) m_view_mode=2;
-       else if(m_layout.chart_width<400||m_layout.chart_height<260) m_view_mode=1;
-       else m_view_mode=0;
-       int pw=(m_view_mode==2)?180:(m_view_mode==1)?240:300;
-       if(pw>m_layout.chart_width-20) pw=m_layout.chart_width-20;
-       if(pw<140) pw=140;
-       m_layout.panel_width=pw;
-       m_layout.panel_x=m_layout.chart_width-pw-16;
-       if(m_layout.panel_x<0) m_layout.panel_x=0;
-       m_layout.panel_y=16;
-       m_layout.padding=6;
-       m_layout.row_height=13;
-       m_layout.font_size=(m_view_mode==2)?7:(m_view_mode==1)?8:9;
-       m_layout.column_1_x=m_layout.panel_x+m_layout.padding;
-       m_layout.column_2_x=m_layout.column_1_x+(pw/2);
-       m_layout.visible_rows=(m_view_mode==2)?4:(m_view_mode==1)?6:8;
-       if(m_layout.visible_rows<4) m_layout.visible_rows=4;
-       int ph=m_layout.visible_rows*m_layout.row_height+36;
-       if(ph<80) ph=80;
-       m_layout.panel_height=ph;
-       if(m_layout.panel_width<=0||m_layout.panel_height<=0) return;
-       if(m_layout.panel_x<0||m_layout.panel_y<0) return;
-       if(m_layout.panel_x+m_layout.panel_width>m_layout.chart_width) return;
-       if(m_layout.panel_y+m_layout.panel_height>m_layout.chart_height) return;
-       m_layout.view_mode=m_view_mode;
-       m_layout.valid=true;
-      }
+        m_layout.valid=false;
+        long w=0,h=0;
+        bool ok_w=ChartGetInteger(m_chart_id,CHART_WIDTH_IN_PIXELS,0,w)&&w>0;
+        bool ok_h=ChartGetInteger(m_chart_id,CHART_HEIGHT_IN_PIXELS,0,h)&&h>0;
+        // Use reasonable defaults if chart geometry unavailable; still create layout to allow rendering
+        if(!ok_w) w=800;
+        if(!ok_h) h=600;
+        m_layout.chart_width=(int)w; m_layout.chart_height=(int)h;
+        // Respect user's m_view_mode (set via SetViewMode from InpDashboardViewMode)
+        // Only adjust panel dimensions to fit chart, do NOT override view_mode
+        int pw=(m_view_mode==2)?180:(m_view_mode==1)?240:300;
+        if(pw>m_layout.chart_width-20) pw=m_layout.chart_width-20;
+        if(pw<140) pw=140;
+        m_layout.panel_width=pw;
+        m_layout.panel_x=m_layout.chart_width-pw-16;
+        if(m_layout.panel_x<0) m_layout.panel_x=0;
+        m_layout.panel_y=16;
+        m_layout.padding=6;
+        m_layout.row_height=13;
+        m_layout.font_size=(m_view_mode==2)?7:(m_view_mode==1)?8:9;
+        m_layout.column_1_x=m_layout.panel_x+m_layout.padding;
+        m_layout.column_2_x=m_layout.column_1_x+(pw/2);
+        m_layout.visible_rows=(m_view_mode==2)?4:(m_view_mode==1)?6:8;
+        if(m_layout.visible_rows<4) m_layout.visible_rows=4;
+        int ph=m_layout.visible_rows*m_layout.row_height+36;
+        if(ph<80) ph=80;
+        m_layout.panel_height=ph;
+        if(m_layout.panel_width<=0||m_layout.panel_height<=0) return;
+        if(m_layout.panel_x<0||m_layout.panel_y<0) return;
+        if(m_layout.panel_x+m_layout.panel_width>m_layout.chart_width) return;
+        if(m_layout.panel_y+m_layout.panel_height>m_layout.chart_height) return;
+        m_layout.view_mode=m_view_mode;
+        m_layout.valid=true;
+       }
 
     void PositionLabel(const int index,int x,int y)
       {
@@ -290,27 +289,34 @@ ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_BGCOLOR,clrWhite);
        ChartRedraw(m_chart_id);
       }
 
-    void ShowStatus(const string status)
+void ShowStatus(const string status)
       {
-       if(!m_enabled) return;
-       m_status_text=status;
-       long chart_id=ChartID();
-       if(m_chart_id!=chart_id||m_bg_name==""){ m_chart_id=chart_id; m_bg_name="AlgoHybridDashboard_BG_"+IntegerToString((int)chart_id); }
-       RecalculateDashboardLayout();
-       if(!m_layout.valid) return;
-       CreateObjects();
-       // Restore visibility for all core labels first
-       for(int li=0;li<=8;li++)
-         if(ObjectFind(m_chart_id,m_label_names[li])>=0)
-           ObjectSetInteger(m_chart_id,m_label_names[li],OBJPROP_TIMEFRAMES,OBJ_ALL_PERIODS);
+        if(!m_enabled) return;
+        m_status_text=status;
+        long chart_id=ChartID();
+        if(m_chart_id!=chart_id||m_bg_name==""){ m_chart_id=chart_id; m_bg_name="AlgoHybridDashboard_BG_"+IntegerToString((int)chart_id); }
+        RecalculateDashboardLayout();
+        if(!m_layout.valid) return;
+        CreateObjects();
+        // Restore visibility for all core labels first
+        for(int li=0;li<=8;li++)
+          if(ObjectFind(m_chart_id,m_label_names[li])>=0)
+            ObjectSetInteger(m_chart_id,m_label_names[li],OBJPROP_TIMEFRAMES,OBJ_ALL_PERIODS);
 
-       int x1=m_layout.column_1_x; int ys=m_layout.panel_y+4; int step=m_layout.row_height;
-       // Branding
-       SetLabelText(0,m_title,"SILVER"); PositionLabel(0,x1,ys);
-       // Symbol / timeframe
-       SetLabelText(1,ChartSymbol(0)+"  "+TimeframeText(Period()),"SILVER"); PositionLabel(1,x1,ys+step);
-       // Status
-       SetLabelText(2,"STATUS: "+status,"SILVER"); PositionLabel(2,x1,ys+step*2);
+        int x1=m_layout.column_1_x; int ys=m_layout.panel_y+4; int step=m_layout.row_height;
+        // Branding
+        SetLabelText(0,m_title,"SILVER"); PositionLabel(0,x1,ys);
+ // Symbol / timeframe
+         SetLabelText(1,ChartSymbol()+"  "+TimeframeText(Period()),"SILVER"); PositionLabel(1,x1,ys+step);
+        // Status - truncate if too long for panel width
+        string display_status = status;
+        int max_chars = (int)(m_layout.panel_width / (m_layout.font_size * 0.6)) - 10; // rough estimate
+        if(max_chars < 20) max_chars = 20;
+        if(StringLen(display_status) > max_chars)
+          {
+           display_status = StringSubstr(display_status, 0, max_chars - 3) + "...";
+          }
+        SetLabelText(2,"STATUS: "+display_status,"SILVER"); PositionLabel(2,x1,ys+step*2);
        // Strategy summary
        // Strategy summary fields: no real engine snapshot is wired yet; show explicit
        // NOT EVALUATED rather than fabricated values.
@@ -335,12 +341,12 @@ ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_BGCOLOR,clrWhite);
        ChartRedraw(m_chart_id);
       }
 
-    void Update(const HybridDecision& decision,const PortfolioState& portfolio_state)
+void Update(const HybridDecision& decision,const PortfolioState& portfolio_state)
       {
-       if(!m_enabled) return;
-       long chart_id=ChartID();
-       string chart_symbol=ChartSymbol(0);
-       if(chart_symbol!=""&&decision.symbol!=chart_symbol) return;
+        if(!m_enabled) return;
+        long chart_id=ChartID();
+        string chart_symbol=ChartSymbol();
+        if(chart_symbol!=""&&decision.symbol!=chart_symbol) return;
        if(m_chart_id!=chart_id||m_bg_name==""){ m_chart_id=chart_id; m_bg_name="AlgoHybridDashboard_BG_"+IntegerToString((int)chart_id); }
        if(TimeCurrent()-m_last_update_time<2) return;
        RecalculateDashboardLayout();
@@ -373,12 +379,12 @@ ObjectSetInteger(m_chart_id,m_bg_name,OBJPROP_BGCOLOR,clrWhite);
        ChartRedraw(m_chart_id);
       }
 
-    void RenderMarketView(const MarketSnapshot& market)
+void RenderMarketView(const MarketSnapshot& market)
       {
-       if(!m_enabled) return;
-       long chart_id=ChartID();
-       string chart_symbol=ChartSymbol(0);
-       if(chart_symbol!=""&&market.symbol!=chart_symbol) return;
+        if(!m_enabled) return;
+        long chart_id=ChartID();
+        string chart_symbol=ChartSymbol();
+        if(chart_symbol!=""&&market.symbol!=chart_symbol) return;
        if(m_chart_id!=chart_id||m_bg_name==""){ m_chart_id=chart_id; m_bg_name="AlgoHybridDashboard_BG_"+IntegerToString((int)chart_id); }
        RecalculateDashboardLayout();
        if(!m_layout.valid) return;
