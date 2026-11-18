@@ -39,6 +39,11 @@ private:
    bool              m_auth_is_coordinator;
    bool              m_auth_configured;
 
+// F17: Symbol selection lifecycle tracking
+    string m_selected_symbols[64];
+    int    m_selected_count;
+    datetime m_symbol_select_time[64];
+
    bool HasExecutionAuthority(string &reason) const
      {
       reason="";
@@ -76,33 +81,81 @@ private:
       return true;
      }
 
-   //+----------------------------------------------------------------+
-   //| Symbol existence/selection                                    |
-   //+----------------------------------------------------------------+
-   bool IsSymbolReady(
-      const string symbol) const
-     {
-      if(StringLen(symbol)==0)
-         return false;
+//+----------------------------------------------------------------+
+    //| Symbol existence/selection                                    |
+    //+----------------------------------------------------------------+
+    bool IsSymbolReady(
+       const string symbol) const
+      {
+       if(StringLen(symbol)==0)
+          return false;
 
-      bool custom=false;
+       bool custom=false;
 
-      if(!SymbolExist(
-            symbol,
-            custom))
-         return false;
+       if(!SymbolExist(
+             symbol,
+             custom))
+          return false;
 
-      if(!SymbolSelect(
-            symbol,
-            true))
-         return false;
+       if(!SymbolSelect(
+             symbol,
+             true))
+          return false;
 
-      if(!SymbolIsSynchronized(symbol))
-         return false;
+       if(!SymbolIsSynchronized(symbol))
+          return false;
 
-      return true;
-     }
-   bool IsTickAligned(const string symbol,
+       return true;
+      }
+
+    // F17: Ensure symbol is selected and synchronized, track lifecycle to avoid redundant calls (non-const for caching)
+    bool EnsureSymbolSelected(const string symbol, string &reason)
+      {
+       if(StringLen(symbol)==0)
+          return RejectOpenValidation(reason,"Empty symbol");
+       
+       // Check if already selected recently (within 30 seconds)
+       for(int i = 0; i < m_selected_count; i++)
+       {
+          if(m_selected_symbols[i] == symbol)
+          {
+             if(TimeCurrent() - m_symbol_select_time[i] < 30)
+                return true; // Already selected and fresh
+             // Expired - will re-select below
+          }
+       }
+       
+       bool custom=false;
+       if(!SymbolExist(symbol, custom))
+          return RejectOpenValidation(reason,"Symbol does not exist: " + symbol);
+       
+       if(!SymbolSelect(symbol, true))
+          return RejectOpenValidation(reason,"SymbolSelect failed: " + symbol);
+       
+       if(!SymbolIsSynchronized(symbol))
+          return RejectOpenValidation(reason,"Symbol not synchronized: " + symbol);
+       
+       // Track selection
+       bool found = false;
+       for(int i = 0; i < m_selected_count; i++)
+       {
+          if(m_selected_symbols[i] == symbol)
+          {
+             m_symbol_select_time[i] = TimeCurrent();
+             found = true;
+             break;
+          }
+       }
+       if(!found && m_selected_count < 64)
+       {
+          m_selected_symbols[m_selected_count] = symbol;
+          m_symbol_select_time[m_selected_count] = TimeCurrent();
+          m_selected_count++;
+       }
+       
+       return true;
+      }
+    bool IsTickAligned(const string symbol,
                    const double price) const
      {
       if(price<=0.0)
@@ -278,8 +331,8 @@ private:
       if(!IsAccountTradingAllowed())
          return RejectOpenValidation(reason,"Account or expert trading permission is disabled");
 
-      if(!IsSymbolReady(request.symbol))
-         return RejectOpenValidation(reason,"Symbol is missing, unselected or unsynchronized");
+if(!IsSymbolReady(request.symbol))
+          return RejectOpenValidation(reason,"Symbol is missing, unselected or unsynchronized");
 
       if(request.volume<=0.0)
          return RejectOpenValidation(reason,"Requested volume is not positive");
@@ -686,6 +739,13 @@ public:
       m_auth_epoch=0;
       m_auth_is_coordinator=false;
       m_auth_configured=false;
+      // F17: Initialize symbol selection tracking
+      m_selected_count = 0;
+      for(int i = 0; i < 64; i++)
+      {
+         m_selected_symbols[i] = "";
+         m_symbol_select_time[i] = 0;
+      }
      }
 
    // E2.6: configure/sync authority context used by all broker mutations.

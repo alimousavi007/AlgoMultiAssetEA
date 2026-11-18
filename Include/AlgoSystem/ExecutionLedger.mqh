@@ -140,7 +140,8 @@ class CExecutionLedger
     // F03/F04: Instance identity for unique ID generation
     string             m_instance_token;     // Chart ID + process-unique token
     ulong              m_run_nonce;          // Random nonce per run
-    ulong              m_id_counter;         // Monotonic counter per instance
+    ulong              m_id_counter;         // Monotonic counter per instance for attempt IDs
+    ulong              m_claim_counter;      // Monotonic counter per instance for claim IDs
 
     bool               CreateSchema();
     bool               MigrateSchema();
@@ -162,9 +163,10 @@ class CExecutionLedger
      bool               NormalizeRiskReservationForPersist(ExecutionAttemptRecord &record, string &err) const;
      bool               PopulateRiskReservationFromAttemptParams(const string symbol, ENUM_ORDER_INTENT intent, double volume, double entry_price, double stop_loss, ExecutionAttemptRecord &record, string &err) const;
      bool               ReadAttemptRiskReservationColumns(int handle, int start_col, ExecutionAttemptRecord &record) const;
-     string             GenerateAttemptId();
-     // F-005.2: allocate per-Attempt Magic from non-overlapping range; fails closed on collision/overflow.
-     ulong              GenerateAttemptMagic(string &err);
+string             GenerateAttemptId();
+      string             GenerateClaimId();
+      // F-005.2: allocate per-Attempt Magic from non-overlapping range; fails closed on collision/overflow.
+      ulong              GenerateAttemptMagic(string &err);
      string             EscapeSQL(const string s) const;
      struct AttemptIdentityEventRef
        {
@@ -518,11 +520,12 @@ CExecutionLedger::CExecutionLedger()
      m_last_init_stage = "";
      m_last_init_operation = "";
      m_last_init_error = 0;
-     // F03/F04: Initialize instance identity for unique ID generation
-     m_instance_token = "CHART_" + IntegerToString((long)ChartID()) + "_" + IntegerToString(GetTickCount64());
-     m_run_nonce = (ulong)GetTickCount64() ^ (ulong)MathRand() ^ ((ulong)ChartID() << 32);
-     m_id_counter = 0;
-   }
+// F03/F04: Initialize instance identity for unique ID generation
+      m_instance_token = "CHART_" + IntegerToString((long)ChartID()) + "_" + IntegerToString(GetTickCount64());
+      m_run_nonce = (ulong)GetTickCount64() ^ (ulong)MathRand() ^ ((ulong)ChartID() << 32);
+      m_id_counter = 0;
+      m_claim_counter = 0;
+    }
 
 //+------------------------------------------------------------------+
 //| Destructor                                                        |
@@ -1160,6 +1163,21 @@ string CExecutionLedger::GenerateAttemptId()
    string id = "ATT_" + m_instance_token + "_" + IntegerToString((long)m_run_nonce) + "_" + IntegerToString((long)m_id_counter);
    return id;
   }
+
+//+------------------------------------------------------------------+
+//| Generate Claim ID (F04)                                           |
+//+------------------------------------------------------------------+
+// Collision-resistant claim ID for setup_claims table.
+ // Format: CLM_<instance_token>_<run_nonce>_<counter>
+ // Uses separate counter to avoid collision with attempt IDs.
+ string CExecutionLedger::GenerateClaimId()
+   {
+    // F04: Use instance token + run nonce + separate monotonic counter
+    // for collision-resistant claim IDs (member field, not static local)
+    m_claim_counter++;
+    string id = "CLM_" + m_instance_token + "_" + IntegerToString((long)m_run_nonce) + "_" + IntegerToString((long)m_claim_counter);
+    return id;
+   }
 
 //+------------------------------------------------------------------+
 //| Generate Per-Attempt Magic (F-005.2)                              |
@@ -3746,9 +3764,8 @@ CExecutionLedger::ENUM_CLAIM_RESULT CExecutionLedger::CreateSetupClaimAndIntent(
 if(!DatabaseTransactionBegin(m_db_handle))
       { error_reason="BEGIN_TX_FAILED"; return CLAIM_ERROR; }
     // Insert claim bound to this attempt_id
-    // F04: Use instance token + run nonce + monotonic counter for collision-resistant claim IDs
-    m_id_counter++;
-    string claim_id = "CLAIM_" + m_instance_token + "_" + IntegerToString((long)m_run_nonce) + "_" + IntegerToString((long)m_id_counter);
+    // F04: Use GenerateClaimId for collision-resistant claim IDs
+    string claim_id = GenerateClaimId();
     datetime now = TimeCurrent();
    string insert_claim = "INSERT INTO setup_claims (claim_id, strategy_group_key, logical_setup_key, canonical_identity, "
                          "serialization_version, claim_state, current_attempt_id, retry_sequence, created_at, updated_at, last_reason) "
