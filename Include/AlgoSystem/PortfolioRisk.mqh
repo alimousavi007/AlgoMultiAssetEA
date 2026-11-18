@@ -4,6 +4,7 @@
 #include "Interfaces.mqh"
 #include "ExecutionLedger.mqh"
 #include "EnvironmentProvider.mqh"
+#include "Utilities.mqh"
 #include <Trade/Trade.mqh>
 
 class CAlgoPortfolioRisk : public IPortfolioRisk
@@ -327,18 +328,7 @@ private:
 
     ENUM_STRATEGY_ID StrategyFromMagic(const long magic) const
       {
-       if(magic==MAGIC_TREND) return STRATEGY_TREND_PULLBACK;
-       if(magic==MAGIC_BREAKOUT) return STRATEGY_BREAKOUT;
-       if(magic==MAGIC_MOMENTUM) return STRATEGY_MOMENTUM;
-       if(magic==MAGIC_MEAN_REVERSION) return STRATEGY_MEAN_REVERSION;
-       if(magic==MAGIC_RELATIVE_VALUE) return STRATEGY_RELATIVE_VALUE;
-       // Hybrid requests currently use STRATEGY_TREND_PULLBACK.
-       // Count Hybrid magic IDs against the same per-strategy position cap.
-       if(magic==MAGIC_HYBRID_SCALP ||
-          magic==MAGIC_HYBRID_DAY ||
-          magic==MAGIC_HYBRID_SWING)
-          return STRATEGY_TREND_PULLBACK;
-       return STRATEGY_NONE;
+       return CAlgoUtils::StrategyFromMagic(magic);
       }
 
     double PositionRiskPercent(const ulong ticket) const

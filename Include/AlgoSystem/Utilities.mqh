@@ -164,7 +164,7 @@ static bool IsFinite(const double value)
          }
       }
 
-    static string DecisionStatusToString(ENUM_DECISION_STATUS s)
+static string DecisionStatusToString(ENUM_DECISION_STATUS s)
       {
        switch(s)
          {
@@ -180,5 +180,21 @@ static bool IsFinite(const double value)
           default: return "?";
          }
       }
-  };
+
+    // F17: Consolidated Magic-to-Strategy mapping (single source of truth)
+    static ENUM_STRATEGY_ID StrategyFromMagic(const long magic)
+      {
+       if(magic==MAGIC_TREND) return STRATEGY_TREND_PULLBACK;
+       if(magic==MAGIC_BREAKOUT) return STRATEGY_BREAKOUT;
+       if(magic==MAGIC_MOMENTUM) return STRATEGY_MOMENTUM;
+       if(magic==MAGIC_MEAN_REVERSION) return STRATEGY_MEAN_REVERSION;
+       if(magic==MAGIC_RELATIVE_VALUE) return STRATEGY_RELATIVE_VALUE;
+       // Hybrid magics map to TREND_PULLBACK for per-strategy position caps.
+       if(magic==MAGIC_HYBRID_SCALP ||
+          magic==MAGIC_HYBRID_DAY ||
+          magic==MAGIC_HYBRID_SWING)
+          return STRATEGY_TREND_PULLBACK;
+       return STRATEGY_NONE;
+      }
+   };
 #endif

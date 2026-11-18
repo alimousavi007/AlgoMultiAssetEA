@@ -94,8 +94,11 @@ InpUseSpreadFilter=true
 InpMaxSpreadPoints=50
 
 ; === 11. Dashboard & Diagnostics ===
-InpDashboardCompact=true
-InpDashboardOverlay=false
+InpDashboardViewMode=0
+InpDashboard=true
+InpDashboardDiagnostics=true
+InpDashboardSafeMode=true
+InpEnforceSafeModeInTester=true
 
 ; === 12. Position Management ===
 InpBreakEven=false

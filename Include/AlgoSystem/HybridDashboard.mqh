@@ -7,93 +7,102 @@
 class CHybridDashboard
   {
  private:
-bool               m_enabled;
-    int                m_view_mode;
-    bool               m_show_diagnostics;
-    bool               m_show_overlay;
-    bool               m_safe_mode;
+ bool               m_enabled;
+     int                m_view_mode;
+     bool               m_show_diagnostics;
+     bool               m_safe_mode;
 
-    // D2: snapshot-driven analytical fields (consumer only)
-    string             m_snap_style;
-    string             m_snap_regime;
-    string             m_snap_bias;
-    string             m_snap_long;
-    string             m_snap_short;
-    string             m_snap_stage;
-    string             m_snap_reason;
-    datetime           m_snap_time;
-    datetime           m_snap_success_time;
-    bool               m_snap_valid;
+     // D2: snapshot-driven analytical fields (consumer only)
+     string             m_snap_style;
+     string             m_snap_regime;
+     string             m_snap_bias;
+     string             m_snap_long;
+     string             m_snap_short;
+     string             m_snap_stage;
+     string             m_snap_reason;
+     datetime           m_snap_time;
+     datetime           m_snap_success_time;
+     bool               m_snap_valid;
 
-    long               m_chart_id;
-    string             m_bg_name;
-    string             m_title;
+     long               m_chart_id;
+     string             m_bg_name;
+     string             m_title;
 
-    int                m_label_count;
-    string             m_label_names[64];
-    int                m_label_rel_x[64];
-    int                m_label_rel_y[64];
-    bool               m_label_rel_valid[64];
+     int                m_label_count;
+     string             m_label_names[64];
+     int                m_label_rel_x[64];
+     int                m_label_rel_y[64];
+     bool               m_label_rel_valid[64];
 
-    datetime           m_last_update_time;
-    string             m_last_display_symbol;
-    ENUM_TRADING_STYLE m_last_style;
+     datetime           m_last_update_time;
+     string             m_last_display_symbol;
+     ENUM_TRADING_STYLE m_last_style;
 
-    string             m_status_text;
-    string             m_decision_text;
-    string             m_rejection_text;
+     string             m_status_text;
+     string             m_decision_text;
+     string             m_rejection_text;
 
-    struct DashboardLayout
-      {
-       int chart_width;
-       int chart_height;
-       int panel_x;
-       int panel_y;
-       int panel_width;
-       int panel_height;
-       int padding;
-       int row_height;
-       int font_size;
-       int column_1_x;
-       int column_2_x;
-       int visible_rows;
-       int view_mode;
-       bool valid;
-      };
-    DashboardLayout m_layout;
+     // F08: Render throttling and dirty tracking
+     ulong              m_last_render_tick;
+     int                m_render_interval_ms;
+     bool               m_dirty;
+     bool               m_force_render;
 
-    struct colorRef { uchar r,g,b; };
-    colorRef m_color_green, m_color_red, m_color_amber, m_color_grey, m_color_silver, m_color_lime;
+     struct DashboardLayout
+       {
+        int chart_width;
+        int chart_height;
+        int panel_x;
+        int panel_y;
+        int panel_width;
+        int panel_height;
+        int padding;
+        int row_height;
+        int font_size;
+        int column_1_x;
+        int column_2_x;
+        int visible_rows;
+        int view_mode;
+        bool valid;
+       };
+     DashboardLayout m_layout;
+
+     struct colorRef { uchar r,g,b; };
+     colorRef m_color_green, m_color_red, m_color_amber, m_color_grey, m_color_silver, m_color_lime;
 
  public:
-    CHybridDashboard()
-      {
-m_enabled=true;
-        m_view_mode=0;
-        m_show_diagnostics=true;
-        m_show_overlay=true;
-        m_safe_mode=false;
-       m_snap_style="NOT EVALUATED";
-       m_snap_regime="NOT EVALUATED";
-       m_snap_bias="NOT EVALUATED";
-       m_snap_long="NOT EVALUATED";
-       m_snap_short="NOT EVALUATED";
-       m_snap_stage="NOT_EVALUATED";
-       m_snap_reason="";
-       m_snap_time=0;
-       m_snap_success_time=0;
-       m_snap_valid=false;
-       m_chart_id=0;
-       m_bg_name="";
-       m_title="ALGO HYBRID";
-       m_label_count=64;
-       m_last_update_time=0;
-       m_last_display_symbol="";
-       m_last_style=STYLE_DAY_TRADING;
-       m_status_text="INITIALIZING";
-       m_decision_text="";
-       m_rejection_text="";
-       for(int i=0;i<64;i++){ m_label_names[i]=""; m_label_rel_x[i]=0; m_label_rel_y[i]=0; m_label_rel_valid[i]=false; }
+ CHybridDashboard()
+       {
+       m_enabled=true;
+         m_view_mode=0;
+         m_show_diagnostics=true;
+         m_safe_mode=false;
+        m_snap_style="NOT EVALUATED";
+        m_snap_regime="NOT EVALUATED";
+        m_snap_bias="NOT EVALUATED";
+        m_snap_long="NOT EVALUATED";
+        m_snap_short="NOT EVALUATED";
+        m_snap_stage="NOT_EVALUATED";
+        m_snap_reason="";
+m_snap_time=0;
+        m_snap_success_time=0;
+        m_snap_valid=false;
+        m_chart_id=0;
+        m_bg_name="";
+        m_title="ALGO HYBRID";
+        m_label_count=64;
+        m_last_update_time=0;
+        m_last_display_symbol="";
+        m_last_style=STYLE_DAY_TRADING;
+        m_status_text="INITIALIZING";
+        m_decision_text="";
+        m_rejection_text="";
+        // F08: Render throttling initialization
+        m_last_render_tick = 0;
+        m_render_interval_ms = 500; // 500ms minimum interval for routine renders
+        m_dirty = true; // Force initial render
+        m_force_render = false;
+        for(int i=0;i<64;i++){ m_label_names[i]=""; m_label_rel_x[i]=0; m_label_rel_y[i]=0; m_label_rel_valid[i]=false; }
        m_layout.chart_width=0; m_layout.chart_height=0; m_layout.panel_x=0; m_layout.panel_y=0;
        m_layout.panel_width=0; m_layout.panel_height=0; m_layout.padding=6; m_layout.row_height=14;
        m_layout.font_size=8; m_layout.column_1_x=0; m_layout.column_2_x=0; m_layout.visible_rows=0;
@@ -103,12 +112,11 @@ m_enabled=true;
        m_color_amber.r=255; m_color_amber.g=190; m_color_amber.b=60;
        m_color_grey.r=140; m_color_grey.g=140; m_color_grey.b=140;
        m_color_silver.r=200; m_color_silver.g=200; m_color_silver.b=200;
-       m_color_lime.r=173; m_color_lime.g=255; m_color_lime.b=47;
-      }
+m_color_lime.r=173; m_color_lime.g=255; m_color_lime.b=47;
+       }
 
-    void Enable(bool enabled){ m_enabled=enabled; if(!enabled) Clear(); }
-    void SetViewMode(int mode){ if(mode<0||mode>2) return; m_view_mode=mode; }
-    // D2: consumer-only snapshot setter
+     void Enable(bool enabled){ m_enabled=enabled; if(!enabled) Clear(); }
+     // D2: consumer-only snapshot setter
     void SetRuntimeSnapshot(const string style, const string regime, const string bias, const string longt, const string shortt, const string stage, const string reason, const datetime snap_time, const datetime success_time, const bool valid)
       {
        m_snap_style = (style=="" ? "NOT EVALUATED" : style);
@@ -121,12 +129,13 @@ m_enabled=true;
        m_snap_time = snap_time;
        m_snap_success_time = success_time;
        m_snap_valid = valid;
+       // F08: Mark dirty when snapshot changes
+       m_dirty = true;
       }
-    void ShowDiagnostics(bool show){ m_show_diagnostics=show; }
-    void ShowOverlay(bool show){ m_show_overlay=show; }
-    void SetSafeMode(bool safe){ m_safe_mode=safe; }
-    void SetTitle(const string title){ m_title=title; }
-    void SetCompactView(bool compact){ m_view_mode=compact?1:0; }
+    void ShowDiagnostics(bool show){ m_show_diagnostics=show; m_dirty = true; }
+    void SetSafeMode(bool safe){ m_safe_mode=safe; m_dirty = true; }
+    void SetTitle(const string title){ m_title=title; m_dirty = true; }
+    void SetViewMode(int mode){ if(mode<0||mode>2) return; m_view_mode=mode; m_dirty = true; }
 
     void Clear()
       {
@@ -291,54 +300,56 @@ void RecalculateDashboardLayout()
 
 void ShowStatus(const string status)
       {
-        if(!m_enabled) return;
-        m_status_text=status;
-        long chart_id=ChartID();
-        if(m_chart_id!=chart_id||m_bg_name==""){ m_chart_id=chart_id; m_bg_name="AlgoHybridDashboard_BG_"+IntegerToString((int)chart_id); }
-        RecalculateDashboardLayout();
-        if(!m_layout.valid) return;
-        CreateObjects();
-        // Restore visibility for all core labels first
-        for(int li=0;li<=8;li++)
-          if(ObjectFind(m_chart_id,m_label_names[li])>=0)
-            ObjectSetInteger(m_chart_id,m_label_names[li],OBJPROP_TIMEFRAMES,OBJ_ALL_PERIODS);
-
-        int x1=m_layout.column_1_x; int ys=m_layout.panel_y+4; int step=m_layout.row_height;
-        // Branding
-        SetLabelText(0,m_title,"SILVER"); PositionLabel(0,x1,ys);
- // Symbol / timeframe
-         SetLabelText(1,ChartSymbol()+"  "+TimeframeText(Period()),"SILVER"); PositionLabel(1,x1,ys+step);
-        // Status - truncate if too long for panel width
-        string display_status = status;
-        int max_chars = (int)(m_layout.panel_width / (m_layout.font_size * 0.6)) - 10; // rough estimate
-        if(max_chars < 20) max_chars = 20;
-        if(StringLen(display_status) > max_chars)
-          {
-           display_status = StringSubstr(display_status, 0, max_chars - 3) + "...";
-          }
-        SetLabelText(2,"STATUS: "+display_status,"SILVER"); PositionLabel(2,x1,ys+step*2);
-       // Strategy summary
-       // Strategy summary fields: no real engine snapshot is wired yet; show explicit
-       // NOT EVALUATED rather than fabricated values.
-       SetLabelText(3,"STYLE: "+m_snap_style,"GREY"); PositionLabel(3,x1,ys+step*3);
-       SetLabelText(4,"REGIME: "+m_snap_regime,"GREY"); PositionLabel(4,x1,ys+step*4);
-       SetLabelText(5,"BIAS: "+m_snap_bias,"GREY"); PositionLabel(5,x1,ys+step*5);
-       SetLabelText(6,"LONG SCORE: "+m_snap_long,"GREY"); PositionLabel(6,x1,ys+step*6);
-       SetLabelText(7,"SHORT SCORE: "+m_snap_short,"GREY"); PositionLabel(7,x1,ys+step*7);
-       // Diagnostics toggle handled by OBJ_BUTTON; hide label 8
-       SetLabelText(8,"","GREY");
-       if(ObjectFind(m_chart_id,m_label_names[8])>=0) ObjectSetInteger(m_chart_id,m_label_names[8],OBJPROP_TIMEFRAMES,OBJ_NO_PERIODS);
-       // Hide rest, mode-aware: 0=FULL shows all, 1=NORMAL hides 8+, 2=COMPACT hides 3+
-       int hide_from = (m_view_mode==2) ? 3 : (m_view_mode==1 ? 8 : 9);
-       for(int li=hide_from;li<m_label_count;li++)
+       if(!m_enabled) return;
+       m_status_text=status;
+       m_dirty = true;
+       m_force_render = true; // Status changes are critical - force render
+       long chart_id=ChartID();
+       if(m_chart_id!=chart_id||m_bg_name==""){ m_chart_id=chart_id; m_bg_name="AlgoHybridDashboard_BG_"+IntegerToString((int)chart_id); }
+       RecalculateDashboardLayout();
+       if(!m_layout.valid) return;
+       CreateObjects();
+       // Restore visibility for all core labels first
+       for(int li=0;li<=8;li++)
          if(ObjectFind(m_chart_id,m_label_names[li])>=0)
-           { ObjectSetString(m_chart_id,m_label_names[li],OBJPROP_TEXT,""); ObjectSetInteger(m_chart_id,m_label_names[li],OBJPROP_TIMEFRAMES,OBJ_NO_PERIODS); }
-       // COMPACT: also hide analytical labels 3-7
-       if(m_view_mode==2)
-         for(int li=3;li<=7;li++)
-           if(ObjectFind(m_chart_id,m_label_names[li])>=0)
-             ObjectSetInteger(m_chart_id,m_label_names[li],OBJPROP_TIMEFRAMES,OBJ_NO_PERIODS);
-       ChartRedraw(m_chart_id);
+           ObjectSetInteger(m_chart_id,m_label_names[li],OBJPROP_TIMEFRAMES,OBJ_ALL_PERIODS);
+
+       int x1=m_layout.column_1_x; int ys=m_layout.panel_y+4; int step=m_layout.row_height;
+       // Branding
+       SetLabelText(0,m_title,"SILVER"); PositionLabel(0,x1,ys);
+  // Symbol / timeframe
+          SetLabelText(1,ChartSymbol()+"  "+TimeframeText(Period()),"SILVER"); PositionLabel(1,x1,ys+step);
+       // Status - truncate if too long for panel width
+       string display_status = status;
+       int max_chars = (int)(m_layout.panel_width / (m_layout.font_size * 0.6)) - 10; // rough estimate
+       if(max_chars < 20) max_chars = 20;
+       if(StringLen(display_status) > max_chars)
+         {
+          display_status = StringSubstr(display_status, 0, max_chars - 3) + "...";
+         }
+       SetLabelText(2,"STATUS: "+display_status,"SILVER"); PositionLabel(2,x1,ys+step*2);
+      // Strategy summary
+      // Strategy summary fields: no real engine snapshot is wired yet; show explicit
+      // NOT EVALUATED rather than fabricated values.
+      SetLabelText(3,"STYLE: "+m_snap_style,"GREY"); PositionLabel(3,x1,ys+step*3);
+      SetLabelText(4,"REGIME: "+m_snap_regime,"GREY"); PositionLabel(4,x1,ys+step*4);
+      SetLabelText(5,"BIAS: "+m_snap_bias,"GREY"); PositionLabel(5,x1,ys+step*5);
+      SetLabelText(6,"LONG SCORE: "+m_snap_long,"GREY"); PositionLabel(6,x1,ys+step*6);
+      SetLabelText(7,"SHORT SCORE: "+m_snap_short,"GREY"); PositionLabel(7,x1,ys+step*7);
+      // Diagnostics toggle handled by OBJ_BUTTON; hide label 8
+      SetLabelText(8,"","GREY");
+      if(ObjectFind(m_chart_id,m_label_names[8])>=0) ObjectSetInteger(m_chart_id,m_label_names[8],OBJPROP_TIMEFRAMES,OBJ_NO_PERIODS);
+      // Hide rest, mode-aware: 0=FULL shows all, 1=NORMAL hides 8+, 2=COMPACT hides 3+
+      int hide_from = (m_view_mode==2) ? 3 : (m_view_mode==1 ? 8 : 9);
+      for(int li=hide_from;li<m_label_count;li++)
+        if(ObjectFind(m_chart_id,m_label_names[li])>=0)
+          { ObjectSetString(m_chart_id,m_label_names[li],OBJPROP_TEXT,""); ObjectSetInteger(m_chart_id,m_label_names[li],OBJPROP_TIMEFRAMES,OBJ_NO_PERIODS); }
+      // COMPACT: also hide analytical labels 3-7
+      if(m_view_mode==2)
+        for(int li=3;li<=7;li++)
+          if(ObjectFind(m_chart_id,m_label_names[li])>=0)
+            ObjectSetInteger(m_chart_id,m_label_names[li],OBJPROP_TIMEFRAMES,OBJ_NO_PERIODS);
+      ChartRedraw(m_chart_id);
       }
 
 void Update(const HybridDecision& decision,const PortfolioState& portfolio_state)
@@ -374,32 +385,98 @@ void Update(const HybridDecision& decision,const PortfolioState& portfolio_state
          }
        // hide unused
        for(int li=14;li<m_label_count;li++)
-         if(ObjectFind(m_chart_id,m_label_names[li])>=0){ ObjectSetString(m_chart_id,m_label_names[li],OBJPROP_TEXT,""); ObjectSetInteger(m_chart_id,m_label_names[li],OBJPROP_HIDDEN,true); }
-       m_last_update_time=TimeCurrent();
-       ChartRedraw(m_chart_id);
-      }
-
-void RenderMarketView(const MarketSnapshot& market)
-      {
+if(ObjectFind(m_chart_id,m_label_names[li])>=0){ ObjectSetString(m_chart_id,m_label_names[li],OBJPROP_TEXT,""); ObjectSetInteger(m_chart_id,m_label_names[li],OBJPROP_HIDDEN,true); }
+      m_last_update_time=TimeCurrent();
+      ChartRedraw(m_chart_id);
+     }
+ 
+// Unified render: displays the current snapshot state (set via SetRuntimeSnapshot)
+    // Called from a single place to avoid renderer conflicts
+    // F08: Throttled rendering with dirty tracking and force-render for critical updates
+    void Render()
+       {
         if(!m_enabled) return;
+        
+        // F08: Throttling logic - skip render if not dirty, not forced, and interval not elapsed
+        ulong now_tick = GetTickCount64();
+        if(!m_dirty && !m_force_render)
+          {
+           if(m_last_render_tick > 0 && (now_tick - m_last_render_tick) < (ulong)m_render_interval_ms)
+             {
+              return; // Skip render - nothing changed and interval not elapsed
+             }
+          }
+        
         long chart_id=ChartID();
-        string chart_symbol=ChartSymbol();
-        if(chart_symbol!=""&&market.symbol!=chart_symbol) return;
-       if(m_chart_id!=chart_id||m_bg_name==""){ m_chart_id=chart_id; m_bg_name="AlgoHybridDashboard_BG_"+IntegerToString((int)chart_id); }
-       RecalculateDashboardLayout();
-       if(!m_layout.valid) return;
-       CreateObjects();
-       int x1=m_layout.column_1_x; int x2=m_layout.column_2_x; int ys=m_layout.panel_y+4; int step=m_layout.row_height;
-       SetLabelText(0,m_title+"  "+market.symbol,"SILVER"); PositionLabel(0,x1,ys);
-       SetLabelText(1,"STATUS: "+m_status_text,"AMBER"); PositionLabel(1,x1,ys+step);
-       SetLabelText(2,"BID/ASK: "+DoubleToString(market.bid,(int)market.properties.digits)+"/"+DoubleToString(market.ask,(int)market.properties.digits),"SILVER"); PositionLabel(2,x1,ys+step*2);
-       SetLabelText(3,"SPREAD: "+DoubleToString(market.spread_points/market.properties.point,1)+" pts","SILVER"); PositionLabel(3,x2,ys);
-       SetLabelText(4,"BAR: "+TimeToString(market.closed_bar_time,TIME_DATE|TIME_MINUTES),"SILVER"); PositionLabel(4,x2,ys+step);
-       for(int li=5;li<m_label_count;li++)
-         if(ObjectFind(m_chart_id,m_label_names[li])>=0){ ObjectSetString(m_chart_id,m_label_names[li],OBJPROP_TEXT,""); ObjectSetInteger(m_chart_id,m_label_names[li],OBJPROP_HIDDEN,true); }
-       m_last_update_time=TimeCurrent();
-       ChartRedraw(m_chart_id);
-      }
-  };
+        if(m_chart_id!=chart_id||m_bg_name==""){ m_chart_id=chart_id; m_bg_name="AlgoHybridDashboard_BG_"+IntegerToString((int)chart_id); }
+        RecalculateDashboardLayout();
+        if(!m_layout.valid) return;
+        CreateObjects();
+
+        int x1=m_layout.column_1_x; int ys=m_layout.panel_y+4; int step=m_layout.row_height;
+        int row=0;
+
+        // Title + Safe Mode badge
+        string title_text = m_title;
+        if(m_safe_mode) title_text += " [SAFE MODE]";
+        SetLabelText(0, title_text, "SILVER"); PositionLabel(0, x1, ys+step*row++);
+
+        // Symbol / timeframe
+        SetLabelText(1, ChartSymbol() + "  " + TimeframeText(Period()), "SILVER"); PositionLabel(1, x1, ys+step*row++);
+
+        // Status
+        string status_display = m_status_text;
+        int max_chars = (int)(m_layout.panel_width / (m_layout.font_size * 0.6)) - 10;
+        if(max_chars < 20) max_chars = 20;
+        if(StringLen(status_display) > max_chars)
+          {
+           status_display = StringSubstr(status_display, 0, max_chars - 3) + "...";
+          }
+        SetLabelText(2, "STATUS: " + status_display, "SILVER"); PositionLabel(2, x1, ys+step*row++);
+
+        // Snapshot fields
+        SetLabelText(3, "STYLE: " + m_snap_style, "GREY"); PositionLabel(3, x1, ys+step*row++);
+        SetLabelText(4, "REGIME: " + m_snap_regime, "GREY"); PositionLabel(4, x1, ys+step*row++);
+        SetLabelText(5, "BIAS: " + m_snap_bias, "GREY"); PositionLabel(5, x1, ys+step*row++);
+        SetLabelText(6, "LONG: " + m_snap_long, "GREEN"); PositionLabel(6, x1, ys+step*row++);
+        SetLabelText(7, "SHORT: " + m_snap_short, "RED"); PositionLabel(7, x1, ys+step*row++);
+        SetLabelText(8, "STAGE: " + m_snap_stage, "SILVER"); PositionLabel(8, x1, ys+step*row++);
+
+        // Diagnostics row
+        if(m_show_diagnostics && row < m_layout.visible_rows)
+          {
+           SetLabelText(9, "REASON: " + m_snap_reason, "GREY"); PositionLabel(9, x1, ys+step*row++);
+          }
+
+        // Hide unused labels
+        int hide_from = row;
+        if(m_view_mode == 2) hide_from = MathMin(hide_from, 4); // COMPACT: show max 4 rows
+        else if(m_view_mode == 1) hide_from = MathMin(hide_from, 6); // NORMAL: show max 6 rows
+
+        for(int li=hide_from; li<m_label_count; li++)
+          {
+           if(ObjectFind(m_chart_id, m_label_names[li]) >= 0)
+             {
+              ObjectSetString(m_chart_id, m_label_names[li], OBJPROP_TEXT, "");
+              ObjectSetInteger(m_chart_id, m_label_names[li], OBJPROP_TIMEFRAMES, OBJ_NO_PERIODS);
+             }
+          }
+
+        // COMPACT mode: also hide analytical labels 3-7
+        if(m_view_mode == 2)
+          {
+           for(int li=3; li<=7; li++)
+             {
+              if(ObjectFind(m_chart_id, m_label_names[li]) >= 0)
+                ObjectSetInteger(m_chart_id, m_label_names[li], OBJPROP_TIMEFRAMES, OBJ_NO_PERIODS);
+             }
+          }
+
+m_last_render_tick = now_tick;
+        m_dirty = false;
+        m_force_render = false;
+        ChartRedraw(m_chart_id);
+       }
+   };
 #endif
 

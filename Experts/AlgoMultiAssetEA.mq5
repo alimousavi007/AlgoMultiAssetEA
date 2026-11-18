@@ -47,7 +47,7 @@ input(name="Confirm Live Automatic Trading") bool               InpLiveAutoConfi
 enum ENUM_DASHBOARD_VIEW_MODE { DASHBOARD_COMPACT, DASHBOARD_NORMAL, DASHBOARD_FULL };
 input(name="Dashboard View Mode")          ENUM_DASHBOARD_VIEW_MODE InpDashboardViewMode=DASHBOARD_FULL;
 input(name="Enable Dashboard")             bool               InpDashboard=true;
-input(name="Enable Dashboard Diagnostics")  bool               InpDashboardDiagnostics=false;
+input(name="Enable Dashboard Diagnostics")  bool               InpDashboardDiagnostics=true;
 input(name="Log Level")                    ENUM_LOG_LEVEL     InpLogLevel=LOG_INFO;
 input(name="Log to File")                  bool               InpLogFile=true;
 input(name="Flush Log on Each Write")      bool               InpLogFlushEachWrite=true;
@@ -129,8 +129,6 @@ input(name="Enable Spread Filter")         bool               InpUseSpreadFilter
 input(name="Max Spread (Points)")          int                InpMaxSpreadPoints=50;
 
 input group "11. Dashboard & Diagnostics"
-input(name="Compact Dashboard View")       bool               InpDashboardCompact=true;
-input(name="Show Overlay")                 bool               InpDashboardOverlay=true;
 input(name="Safe Dashboard-Only Mode")     bool               InpDashboardSafeMode=false;
 input(name="Enforce Safe Mode in Tester")  bool               InpEnforceSafeModeInTester=true;
 
@@ -734,8 +732,6 @@ struct SubscriberRecord
    string config_fingerprint;
    bool   registered;
   };
-SubscriberRecord g_subscribers[64];
-int g_subscriber_count = 0;
 // E2.1: Strategy Group identity and Config Fingerprint (single-instance only;
  // cross-instance durable arbitration requires later Ledger/Gateway packages)
  string g_strategy_group_key = "";
@@ -749,15 +745,49 @@ int g_subscriber_count = 0;
  //==================================================================
 // Concurrency Engine (WP-05)
 //==================================================================
-// Fair Lock using Global Variables (ticket-based FIFO)
+// Fair Lock using Global Variables (ticket-based FIFO) — atomic via GlobalVariableSetOnCondition
 struct CFairLock
   {
    string lock_name;
    long   my_ticket;
    bool   acquired;
 
-                     CFairLock(): lock_name(""), my_ticket(0), acquired(false) {}
-                     CFairLock(const string name): lock_name(name), my_ticket(0), acquired(false) {}
+                      CFairLock(): lock_name(""), my_ticket(0), acquired(false) {}
+                      CFairLock(const string name): lock_name(name), my_ticket(0), acquired(false) {}
+
+   // Atomic ticket allocation using GlobalVariableSetOnCondition (CAS loop)
+   bool AllocateTicket(string &ticket_key, long &out_ticket)
+     {
+      long expected = 0;
+      long desired = 1;
+      if(GlobalVariableCheck(ticket_key))
+        {
+         expected = (long)GlobalVariableGet(ticket_key);
+         desired = expected + 1;
+        }
+      // CAS loop: retry until we successfully set the new value
+      for(int attempt = 0; attempt < 5; attempt++)
+        {
+         if(GlobalVariableSetOnCondition(ticket_key, (double)desired, (double)expected))
+           {
+            out_ticket = desired;
+            return true;
+           }
+         // Failed: value changed, re-read and retry
+         if(GlobalVariableCheck(ticket_key))
+           {
+            expected = (long)GlobalVariableGet(ticket_key);
+            desired = expected + 1;
+           }
+         else
+           {
+            expected = 0;
+            desired = 1;
+           }
+         Sleep(1);
+        }
+      return false;
+     }
 
    bool Acquire(const int timeout_ms=5000)
      {
@@ -766,26 +796,18 @@ struct CFairLock
       string serving_key = lock_name + "_serving";
       string owner_key = lock_name + "_owner";
 
-      // Get ticket atomically
-      ResetLastError();
+      // 1) Atomically allocate our ticket
       long ticket = 0;
-      if(GlobalVariableCheck(ticket_key))
+      if(!AllocateTicket(ticket_key, ticket))
         {
-         ticket = (long)GlobalVariableGet(ticket_key);
-         ticket++;
-         GlobalVariableSet(ticket_key, ticket);
-        }
-      else
-        {
-         ticket = 1;
-         GlobalVariableSet(ticket_key, ticket);
+         ResetLastError();
+         return false; // allocation failed (race)
         }
       my_ticket = ticket;
 
-      // Wait for our turn
-      datetime start = TimeCurrent();
-      int elapsed = 0;
-      while(elapsed < timeout_ms)
+      // 2) Wait for our turn using GetTickCount64 for accurate timeout
+      ulong start_tick = GetTickCount64();
+      while((int)(GetTickCount64() - start_tick) < timeout_ms)
         {
          long serving = 0;
          if(GlobalVariableCheck(serving_key))
@@ -793,17 +815,42 @@ struct CFairLock
          
          if(serving + 1 == my_ticket)
            {
-            // Claim ownership
-            GlobalVariableSet(serving_key, my_ticket);
-            GlobalVariableSet(owner_key, (double)ChartID());
-            acquired = true;
-            return true;
+            // 3) Atomically claim ownership: set serving to my_ticket only if still serving+1
+            long expected_serving = my_ticket - 1;
+            long new_serving = my_ticket;
+            if(GlobalVariableSetOnCondition(serving_key, (double)new_serving, (double)expected_serving))
+              {
+               // 4) Atomically set owner only if unowned (owner_key == 0 or empty)
+               double my_chart_id = (double)ChartID();
+               // First try to set from 0 (unowned)
+               if(GlobalVariableSetOnCondition(owner_key, my_chart_id, 0.0))
+                 {
+                  acquired = true;
+                  return true;
+                 }
+               // If owner_key exists but has our chart_id, we already own it
+               if(GlobalVariableCheck(owner_key))
+                 {
+                  double current_owner = GlobalVariableGet(owner_key);
+                  if((long)current_owner == ChartID())
+                    {
+                     acquired = true;
+                     return true;
+                    }
+                 }
+               // Failed to claim owner — rollback serving (best effort)
+               GlobalVariableSetOnCondition(serving_key, (double)expected_serving, (double)new_serving);
+               // Fall through to retry
+              }
+            // CAS failed: another owner slipped in, re-read serving and retry
            }
          
-         Sleep(10);
-         elapsed = (int)((TimeCurrent() - start) * 1000);
+         // Short sleep to yield; use GetTickCount64 for elapsed
+         Sleep(1);
         }
-      return false; // timeout
+      
+      // Timeout: best-effort cleanup of our ticket (not strictly needed; ticket gap is harmless)
+      return false;
      }
 
    void Release()
@@ -812,15 +859,24 @@ struct CFairLock
       string serving_key = lock_name + "_serving";
       string owner_key = lock_name + "_owner";
       
-      long serving = 0;
-      if(GlobalVariableCheck(serving_key))
-         serving = (long)GlobalVariableGet(serving_key);
-      
-      if(serving == my_ticket)
+      // Atomically verify we're still the owner and release
+      double my_chart_id = (double)ChartID();
+      if(GlobalVariableCheck(owner_key))
         {
-         GlobalVariableSet(serving_key, my_ticket + 1);
-         GlobalVariableDel(owner_key);
+         double current_owner = GlobalVariableGet(owner_key);
+         if((long)current_owner == ChartID())
+           {
+            // We are the owner; clear owner atomically (set to 0)
+            if(GlobalVariableSetOnCondition(owner_key, 0.0, my_chart_id))
+              {
+               // Advance serving ticket atomically
+               long expected_serving = my_ticket;
+               long new_serving = my_ticket + 1;
+               GlobalVariableSetOnCondition(serving_key, (double)new_serving, (double)expected_serving);
+              }
+           }
         }
+      // If we weren't the owner, do nothing — another owner holds the lock
       acquired = false;
       my_ticket = 0;
      }
@@ -874,30 +930,31 @@ public:
       Clear();
      }
 
-   bool Enqueue(const ChartMessage& msg)
-     {
-      if(m_queue.Total() >= m_max_size) return false;
-      if(!m_lock.Acquire(100)) return false; // quick lock for queue ops
-      
-      ChartMessage *m = new ChartMessage(msg);
-      if(m == NULL) { m_lock.Release(); return false; }
-      
-      // Insert by priority (high first)
-      int insert_idx = m_queue.Total();
-      for(int i = m_queue.Total() - 1; i >= 0; i--)
-        {
-         ChartMessage *existing = (ChartMessage*)m_queue.At(i);
-         if(existing && existing.priority > msg.priority)
-           {
-            insert_idx = i + 1;
-            break;
-           }
-        }
-      bool ok = m_queue.Insert(m, insert_idx);
-      if(!ok) delete m;
-      m_lock.Release();
-      return ok;
-     }
+bool Enqueue(const ChartMessage& msg)
+      {
+       if(m_queue.Total() >= m_max_size) return false;
+       if(!m_lock.Acquire(100)) return false; // quick lock for queue ops
+       
+       ChartMessage *m = new ChartMessage(msg);
+       if(m == NULL) { m_lock.Release(); return false; }
+       
+       // Insert by priority (0=high first), maintaining FIFO for equal priority
+       // Scan from front to find first position where existing priority > new priority
+       int insert_idx = m_queue.Total(); // default: append at end (lowest priority)
+       for(int i = 0; i < m_queue.Total(); i++)
+         {
+          ChartMessage *existing = (ChartMessage*)m_queue.At(i);
+          if(existing && existing.priority > msg.priority)
+            {
+             insert_idx = i;
+             break;
+            }
+         }
+       bool ok = m_queue.Insert(m, insert_idx);
+       if(!ok) delete m;
+       m_lock.Release();
+       return ok;
+      }
 
    bool Dequeue(ChartMessage& out)
      {
@@ -1001,30 +1058,45 @@ public:
       return false;
      }
 
-   bool IsRegistered(const long chart_id) const
-     {
-      // Read-only, no lock needed for snapshot
-      for(int i = 0; i < m_count; i++)
-        {
-         if(m_subscribers[i].chart_id == chart_id && m_subscribers[i].registered)
-            return true;
-        }
-      return false;
-     }
+bool IsRegistered(const long chart_id)
+      {
+       if(!m_lock.Acquire(100)) return false;
+       
+       bool result = false;
+       for(int i = 0; i < m_count; i++)
+         {
+          if(m_subscribers[i].chart_id == chart_id && m_subscribers[i].registered)
+            {
+             result = true;
+             break;
+            }
+         }
+       m_lock.Release();
+       return result;
+      }
 
-   int GetSubscribers(SubscriberRecord& out[]) const
-     {
-      // Caller must allocate array of at least 64
-      int copied = 0;
-      for(int i = 0; i < m_count; i++)
-        {
-         if(m_subscribers[i].registered)
-            out[copied++] = m_subscribers[i];
-        }
-      return copied;
-     }
+    int GetSubscribers(SubscriberRecord& out[])
+      {
+       if(!m_lock.Acquire(100)) return 0;
+       
+       // Caller must allocate array of at least 64
+       int copied = 0;
+       for(int i = 0; i < m_count; i++)
+         {
+          if(m_subscribers[i].registered)
+             out[copied++] = m_subscribers[i];
+         }
+       m_lock.Release();
+       return copied;
+      }
 
-   int Count() const { return m_count; }
+    int Count()
+      {
+       if(!m_lock.Acquire(100)) return 0;
+       int result = m_count;
+       m_lock.Release();
+       return result;
+      }
 
    virtual int Type(void) const { return 0x777A; }
   };
@@ -1066,22 +1138,30 @@ public:
                           total_exposure_pct(0), equity(0), currency(""), unknown_exposure(false), valid(false), timestamp(0) {}
      };
 
-                      CUnifiedExposureCalculator(): m_portfolio_risk(NULL), m_ledger(NULL),
-                          m_equity_cache(0), m_equity_cache_time(0), m_equity_cache_ttl_sec(5) {}
+CUnifiedExposureCalculator(): m_portfolio_risk(NULL), m_ledger(NULL),
+                           m_equity_cache(0), m_equity_cache_time(0), m_equity_cache_ttl_sec(1) {} // F10: Reduced TTL to 1s; admission uses fresh equity via PortfolioRisk.GetExposureSnapshot()
 
-   void SetDependencies(CAlgoPortfolioRisk *portfolio_risk, CExecutionLedger *ledger, const string& account_key)
-     {
-      m_portfolio_risk = portfolio_risk; m_ledger = ledger; m_account_key = account_key;
-     }
+    void SetDependencies(CAlgoPortfolioRisk *portfolio_risk, CExecutionLedger *ledger, const string& account_key)
+      {
+       m_portfolio_risk = portfolio_risk; m_ledger = ledger; m_account_key = account_key;
+      }
 
-   double GetCachedEquity()
-     {
-      if(TimeCurrent() - m_equity_cache_time <= m_equity_cache_ttl_sec && m_equity_cache > 0)
-         return m_equity_cache;
-      double eq = AccountInfoDouble(ACCOUNT_EQUITY);
-      if(eq > 0) { m_equity_cache = eq; m_equity_cache_time = TimeCurrent(); }
-      return eq;
-     }
+    // F10: Get fresh equity (bypasses cache) - for authoritative risk calculations
+    double GetFreshEquity()
+      {
+       double eq = AccountInfoDouble(ACCOUNT_EQUITY);
+       if(eq > 0) { m_equity_cache = eq; m_equity_cache_time = TimeCurrent(); }
+       return eq;
+      }
+
+    // GetCachedEquity: for UI/stress testing only - NOT for admission decisions
+    // Admission uses PortfolioRisk.GetExposureSnapshot() which calls env.GetAccountEquity() directly
+    double GetCachedEquity()
+      {
+       if(TimeCurrent() - m_equity_cache_time <= m_equity_cache_ttl_sec && m_equity_cache > 0)
+          return m_equity_cache;
+       return GetFreshEquity();
+      }
 
    UnifiedExposure Calculate()
      {
@@ -2000,7 +2080,7 @@ void ApplySnapshotToDashboard(const string symbol, const GVSnapshotData &snap)
 //+------------------------------------------------------------------+
 void UpdateDashboardForChart()
   {
-   if(!g_system_ready || !InpDashboard)
+   if(!InpDashboard)
       return;
 
    g_last_runtime_dashboard_status="";
@@ -2079,17 +2159,16 @@ void UpdateDashboardForChart()
       snap.last_block_reason_code = runtime.snapshot.last_block_reason_code;
       snap.configured_style = (int)runtime.snapshot.configured_style;
       snap.regime_code = runtime.snapshot.regime_code;
-      snap.bias_code = runtime.snapshot.bias_code;
+snap.bias_code = runtime.snapshot.bias_code;
       snap.long_code = runtime.snapshot.long_code;
       snap.short_code = runtime.snapshot.short_code;
       snap.regime_state = (int)runtime.snapshot.regime_state;
       snap.bias_state = (int)runtime.snapshot.bias_state;
       snap.long_state = (int)runtime.snapshot.long_state;
       snap.short_state = (int)runtime.snapshot.short_state;
-snap.valid = (runtime.snapshot.generation > 0);
        ApplySnapshotToDashboard(chart_symbol, snap);
 
-      g_dashboard.RenderMarketView(market);
+      g_dashboard.Render();
       return;
      }
 
@@ -2098,43 +2177,22 @@ snap.valid = (runtime.snapshot.generation > 0);
     if(g_coordinator_mode == COORD_MODE_CHART_CONTEXT && g_reg_state == REG_STATE_REGISTERED)
       {
        GVSnapshotData gv_snap;
-if(ReadGVSnapshot(chart_symbol, gv_snap))
+ if(ReadGVSnapshot(chart_symbol, gv_snap))
+           {
+            ApplySnapshotToDashboard(chart_symbol, gv_snap);
+            g_dashboard.Render();
+            // Explicit cleanup: deselect symbol to avoid leaving it selected in market watch
+            SymbolSelect(chart_symbol, false);
+            return;
+          }
+        else
           {
-           ApplySnapshotToDashboard(chart_symbol, gv_snap);
-
-          // Try to render market view from local data if available
-          MarketSnapshot market;
-          // Use default timeframe for market view rendering
-          ENUM_TIMEFRAMES view_tf = (ENUM_TIMEFRAMES)_Period;
-          // In Chart Context mode, we don't have a local runtime, so create a temporary market context
-          CMarketDataEngine temp_market_context;
-          if(temp_market_context.Initialize())
-            {
-             if(temp_market_context.GetSnapshot(chart_symbol, view_tf, market))
-               {
-                g_dashboard.RenderMarketView(market);
-               }
-             else
-               {
-                // Render without market data
-                g_dashboard.RenderMarketView(market); // empty snapshot
-               }
-            }
-          else
-            {
-             g_dashboard.RenderMarketView(market); // empty snapshot
-            }
-          // Explicit cleanup: deselect symbol to avoid leaving it selected in market watch
-          SymbolSelect(chart_symbol, false);
-          return;
-         }
-       else
-         {
-          // Registered but no snapshot yet from Coordinator
-          g_dashboard.ShowStatus("WAITING FOR COORDINATOR SNAPSHOT | " + chart_symbol);
-          return;
-         }
-      }
+           // Registered but no snapshot yet from Coordinator
+           g_dashboard.ShowStatus("WAITING FOR COORDINATOR SNAPSHOT | " + chart_symbol);
+           g_dashboard.Render();
+           return;
+          }
+       }
 
     // No local runtime for chart symbol and no coordinator snapshot path available.
     // Report truthful readiness/registration state instead of a misleading configuration error.
@@ -2151,46 +2209,53 @@ if(ReadGVSnapshot(chart_symbol, gv_snap))
          }
       }
 
-    if(g_coordinator_mode == COORD_MODE_CHART_CONTEXT)
+if(g_coordinator_mode == COORD_MODE_CHART_CONTEXT)
       {
        if(g_reg_state == REG_STATE_PENDING || g_reg_state == REG_STATE_UNREGISTERED)
          {
           g_dashboard.ShowStatus("WAITING FOR COORDINATOR REGISTRATION | "+chart_symbol);
+          g_dashboard.Render();
           return;
          }
        if(g_reg_state == REG_STATE_REJECTED)
          {
           g_dashboard.ShowStatus("CHART CONTEXT REGISTRATION REJECTED | "+chart_symbol);
+          g_dashboard.Render();
           return;
          }
        if(g_reg_state == REG_STATE_REGISTERED)
          {
           g_dashboard.ShowStatus("WAITING FOR COORDINATOR SNAPSHOT | "+chart_symbol);
+          g_dashboard.Render();
           return;
          }
-      }
+       }
 
     if(g_coordinator_mode == COORD_MODE_UNAVAILABLE)
       {
        string reason = g_coordinator_unavailable_reason;
        if(reason=="") reason = "UNKNOWN";
        g_dashboard.ShowStatus("COORDINATOR UNAVAILABLE | "+reason+" | "+chart_symbol);
+       g_dashboard.Render();
        return;
       }
 
     if(g_coordinator_mode == COORD_MODE_UNINITIALIZED)
       {
        g_dashboard.ShowStatus("SYSTEM INITIALIZING | "+chart_symbol);
+       g_dashboard.Render();
        return;
       }
 
     if(chart_symbol_in_universe)
       {
        g_dashboard.ShowStatus("WAITING FOR SYMBOL RUNTIME | "+chart_symbol);
+       g_dashboard.Render();
        return;
       }
 
     g_dashboard.ShowStatus("CHART SYMBOL NOT DISCOVERED | "+chart_symbol);
+    g_dashboard.Render();
   }
 
 //+------------------------------------------------------------------+
@@ -2211,8 +2276,8 @@ void ShowRuntimeGateStatus(CSymbolRuntime &runtime,
       runtime.symbol!=ChartSymbol(0))
       return;
 
-    string signal_tf=TimeframeText(runtime.setup_tf);
-   string entry_tf=TimeframeText(runtime.entry_tf);
+   string signal_tf=TimeframeText(runtime.setup_tf);
+    string entry_tf=TimeframeText(runtime.entry_tf);
 
    string dashboard_status=
       status+
@@ -2223,6 +2288,7 @@ void ShowRuntimeGateStatus(CSymbolRuntime &runtime,
 
    g_last_runtime_dashboard_status=dashboard_status;
    g_dashboard.ShowStatus(dashboard_status);
+   g_dashboard.Render();
   }
 
 void LogRuntimeGate(CSymbolRuntime &runtime,
@@ -2259,7 +2325,6 @@ void ProcessHybridDecision(CSymbolRuntime& runtime,
    if(decision.status != DECISION_BUY_CANDIDATE &&
       decision.status != DECISION_SELL_CANDIDATE)
      {
-      g_dashboard.Update(decision, portfolio_state);
 
       if(decision.status==DECISION_NEWS_BLOCKED)
         {
@@ -2457,7 +2522,6 @@ RiskDecision risk;
           legacy_signal.symbol, "", "", legacy_signal.signal_id,
           "REJECT", "EXT_RISK_LOCK", rejection_reason);
         g_logger.Risk(risk);
-        g_dashboard.Update(decision, portfolio_state);
         return;
         }
       }
@@ -2465,7 +2529,6 @@ RiskDecision risk;
     if(!g_risk_engine.Evaluate(legacy_signal, risk))
       {
       g_logger.Risk(risk);
-      g_dashboard.Update(decision, portfolio_state);
       return;
      }
 
@@ -2490,13 +2553,10 @@ RiskDecision risk;
          (double)portfolio_state.total_positions);
 
       g_logger.Risk(risk);
-      g_dashboard.Update(decision, portfolio_state);
       return;
      }
 
-g_dashboard.Update(decision, portfolio_state);
-
-    // P0-2: External Risk Lock check before CanAdmit (independent of RiskEngine)
+// P0-2: External Risk Lock check before CanAdmit (independent of RiskEngine)
     if(g_ext_risk_lock_state_valid && InpExternalRiskLockEnabled)
       {
       string rejection_code, rejection_reason;
@@ -2513,7 +2573,6 @@ g_dashboard.Update(decision, portfolio_state);
           legacy_signal.symbol, "", "", legacy_signal.signal_id,
           "REJECT", "EXT_RISK_LOCK", rejection_reason);
         g_logger.Risk(risk);
-        g_dashboard.Update(decision, portfolio_state);
         return;
         }
       }
@@ -2542,7 +2601,6 @@ g_dashboard.Update(decision, portfolio_state);
          (double)portfolio_state.total_positions);
 
       g_logger.Risk(risk);
-      g_dashboard.Update(decision, portfolio_state);
       return;
       }
 
@@ -4096,6 +4154,25 @@ string ComputeConfigFingerprint()
    return "FP_" + IntegerToString((long)h, 16);
   }
 
+// Convert external Dashboard ViewMode enum to internal m_view_mode
+// External: DASHBOARD_COMPACT=0, DASHBOARD_NORMAL=1, DASHBOARD_FULL=2
+// Internal: 0=FULL, 1=NORMAL, 2=COMPACT
+int DashboardViewModeToInternal(const ENUM_DASHBOARD_VIEW_MODE mode)
+  {
+   switch(mode)
+     {
+      case DASHBOARD_COMPACT:  return 2;
+      case DASHBOARD_NORMAL:   return 1;
+      case DASHBOARD_FULL:     return 0;
+      default:
+       // Invalid enum value - log error and default to FULL (0) with explicit diagnostic
+       g_logger.Event(LOG_ERROR, "INIT", "INVALID_DASHBOARD_VIEW_MODE",
+          _Symbol, "", "", "", "ERROR", "CONFIG",
+          "Invalid InpDashboardViewMode value: " + IntegerToString((int)mode) + ", defaulting to FULL");
+       return 0;
+     }
+  }
+
 int OnInit()
   {
    g_logger.StartRun();
@@ -4149,26 +4226,21 @@ int OnInit()
          "", "", "BacktestMode", "",
          "FAIL", "INIT", "MODE_BACKTEST requires Strategy Tester", 0);
       return INIT_PARAMETERS_INCORRECT;
-     }
-
-g_dashboard.Enable(InpDashboard);
+}
+ 
+ g_dashboard.Enable(InpDashboard);
     g_dashboard.SetTitle("ALGO HYBRID");
     // Apply dashboard config early so it persists even if initialization later fails
-    // InpDashboardViewMode is authoritative; InpDashboardCompact is deprecated (kept for backward compat)
-    int effective_view_mode = InpDashboardViewMode==DASHBOARD_COMPACT?2:(InpDashboardViewMode==DASHBOARD_NORMAL?1:0);
+    int effective_view_mode = DashboardViewModeToInternal(InpDashboardViewMode);
     g_dashboard.SetViewMode(effective_view_mode);
     g_dashboard.ShowDiagnostics(InpDashboardDiagnostics);
-    g_dashboard.ShowOverlay(InpDashboardOverlay);
     g_dashboard.SetSafeMode(InpDashboardSafeMode);
     g_logger.Event(LOG_INFO, "INIT", "DASHBOARD_CONFIG",
        _Symbol, "", "", "", "INFO", "CONFIG",
        "enabled=" + (InpDashboard?"true":"false") +
        " view_mode=" + IntegerToString(effective_view_mode) +
        " diagnostics=" + (InpDashboardDiagnostics?"true":"false") +
-       " overlay=" + (InpDashboardOverlay?"true":"false") +
-       " safe_mode=" + (InpDashboardSafeMode?"true":"false") +
-       " compact_input=" + (InpDashboardCompact?"true":"false") +
-       " (ViewMode authoritative; Compact deprecated)");
+       " safe_mode=" + (InpDashboardSafeMode?"true":"false"));
     g_ea_start_time = TimeCurrent();
 
 // Initialize Metrics Exporter (WP-07)
@@ -4396,6 +4468,7 @@ void OnTimer()
          g_initialization_failed=true;
          g_initialization_started=false;
          g_dashboard.ShowStatus("SYSTEM INITIALIZATION FAILED");
+         g_dashboard.Render();
          return;
         }
      }
@@ -5939,6 +6012,18 @@ void OnDeinit(const int reason)
    EventKillTimer();
    RetryUIClear();
    g_dashboard.Clear();
+   
+   // F18: Clean up runtime objects (CArrayObj ownership - delete all elements)
+   for(int i = g_runtime.Total() - 1; i >= 0; i--)
+     {
+      CSymbolRuntime *runtime = g_runtime.At(i);
+      if(runtime != NULL)
+        {
+         delete runtime;
+        }
+     }
+   g_runtime.Clear();
+   
    g_logger.Shutdown();
    g_system_ready=false;
   }
@@ -5957,30 +6042,46 @@ double OnTester()
 
 //+------------------------------------------------------------------+
 //| Normalize symbol for comparison (remove suffixes/prefixes, upper) |
+//| F14: improved to handle multiple/complex broker suffixes/prefixes |
+//|      and provide consistent normalization for broker<->config map  |
 //+------------------------------------------------------------------+
 string NormalizeSymbolForComparison(const string symbol)
   {
    if(symbol=="") return "";
    string s = symbol;
+   // Remove ALL matching suffixes (not just first) - iterate until no change
    string suffixes[] = {".pro", ".ecn", ".raw", ".std", ".m", ".demo", "#", "+", "_"};
-   for(int i=0; i<ArraySize(suffixes); i++)
+   bool changed = true;
+   while(changed)
      {
-      string suffix = suffixes[i];
-      int pos = StringFind(s, suffix);
-      if(pos >= 0)
+      changed = false;
+      for(int i=0; i<ArraySize(suffixes); i++)
         {
-         s = StringSubstr(s, 0, pos);
-         break;
+         string suffix = suffixes[i];
+         int pos = StringFind(s, suffix);
+         if(pos >= 0 && pos == StringLen(s) - StringLen(suffix)) // suffix at end
+           {
+            s = StringSubstr(s, 0, pos);
+            changed = true;
+            break; // restart loop after modification
+           }
         }
      }
+   // Remove ALL matching prefixes (not just first)
    string prefixes[] = {"m.", "raw.", "ecn.", "pro."};
-   for(int i=0; i<ArraySize(prefixes); i++)
+   changed = true;
+   while(changed)
      {
-      string prefix = prefixes[i];
-      if(StringFind(s, prefix) == 0)
+      changed = false;
+      for(int i=0; i<ArraySize(prefixes); i++)
         {
-         s = StringSubstr(s, StringLen(prefix));
-         break;
+         string prefix = prefixes[i];
+         if(StringFind(s, prefix) == 0)
+           {
+            s = StringSubstr(s, StringLen(prefix));
+            changed = true;
+            break; // restart loop after modification
+           }
         }
      }
    StringToUpper(s);

@@ -4,6 +4,7 @@
 #include "Interfaces.mqh"
 #include "TradeExecutor.mqh"
 #include "ExecutionLedger.mqh"
+#include "Utilities.mqh"
 
 //+------------------------------------------------------------------+
 //| Position Manager                                                 |
@@ -117,34 +118,13 @@ bool IsManagedMagic(const long magic) const
    
       return normalized>0.0;
      }
-   //+----------------------------------------------------------------+
-   //| Strategy from magic                                           |
+//+----------------------------------------------------------------+
+   //| Strategy from magic (uses shared CAlgoUtils)                 |
    //+----------------------------------------------------------------+
    ENUM_STRATEGY_ID StrategyFromMagic(
       const long magic) const
      {
-      if(magic==MAGIC_TREND)
-         return STRATEGY_TREND_PULLBACK;
-
-      if(magic==MAGIC_BREAKOUT)
-         return STRATEGY_BREAKOUT;
-
-      if(magic==MAGIC_MOMENTUM)
-         return STRATEGY_MOMENTUM;
-
-      if(magic==MAGIC_MEAN_REVERSION)
-         return STRATEGY_MEAN_REVERSION;
-
-       if(magic==MAGIC_RELATIVE_VALUE)
-          return STRATEGY_RELATIVE_VALUE;
-
-       // F15: align with PortfolioRisk.StrategyFromMagic — hybrid magics map to TREND_PULLBACK.
-       if(magic==MAGIC_HYBRID_SCALP ||
-          magic==MAGIC_HYBRID_DAY ||
-          magic==MAGIC_HYBRID_SWING)
-          return STRATEGY_TREND_PULLBACK;
-
-       return STRATEGY_NONE;
+      return CAlgoUtils::StrategyFromMagic(magic);
      }
 
    //+----------------------------------------------------------------+
