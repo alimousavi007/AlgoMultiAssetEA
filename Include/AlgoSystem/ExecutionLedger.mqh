@@ -127,58 +127,62 @@ int                   schema_version;
 //+------------------------------------------------------------------+
 class CExecutionLedger
   {
-private:
-   int                m_db_handle;
-   bool               m_initialized;
-   bool               m_db_available;
-   string             m_db_filename;
-   int                m_schema_version;
-   int                m_open_attempts_count;
-   string             m_last_init_stage;
-   string             m_last_init_operation;
-   int                m_last_init_error;
+ private:
+    int                m_db_handle;
+    bool               m_initialized;
+    bool               m_db_available;
+    string             m_db_filename;
+    int                m_schema_version;
+    int                m_open_attempts_count;
+    string             m_last_init_stage;
+    string             m_last_init_operation;
+    int                m_last_init_error;
+    // F03/F04: Instance identity for unique ID generation
+    string             m_instance_token;     // Chart ID + process-unique token
+    ulong              m_run_nonce;          // Random nonce per run
+    ulong              m_id_counter;         // Monotonic counter per instance
 
-   bool               CreateSchema();
-   bool               MigrateSchema();
-    bool               ExecuteSQL(const string sql);
-    bool               LogStateTransitionInTx(const string attempt_id, ENUM_EXEC_ATTEMPT_STATE old_state,
-                                             ENUM_EXEC_ATTEMPT_STATE new_state, const string reason,
-                                             uint retcode=0);
-    bool               PrepareIntentRecord(ExecutionAttemptRecord &record) const;
-    bool               InsertIntentNoTx(const ExecutionAttemptRecord &record);
-    bool               CreateIntentInTx(ExecutionAttemptRecord &record, string &err);
-    bool               AffectedRowsIsOne(bool &ok);
-    // F-002 schema v3 migration helpers (additive, fail-closed on drift/unknown future; best-effort duplicate-column tolerant).
-    bool               TableHasColumn(const string table_name, const string column_name, bool &has_column);
-    bool               MigrateV2ToV3AddColumnBestEffort(const string table_name, const string column_name, const string column_type);
-    bool               VerifyExecutionAttemptsV3Columns();
-    // F-002 durable per-Attempt risk reservation primitives (source foundation).
-    void               InitRiskReservationUnknown(ExecutionAttemptRecord &record) const;
-    void               InitRiskReservationLegacyUnverified(ExecutionAttemptRecord &record) const;
-    bool               NormalizeRiskReservationForPersist(ExecutionAttemptRecord &record, string &err) const;
-    bool               ReadAttemptRiskReservationColumns(int handle, int start_col, ExecutionAttemptRecord &record) const;
-    bool               PopulateRiskReservationFromAttemptParams(const string symbol, ENUM_ORDER_INTENT intent, double volume, double entry_price, double stop_loss, ExecutionAttemptRecord &record, string &err) const;
-    string             GenerateAttemptId();
-    // F-005.2: allocate per-Attempt Magic from non-overlapping range; fails closed on collision/overflow.
-    ulong              GenerateAttemptMagic(string &err);
-    string             EscapeSQL(const string s) const;
-    struct AttemptIdentityEventRef
-      {
-       string claim_id;
-       string group;
-       string lsk;
-       string prior_id;
-       string new_id;
-       int    seq_before;
-       int    seq_after;
-      };
+    bool               CreateSchema();
+    bool               MigrateSchema();
+     bool               ExecuteSQL(const string sql);
+     bool               LogStateTransitionInTx(const string attempt_id, ENUM_EXEC_ATTEMPT_STATE old_state,
+                                              ENUM_EXEC_ATTEMPT_STATE new_state, const string reason,
+                                              uint retcode=0);
+     bool               PrepareIntentRecord(ExecutionAttemptRecord &record) const;
+     bool               InsertIntentNoTx(const ExecutionAttemptRecord &record);
+     bool               CreateIntentInTx(ExecutionAttemptRecord &record, string &err);
+     bool               AffectedRowsIsOne(bool &ok);
+     // F-002 schema v3 migration helpers (additive, fail-closed on drift/unknown future; best-effort duplicate-column tolerant).
+     bool               TableHasColumn(const string table_name, const string column_name, bool &has_column);
+     bool               MigrateV2ToV3AddColumnBestEffort(const string table_name, const string column_name, const string column_type);
+     bool               VerifyExecutionAttemptsV3Columns();
+     // F-002 durable per-Attempt risk reservation primitives (source foundation).
+     void               InitRiskReservationUnknown(ExecutionAttemptRecord &record) const;
+     void               InitRiskReservationLegacyUnverified(ExecutionAttemptRecord &record) const;
+     bool               NormalizeRiskReservationForPersist(ExecutionAttemptRecord &record, string &err) const;
+     bool               PopulateRiskReservationFromAttemptParams(const string symbol, ENUM_ORDER_INTENT intent, double volume, double entry_price, double stop_loss, ExecutionAttemptRecord &record, string &err) const;
+     bool               ReadAttemptRiskReservationColumns(int handle, int start_col, ExecutionAttemptRecord &record) const;
+     string             GenerateAttemptId();
+     // F-005.2: allocate per-Attempt Magic from non-overlapping range; fails closed on collision/overflow.
+     ulong              GenerateAttemptMagic(string &err);
+     string             EscapeSQL(const string s) const;
+     struct AttemptIdentityEventRef
+       {
+        string claim_id;
+        string group;
+        string lsk;
+        string prior_id;
+        string new_id;
+        int    seq_before;
+        int    seq_after;
+       };
 
-public:
-                     CExecutionLedger();
-                    ~CExecutionLedger();
+ public:
+                      CExecutionLedger();
+                     ~CExecutionLedger();
 
-   bool               Initialize(const string db_name="execution_ledger.sqlite");
-   void               Deinitialize();
+    bool               Initialize(const string db_name="execution_ledger.sqlite");
+    void               Deinitialize();
 
 bool               IsInitialized() const { return m_initialized && m_db_available; }
     bool               IsAvailable() const { return m_db_available; }
@@ -497,24 +501,28 @@ bool               CanonicalSameLogicalSetup(const string existing_canonical,
 //+------------------------------------------------------------------+
 CExecutionLedger::CExecutionLedger()
   {
-m_db_handle = INVALID_HANDLE;
-    m_initialized = false;
-    m_db_available = false;
-    m_db_filename = "";
-// E2.6: schema v2 adds retry_approval_events (durable single-use controlled retry audit/idempotency).
-    // Migration source is backward-compatible; live DB migration execution is NOT authorized in this phase.
-    // F-002: schema v3 adds durable per-Attempt risk reservation columns on execution_attempts (additive, tx-safe migration source).
-    // Live DB migration execution is NOT authorized in this task.
-    // F-005.2: schema v4 adds durable per-Attempt broker-visible Magic token (additive, tx-safe migration source).
-    // Live DB migration execution is NOT authorized in this task.
-    // F-005.2.2: schema v5 adds account_key column for ownership resolution (additive, tx-safe migration source).
-    // Live DB migration execution is NOT authorized in this task.
-    m_schema_version = 5;
-    m_open_attempts_count = 0;
-    m_last_init_stage = "";
-    m_last_init_operation = "";
-    m_last_init_error = 0;
-  }
+ m_db_handle = INVALID_HANDLE;
+     m_initialized = false;
+     m_db_available = false;
+     m_db_filename = "";
+ // E2.6: schema v2 adds retry_approval_events (durable single-use controlled retry audit/idempotency).
+     // Migration source is backward-compatible; live DB migration execution is NOT authorized in this phase.
+     // F-002: schema v3 adds durable per-Attempt risk reservation columns on execution_attempts (additive, tx-safe migration source).
+     // Live DB migration execution is NOT authorized in this task.
+     // F-005.2: schema v4 adds durable per-Attempt broker-visible Magic token (additive, tx-safe migration source).
+     // Live DB migration execution is NOT authorized in this task.
+     // F-005.2.2: schema v5 adds account_key column for ownership resolution (additive, tx-safe migration source).
+     // Live DB migration execution is NOT authorized in this task.
+     m_schema_version = 5;
+     m_open_attempts_count = 0;
+     m_last_init_stage = "";
+     m_last_init_operation = "";
+     m_last_init_error = 0;
+     // F03/F04: Initialize instance identity for unique ID generation
+     m_instance_token = "CHART_" + IntegerToString((long)ChartID()) + "_" + IntegerToString(GetTickCount64());
+     m_run_nonce = (ulong)GetTickCount64() ^ (ulong)MathRand() ^ ((ulong)ChartID() << 32);
+     m_id_counter = 0;
+   }
 
 //+------------------------------------------------------------------+
 //| Destructor                                                        |
@@ -911,6 +919,7 @@ ResetLastError();
 //| Live DB migration execution is NOT authorized in this phase.      |
 //| Idempotent: CREATE TABLE IF NOT EXISTS and schema meta updates;   |
 //| fail-closed on unsupported/partial states.                        |
+//| F12: Improved error handling with transaction support and per-step verification.
 //+------------------------------------------------------------------+
 bool CExecutionLedger::MigrateSchema()
   {
@@ -941,9 +950,21 @@ bool CExecutionLedger::MigrateSchema()
       m_last_init_error = 0;
       return false;
      }
+   // Begin transaction for migration (SQLite supports DDL in transactions)
+   if(!DatabaseTransactionBegin(m_db_handle))
+     {
+      m_last_init_stage = "ExecutionLedger.MigrateSchema";
+      m_last_init_operation = "DatabaseTransactionBegin";
+      m_last_init_error = GetLastError();
+      return false;
+     }
+   bool migration_ok = true;
+   string migration_stage = "";
+   
    // v1 -> v2: ensure retry_approval_events exists (additive, backward-compatible).
    if(current < 2)
      {
+      migration_stage = "v1->v2:CREATE_RETRY_APPROVAL_EVENTS";
       string sql6 = "CREATE TABLE IF NOT EXISTS retry_approval_events ("
                    "action_id TEXT PRIMARY KEY,"
                    "claim_id TEXT NOT NULL,"
@@ -973,109 +994,170 @@ bool CExecutionLedger::MigrateSchema()
                    ");";
       if(!ExecuteSQL(sql6))
         {
+         migration_ok = false;
          m_last_init_stage = "ExecutionLedger.MigrateSchema";
-         m_last_init_operation = "ExecuteSQL(v1->v2:CREATE_RETRY_APPROVAL_EVENTS)";
+         m_last_init_operation = "ExecuteSQL(" + migration_stage + ")";
          m_last_init_error = GetLastError();
-         return false;
         }
-      current = 2;
-      string set_ver2 = "INSERT OR REPLACE INTO execution_schema_meta (key, value) VALUES ('schema_version', '2');";
-      if(!ExecuteSQL(set_ver2))
+      if(migration_ok)
         {
-         m_last_init_stage = "ExecutionLedger.MigrateSchema";
-         m_last_init_operation = "ExecuteSQL(v1->v2:set_schema_version)";
-         m_last_init_error = GetLastError();
-         return false;
+         current = 2;
+         string set_ver2 = "INSERT OR REPLACE INTO execution_schema_meta (key, value) VALUES ('schema_version', '2');";
+         if(!ExecuteSQL(set_ver2))
+           {
+            migration_ok = false;
+            m_last_init_stage = "ExecutionLedger.MigrateSchema";
+            m_last_init_operation = "ExecuteSQL(v1->v2:set_schema_version)";
+            m_last_init_error = GetLastError();
+           }
         }
      }
    // v2 -> v3 (F-002): additive durable per-Attempt risk reservation columns on execution_attempts.
-   // No ALTER TABLE expression defaults (SQLite/MQL5 compatibility). Legacy rows receive NULL reservation fields
-   // and MUST be treated as LEGACY_UNVERIFIED by readers/arbitration (never 0 risk). Idempotent best-effort adds.
-   if(current < 3)
+   if(migration_ok && current < 3)
      {
-      // Best-effort additive ALTERs; duplicate-column is treated as already-migrated for that column.
-      MigrateV2ToV3AddColumnBestEffort("execution_attempts", "risk_reserve_initial_amount", "REAL");
-      MigrateV2ToV3AddColumnBestEffort("execution_attempts", "risk_reserve_remaining_amount", "REAL");
-      MigrateV2ToV3AddColumnBestEffort("execution_attempts", "risk_reserve_currency", "TEXT");
-      MigrateV2ToV3AddColumnBestEffort("execution_attempts", "risk_reserve_equity_snapshot", "REAL");
-      MigrateV2ToV3AddColumnBestEffort("execution_attempts", "risk_reserve_percent_snapshot", "REAL");
-      MigrateV2ToV3AddColumnBestEffort("execution_attempts", "risk_reserve_model_version", "INTEGER");
-      MigrateV2ToV3AddColumnBestEffort("execution_attempts", "risk_reserve_state", "INTEGER");
-      MigrateV2ToV3AddColumnBestEffort("execution_attempts", "risk_reserve_revision", "INTEGER");
-      MigrateV2ToV3AddColumnBestEffort("execution_attempts", "risk_reserve_updated_at", "INTEGER");
-      MigrateV2ToV3AddColumnBestEffort("execution_attempts", "risk_reserve_release_reason", "TEXT");
-      if(!VerifyExecutionAttemptsV3Columns())
+      migration_stage = "v2->v3:ADD_RISK_RESERVE_COLUMNS";
+      // Add each column with verification
+      struct MigrationColumn { string name; string type; };
+      MigrationColumn cols[10];
+      cols[0].name = "risk_reserve_initial_amount"; cols[0].type = "REAL";
+      cols[1].name = "risk_reserve_remaining_amount"; cols[1].type = "REAL";
+      cols[2].name = "risk_reserve_currency"; cols[2].type = "TEXT";
+      cols[3].name = "risk_reserve_equity_snapshot"; cols[3].type = "REAL";
+      cols[4].name = "risk_reserve_percent_snapshot"; cols[4].type = "REAL";
+      cols[5].name = "risk_reserve_model_version"; cols[5].type = "INTEGER";
+      cols[6].name = "risk_reserve_state"; cols[6].type = "INTEGER";
+      cols[7].name = "risk_reserve_revision"; cols[7].type = "INTEGER";
+      cols[8].name = "risk_reserve_updated_at"; cols[8].type = "INTEGER";
+      cols[9].name = "risk_reserve_release_reason"; cols[9].type = "TEXT";
+      
+      for(int i = 0; i < 10; i++)
         {
-         m_last_init_stage = "ExecutionLedger.MigrateSchema";
-         m_last_init_operation = "ExecuteSQL(v2->v3:VERIFY_EXECUTION_ATTEMPTS_V3_COLUMNS)";
-         m_last_init_error = GetLastError();
-         return false;
+         if(!MigrateV2ToV3AddColumnBestEffort("execution_attempts", cols[i].name, cols[i].type))
+           {
+            migration_ok = false;
+            m_last_init_stage = "ExecutionLedger.MigrateSchema";
+            m_last_init_operation = "MigrateV2ToV3AddColumnBestEffort(" + cols[i].name + ")";
+            m_last_init_error = GetLastError();
+            break;
+           }
         }
-      string set_ver3 = "INSERT OR REPLACE INTO execution_schema_meta (key, value) VALUES ('schema_version', '3');";
-if(!ExecuteSQL(set_ver3))
-         {
-          m_last_init_stage = "ExecutionLedger.MigrateSchema";
-          m_last_init_operation = "ExecuteSQL(v2->v3:set_schema_version)";
-          m_last_init_error = GetLastError();
-          return false;
-         }
-      }
-    // v3 -> v4 (F-005.2): additive durable per-Attempt broker-visible Magic token column on execution_attempts.
-    // Legacy rows receive NULL/0 attempt_magic; callers must treat as legacy (not used for broker correlation).
-    if(current < 4)
-      {
-       // Best-effort additive ALTER; duplicate-column is treated as already-migrated.
-       MigrateV2ToV3AddColumnBestEffort("execution_attempts", "attempt_magic", "INTEGER");
-       // Verify column exists (best-effort; same helper used for v3 columns).
-       bool has_col = false;
-       if(!TableHasColumn("execution_attempts", "attempt_magic", has_col) || !has_col)
-         {
-          m_last_init_stage = "ExecutionLedger.MigrateSchema";
-          m_last_init_operation = "ExecuteSQL(v3->v4:VERIFY_ATTEMPT_MAGIC_COLUMN)";
-          m_last_init_error = GetLastError();
-          return false;
-         }
-string set_ver4 = "INSERT OR REPLACE INTO execution_schema_meta (key, value) VALUES ('schema_version', '4');";
-        if(!ExecuteSQL(set_ver4))
-          {
-           m_last_init_stage = "ExecutionLedger.MigrateSchema";
-           m_last_init_operation = "ExecuteSQL(v3->v4:set_schema_version)";
-           m_last_init_error = GetLastError();
-           return false;
-          }
-       }
-     // v4 -> v5 (F-005.2.2): additive account_key column for ownership resolution.
-     // Legacy rows receive NULL account_key => external scope, not EA-owned.
-     if(current < 5)
-       {
-        MigrateV2ToV3AddColumnBestEffort("execution_attempts", "account_key", "TEXT");
-        bool has_col = false;
-        if(!TableHasColumn("execution_attempts", "account_key", has_col) || !has_col)
-          {
-           m_last_init_stage = "ExecutionLedger.MigrateSchema";
-           m_last_init_operation = "ExecuteSQL(v4->v5:VERIFY_ACCOUNT_KEY_COLUMN)";
-           m_last_init_error = GetLastError();
-           return false;
-          }
-        string set_ver5 = "INSERT OR REPLACE INTO execution_schema_meta (key, value) VALUES ('schema_version', '5');";
-        if(!ExecuteSQL(set_ver5))
-          {
-           m_last_init_stage = "ExecutionLedger.MigrateSchema";
-           m_last_init_operation = "ExecuteSQL(v4->v5:set_schema_version)";
-           m_last_init_error = GetLastError();
-           return false;
-          }
-       }
-     return true;
-   }
+      if(migration_ok && !VerifyExecutionAttemptsV3Columns())
+        {
+         migration_ok = false;
+         m_last_init_stage = "ExecutionLedger.MigrateSchema";
+         m_last_init_operation = "ExecuteSQL(" + migration_stage + ":VERIFY)";
+         m_last_init_error = GetLastError();
+        }
+      if(migration_ok)
+        {
+         string set_ver3 = "INSERT OR REPLACE INTO execution_schema_meta (key, value) VALUES ('schema_version', '3');";
+         if(!ExecuteSQL(set_ver3))
+           {
+            migration_ok = false;
+            m_last_init_stage = "ExecutionLedger.MigrateSchema";
+            m_last_init_operation = "ExecuteSQL(v2->v3:set_schema_version)";
+            m_last_init_error = GetLastError();
+           }
+        }
+     }
+   // v3 -> v4 (F-005.2): additive durable per-Attempt broker-visible Magic token column on execution_attempts.
+   if(migration_ok && current < 4)
+     {
+      migration_stage = "v3->v4:ADD_ATTEMPT_MAGIC";
+      if(!MigrateV2ToV3AddColumnBestEffort("execution_attempts", "attempt_magic", "INTEGER"))
+        {
+         migration_ok = false;
+         m_last_init_stage = "ExecutionLedger.MigrateSchema";
+         m_last_init_operation = "MigrateV2ToV3AddColumnBestEffort(attempt_magic)";
+         m_last_init_error = GetLastError();
+        }
+      if(migration_ok)
+        {
+         bool has_col = false;
+         if(!TableHasColumn("execution_attempts", "attempt_magic", has_col) || !has_col)
+           {
+            migration_ok = false;
+            m_last_init_stage = "ExecutionLedger.MigrateSchema";
+            m_last_init_operation = "ExecuteSQL(" + migration_stage + ":VERIFY)";
+            m_last_init_error = GetLastError();
+           }
+        }
+      if(migration_ok)
+        {
+         string set_ver4 = "INSERT OR REPLACE INTO execution_schema_meta (key, value) VALUES ('schema_version', '4');";
+         if(!ExecuteSQL(set_ver4))
+           {
+            migration_ok = false;
+            m_last_init_stage = "ExecutionLedger.MigrateSchema";
+            m_last_init_operation = "ExecuteSQL(v3->v4:set_schema_version)";
+            m_last_init_error = GetLastError();
+           }
+        }
+     }
+   // v4 -> v5 (F-005.2.2): additive account_key column for ownership resolution.
+   if(migration_ok && current < 5)
+     {
+      migration_stage = "v4->v5:ADD_ACCOUNT_KEY";
+      if(!MigrateV2ToV3AddColumnBestEffort("execution_attempts", "account_key", "TEXT"))
+        {
+         migration_ok = false;
+         m_last_init_stage = "ExecutionLedger.MigrateSchema";
+         m_last_init_operation = "MigrateV2ToV3AddColumnBestEffort(account_key)";
+         m_last_init_error = GetLastError();
+        }
+      if(migration_ok)
+        {
+         bool has_col = false;
+         if(!TableHasColumn("execution_attempts", "account_key", has_col) || !has_col)
+           {
+            migration_ok = false;
+            m_last_init_stage = "ExecutionLedger.MigrateSchema";
+            m_last_init_operation = "ExecuteSQL(" + migration_stage + ":VERIFY)";
+            m_last_init_error = GetLastError();
+           }
+        }
+      if(migration_ok)
+        {
+         string set_ver5 = "INSERT OR REPLACE INTO execution_schema_meta (key, value) VALUES ('schema_version', '5');";
+         if(!ExecuteSQL(set_ver5))
+           {
+            migration_ok = false;
+            m_last_init_stage = "ExecutionLedger.MigrateSchema";
+            m_last_init_operation = "ExecuteSQL(v4->v5:set_schema_version)";
+            m_last_init_error = GetLastError();
+           }
+        }
+     }
+   
+   // Commit or rollback based on migration result
+   if(migration_ok)
+     {
+      if(!DatabaseTransactionCommit(m_db_handle))
+        {
+         migration_ok = false;
+         m_last_init_stage = "ExecutionLedger.MigrateSchema";
+         m_last_init_operation = "DatabaseTransactionCommit";
+         m_last_init_error = GetLastError();
+        }
+     }
+   else
+     {
+      // Rollback on any failure
+      DatabaseTransactionRollback(m_db_handle);
+     }
+   
+   return migration_ok;
+  }
 
 //+------------------------------------------------------------------+
 //| Generate Attempt ID                                               |
 //+------------------------------------------------------------------+
 string CExecutionLedger::GenerateAttemptId()
   {
-   datetime now = TimeCurrent();
-   string id = "ATT_" + IntegerToString((long)now) + "_" + IntegerToString(MathRand()) + "_" + IntegerToString(GetTickCount());
+   // F03: Use instance token + run nonce + monotonic counter for collision-resistant IDs
+   // Format: ATT_<instance_token>_<run_nonce>_<counter>
+   m_id_counter++;
+   string id = "ATT_" + m_instance_token + "_" + IntegerToString((long)m_run_nonce) + "_" + IntegerToString((long)m_id_counter);
    return id;
   }
 
@@ -3661,11 +3743,13 @@ CExecutionLedger::ENUM_CLAIM_RESULT CExecutionLedger::CreateSetupClaimAndIntent(
       error_reason="CLAIM_ALREADY_EXISTS";
       return CLAIM_ALREADY_EXISTS;
      }
-   if(!DatabaseTransactionBegin(m_db_handle))
-     { error_reason="BEGIN_TX_FAILED"; return CLAIM_ERROR; }
-   // Insert claim bound to this attempt_id
-   string claim_id = "CLAIM_" + IntegerToString((long)TimeCurrent()) + "_" + IntegerToString(MathRand());
-   datetime now = TimeCurrent();
+if(!DatabaseTransactionBegin(m_db_handle))
+      { error_reason="BEGIN_TX_FAILED"; return CLAIM_ERROR; }
+    // Insert claim bound to this attempt_id
+    // F04: Use instance token + run nonce + monotonic counter for collision-resistant claim IDs
+    m_id_counter++;
+    string claim_id = "CLAIM_" + m_instance_token + "_" + IntegerToString((long)m_run_nonce) + "_" + IntegerToString((long)m_id_counter);
+    datetime now = TimeCurrent();
    string insert_claim = "INSERT INTO setup_claims (claim_id, strategy_group_key, logical_setup_key, canonical_identity, "
                          "serialization_version, claim_state, current_attempt_id, retry_sequence, created_at, updated_at, last_reason) "
                          "VALUES ('" + EscapeSQL(claim_id) + "','" + EscapeSQL(strategy_group_key) + "','" +

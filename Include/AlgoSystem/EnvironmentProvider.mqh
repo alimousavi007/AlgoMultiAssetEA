@@ -358,18 +358,24 @@ public:
       m_account_key = account_key;
      }
 
-   // Configuration methods for tests
-   void SetEquity(const double equity) { m_equity = equity; }
-   void SetBalance(const double balance) { m_balance = balance; }
-   void SetFreeMargin(const double margin) { m_free_margin = margin; }
-   void SetTradeAllowed(const bool allowed) { m_trade_allowed = allowed; }
-   void SetTradeExpert(const bool expert) { m_trade_expert = expert; }
-   void SetAccountKey(const string key) { m_account_key = key; }
-   void SetLogin(const long login) { m_login = login; }
-   void SetServer(const string server) { m_server = server; }
-   void SetCurrency(const string currency) { m_currency = currency; }
+// Configuration methods for tests
+    void SetEquity(const double equity) { m_equity = equity; }
+    void SetBalance(const double balance) { m_balance = balance; }
+    void SetFreeMargin(const double margin) { m_free_margin = margin; }
+    void SetTradeAllowed(const bool allowed) { m_trade_allowed = allowed; }
+    void SetTradeExpert(const bool expert) { m_trade_expert = expert; }
+    void SetAccountKey(const string key) { m_account_key = key; }
+    void SetLogin(const long login) { m_login = login; }
+    void SetServer(const string server) { m_server = server; }
+    void SetCurrency(const string currency) { m_currency = currency; }
 
-void AddPosition(const ulong ticket, const string symbol, const long magic,
+    // F11: Refresh - clear all arrays to prevent unbounded accumulation across test iterations
+    void Refresh()
+      {
+       ClearAll();
+      }
+
+    void AddPosition(const ulong ticket, const string symbol, const long magic,
                      const double volume, const double price_open,
                      const double sl, const double tp,
                      const ENUM_POSITION_TYPE type, const long identifier)

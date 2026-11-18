@@ -4,8 +4,5 @@
     ".kilo/rules/core.md",
     ".kilo/rules/mql5.md"
   ],
-  "plugin": [
-    "@dietrichgebert/ponytail@5.3.3"
-  ],
   "snapshot": false
 }
