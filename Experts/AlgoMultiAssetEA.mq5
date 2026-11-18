@@ -3961,19 +3961,15 @@ g_execution_ledger.ExpireStaleAuthority(authority_key, 30, expire_reason, g_owne
       LOG_INFO, "SYSTEM", "SYSTEM_READY",
       _Symbol, EnumToString((ENUM_TIMEFRAMES)_Period), "", "",
       "READY", "INIT_COMPLETE",
-      "AlgoMultiAssetEA Hybrid version="+
-      ALGO_SYSTEM_VERSION+
-      " style="+StyleName(InpTradingStyle)+
-      " mode="+IntegerToString((int)InpMode)+
-      " runtimes_ready="+IntegerToString(runtime_count));
+"AlgoMultiAssetEA Hybrid version="+
+       ALGO_SYSTEM_VERSION+
+       " style="+StyleName(InpTradingStyle)+
+       " mode="+IntegerToString((int)InpMode)+
+       " runtimes_ready="+IntegerToString(runtime_count));
 
-   g_dashboard.SetViewMode(InpDashboardViewMode==DASHBOARD_COMPACT?2:(InpDashboardViewMode==DASHBOARD_NORMAL?1:0));
-   g_dashboard.ShowDiagnostics(InpDashboardDiagnostics);
-   g_dashboard.ShowOverlay(InpDashboardOverlay);
-
-   UpdateDashboardForChart();
-   return SYSTEM_INIT_READY;
-  }
+    UpdateDashboardForChart();
+    return SYSTEM_INIT_READY;
+   }
 
 //==================================================================
 // OnInit
@@ -4155,9 +4151,25 @@ int OnInit()
       return INIT_PARAMETERS_INCORRECT;
      }
 
-   g_dashboard.Enable(InpDashboard);
-   g_dashboard.SetTitle("ALGO HYBRID");
-   g_ea_start_time = TimeCurrent();
+g_dashboard.Enable(InpDashboard);
+    g_dashboard.SetTitle("ALGO HYBRID");
+    // Apply dashboard config early so it persists even if initialization later fails
+    // InpDashboardViewMode is authoritative; InpDashboardCompact is deprecated (kept for backward compat)
+    int effective_view_mode = InpDashboardViewMode==DASHBOARD_COMPACT?2:(InpDashboardViewMode==DASHBOARD_NORMAL?1:0);
+    g_dashboard.SetViewMode(effective_view_mode);
+    g_dashboard.ShowDiagnostics(InpDashboardDiagnostics);
+    g_dashboard.ShowOverlay(InpDashboardOverlay);
+    g_dashboard.SetSafeMode(InpDashboardSafeMode);
+    g_logger.Event(LOG_INFO, "INIT", "DASHBOARD_CONFIG",
+       _Symbol, "", "", "", "INFO", "CONFIG",
+       "enabled=" + (InpDashboard?"true":"false") +
+       " view_mode=" + IntegerToString(effective_view_mode) +
+       " diagnostics=" + (InpDashboardDiagnostics?"true":"false") +
+       " overlay=" + (InpDashboardOverlay?"true":"false") +
+       " safe_mode=" + (InpDashboardSafeMode?"true":"false") +
+       " compact_input=" + (InpDashboardCompact?"true":"false") +
+       " (ViewMode authoritative; Compact deprecated)");
+    g_ea_start_time = TimeCurrent();
 
 // Initialize Metrics Exporter (WP-07)
     g_metrics_exporter.Initialize(&g_logger, IntegerToString((long)ChartID()), 10);

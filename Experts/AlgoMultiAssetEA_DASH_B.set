@@ -1,8 +1,9 @@
 ; AlgoMultiAssetEA Dashboard Test SET B
-; Generated: 2026-11-15
+; Generated: 2026-11-17
 ; Version: 1.002
 ; Purpose: Visual Strategy Tester A/B test - Dashboard configuration B
 ; Safe Dashboard-Only Mode: ENABLED (blocks all broker mutations)
+; A/B ISOLATION: Only presentation/diagnostic params differ from DASH_A (Strategy Group Key is intentionally different for isolated strategy groups)
 
 ; === 01. General & Trading Mode ===
 InpTradingStyle=1
@@ -11,11 +12,8 @@ InpMode=0
 InpLiveAutoConfirm=false
 InpDashboardViewMode=0
 InpDashboard=true
-InpDashboardCompact=true
-InpDashboardOverlay=false
 InpDashboardDiagnostics=true
 InpDashboardSafeMode=true
-InpEnforceSafeModeInTester=true
 InpLogLevel=2
 InpLogFile=true
 InpLogFlushEachWrite=true
@@ -24,25 +22,25 @@ InpLogSummarySeconds=60
 ; === 02. Trading Symbols ===
 
 ; === 03. Hybrid Decision ===
-InpMinRR=1.80
-InpMinScore=75.0
-InpConflictThreshold=10.0
-InpEntryToleranceScalp=3.0
-InpEntryToleranceDay=15.0
-InpEntryToleranceSwing=40.0
-InpAllowMeanReversion=true
+InpMinRR=1.50
+InpMinScore=70.0
+InpConflictThreshold=15.0
+InpEntryToleranceScalp=5.0
+InpEntryToleranceDay=20.0
+InpEntryToleranceSwing=50.0
+InpAllowMeanReversion=false
 
 ; === 04. Volume Profile ===
-InpProfileSessionBars=52
-InpProfileRollingBars=104
-InpValueAreaPercent=0.70
+InpProfileSessionBars=78
+InpProfileRollingBars=156
+InpValueAreaPercent=0.68
 InpProfileEnabled=true
 
 ; === 05. Liquidity & Market Structure ===
-InpSwingLookback=7
-InpEqualTolerancePoints=2
-InpMaxLevelAgeBars=80
-InpSweepConfirmBars=2
+InpSwingLookback=5
+InpEqualTolerancePoints=3
+InpMaxLevelAgeBars=100
+InpSweepConfirmBars=3
 
 ; === 06. Divergence & Momentum ===
 InpRSIPeriod=14
@@ -50,37 +48,37 @@ InpMACD_Fast=12
 InpMACD_Slow=26
 InpMACD_Signal=9
 InpPivotTolerancePercent=0.02
-InpMaxDivergenceAgeBars=25
-InpMomentumLookback=40
+InpMaxDivergenceAgeBars=30
+InpMomentumLookback=50
 
 ; === 07. Market Regime ===
 InpADXPeriod=14
-InpADXTrendThreshold=20
-InpHighVolatilityRatio=1.30
-InpLowVolatilityRatio=0.60
-InpRangeLookback=25
-InpHysteresisBars=2
+InpADXTrendThreshold=25
+InpHighVolatilityRatio=1.50
+InpLowVolatilityRatio=0.70
+InpRangeLookback=20
+InpHysteresisBars=3
 
 ; === 08. News Filter ===
-InpNewsBlackoutBefore=45
-InpNewsBlackoutAfter=45
-InpNewsCooldown=90
-InpNewsImpactThreshold=2
+InpNewsBlackoutBefore=30
+InpNewsBlackoutAfter=30
+InpNewsCooldown=60
+InpNewsImpactThreshold=3
 InpNewsPreventEntries=true
 InpNewsCloseOnNews=false
 InpNewsEnabled=true
 
 ; === 09. Risk Management ===
-InpRiskPercent=0.5
-InpDailyLossLimit=2.0
-InpMonthlyLossLimit=5.0
-InpMaxConsecutiveLosses=3
-InpMaxPositionsTotal=8
+InpRiskPercent=1.0
+InpDailyLossLimit=3.0
+InpMonthlyLossLimit=6.0
+InpMaxConsecutiveLosses=5
+InpMaxPositionsTotal=10
 InpMaxPositionsPerSymbol=1
-InpMaxPositionsPerStrategy=1
-InpMaxPortfolioRisk=2.0
-InpMarginSafetyFraction=0.85
-InpDeviationPoints=15
+InpMaxPositionsPerStrategy=2
+InpMaxPortfolioRisk=3.0
+InpMarginSafetyFraction=0.80
+InpDeviationPoints=20
 
 ; === 09b. External Risk Lock ===
 InpExternalRiskLockEnabled=false
@@ -90,29 +88,29 @@ InpExternalRiskLockFailClosed=true
 
 ; === 10. Trading Sessions & Market Filters ===
 InpSessionFilter=true
-InpSessionStartHour=8
-InpSessionEndHour=20
+InpSessionStartHour=0
+InpSessionEndHour=24
 InpUseSpreadFilter=true
-InpMaxSpreadPoints=30
+InpMaxSpreadPoints=50
 
 ; === 11. Dashboard & Diagnostics ===
 InpDashboardCompact=true
 InpDashboardOverlay=false
 
 ; === 12. Position Management ===
-InpBreakEven=true
-InpBreakEvenTriggerR=1.5
-InpBreakEvenOffsetPoints=5.0
-InpTrailing=true
+InpBreakEven=false
+InpBreakEvenTriggerR=1.0
+InpBreakEvenOffsetPoints=0.0
+InpTrailing=false
 InpTrailingTF=16385
 InpTrailingATRPeriod=14
-InpTrailingATRMultiplier=1.5
-InpTimeExit=true
-InpMaxHoldingMinutes=120
+InpTrailingATRMultiplier=2.0
+InpTimeExit=false
+InpMaxHoldingMinutes=240
 
 ; === 13. Data Freshness ===
 InpFreshnessContextSeconds=300
 InpFreshnessStructureSeconds=300
 InpFreshnessSetupSeconds=300
 InpFreshnessEntrySeconds=60
-InpFreshnessOverrides=EURUSD:CONTEXT=120,STRUCTURE=120,SETUP=120,ENTRY=30;GBPUSD:CONTEXT=120,STRUCTURE=120,SETUP=120,ENTRY=30
+InpFreshnessOverrides=
