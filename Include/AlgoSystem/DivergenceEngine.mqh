@@ -8,37 +8,30 @@
 //| Divergence Engine                                                 |
 //|                                                                  |
 //| Detects regular and hidden divergence using confirmed RSI pivots.|
-//| MACD histogram is read but not currently used in divergence logic;|
-//| RSI-only versus RSI+MACD combination requires strategy decision. |
+//| MACD histogram was previously read but not used in divergence logic;|
+//| RSI-only strategy confirmed per P1 scope.                       |
 //+------------------------------------------------------------------+
 class CDivergenceEngine
   {
 private:
-   string             m_symbol;
-   ENUM_TIMEFRAMES    m_timeframe;
+    string             m_symbol;
+    ENUM_TIMEFRAMES    m_timeframe;
 
-    int                m_rsi_period;
-    int                m_macd_fast;
-    int                m_macd_slow;
-    int                m_macd_signal_period;
-   int                m_lookback;
-   double             m_pivot_tolerance_percent;
-   int                m_max_age_bars;
+     int                m_rsi_period;
+     int                m_lookback;
+    double             m_pivot_tolerance_percent;
+    int                m_max_age_bars;
 
-   bool               m_initialized;
-   datetime           m_last_bar_time;
+    bool               m_initialized;
+    datetime           m_last_bar_time;
 
 ENUM_DIVERGENCE_TYPE m_last_divergence;
     datetime            m_last_divergence_time;
     datetime            m_last_pivot_time;
 
     int                 m_rsi_handle;
-    int                 m_macd_main_handle;
-    int                 m_macd_signal_handle;
 
     double              m_rsi[];
-    double              m_macd_main[];
-    double              m_macd_signal[];
 
 private:
     bool CreateHandles()
@@ -50,13 +43,6 @@ private:
         if(m_rsi_handle == INVALID_HANDLE)
             return false;
 
-        m_macd_main_handle = iMACD(
-            m_symbol, m_timeframe,
-            m_macd_fast, m_macd_slow, m_macd_signal_period,
-            PRICE_CLOSE);
-        if(m_macd_main_handle == INVALID_HANDLE)
-            return false;
-
         return true;
     }
 
@@ -64,16 +50,13 @@ private:
     {
         if(m_rsi_handle != INVALID_HANDLE)
             IndicatorRelease(m_rsi_handle);
-        if(m_macd_main_handle != INVALID_HANDLE)
-            IndicatorRelease(m_macd_main_handle);
 
         m_rsi_handle = INVALID_HANDLE;
-        m_macd_main_handle = INVALID_HANDLE;
     }
 
     bool CopyIndicatorData(int lookback)
     {
-        if(m_rsi_handle == INVALID_HANDLE || m_macd_main_handle == INVALID_HANDLE)
+        if(m_rsi_handle == INVALID_HANDLE)
             return false;
 
         ResetLastError();
@@ -82,19 +65,7 @@ private:
         if(copied_rsi <= 0)
             return false;
 
-        double macd_main[], macd_signal[];
-        int copied_macd = CopyBuffer(m_macd_main_handle, 0, 0, lookback, macd_main);
-        int copied_signal = CopyBuffer(m_macd_main_handle, 1, 0, lookback, macd_signal);
-
-        if(copied_macd <= 0 || copied_signal <= 0)
-            return false;
-
-        ArrayCopy(m_macd_main, macd_main);
-        ArrayCopy(m_macd_signal, macd_signal);
-
         ArraySetAsSeries(m_rsi, true);
-        ArraySetAsSeries(m_macd_main, true);
-        ArraySetAsSeries(m_macd_signal, true);
 
         return true;
     }
@@ -181,39 +152,29 @@ private:
 
 public:
    CDivergenceEngine()
-     {
-      m_symbol="";
-      m_timeframe=PERIOD_H1;
-      m_rsi_period=14;
-      m_macd_fast=12;
-      m_macd_slow=26;
-      m_macd_signal_period=9;
-      m_lookback=100;
-      m_pivot_tolerance_percent=0.02;
-      m_max_age_bars=30;
-      m_initialized=false;
-      m_last_bar_time=0;
-      m_last_divergence=DIVERGENCE_NONE;
-      m_last_divergence_time=0;
-      m_last_pivot_time=0;
-      m_rsi_handle=INVALID_HANDLE;
-      m_macd_main_handle=INVALID_HANDLE;
-     }
+{
+       m_symbol="";
+       m_timeframe=PERIOD_H1;
+       m_rsi_period=14;
+       m_lookback=100;
+       m_pivot_tolerance_percent=0.02;
+       m_max_age_bars=30;
+       m_initialized=false;
+       m_last_bar_time=0;
+       m_last_divergence=DIVERGENCE_NONE;
+       m_last_divergence_time=0;
+       m_last_pivot_time=0;
+       m_rsi_handle=INVALID_HANDLE;
+      }
 
-   void SetParameters(int rsi_period,
-                      int macd_fast,
-                      int macd_slow,
-                      int macd_signal,
-                      double pivot_tolerance_percent,
-                      int max_age_bars)
-     {
-      m_rsi_period=rsi_period;
-      m_macd_fast=macd_fast;
-      m_macd_slow=macd_slow;
-      m_macd_signal_period=macd_signal;
-      m_pivot_tolerance_percent=pivot_tolerance_percent;
-      m_max_age_bars=max_age_bars;
-     }
+    void SetParameters(int rsi_period,
+                       double pivot_tolerance_percent,
+                       int max_age_bars)
+      {
+       m_rsi_period=rsi_period;
+       m_pivot_tolerance_percent=pivot_tolerance_percent;
+       m_max_age_bars=max_age_bars;
+      }
 
    bool Initialize(const string symbol,
                    ENUM_TIMEFRAMES timeframe)

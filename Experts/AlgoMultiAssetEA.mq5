@@ -79,9 +79,6 @@ input(name="Sweep Confirmation Bars")      int                InpSweepConfirmBar
 
 input group "06. Divergence & Momentum"
 input(name="RSI Period")                   int                InpRSIPeriod=14;
-input(name="MACD Fast EMA")                int                InpMACD_Fast=12;
-input(name="MACD Slow EMA")                int                InpMACD_Slow=26;
-input(name="MACD Signal EMA")              int                InpMACD_Signal=9;
 input(name="Pivot Tolerance (%)")          double             InpPivotTolerancePercent=0.02;
 input(name="Max Divergence Age (Bars)")    int                InpMaxDivergenceAgeBars=30;
 input(name="Momentum Lookback (Bars)")     int                InpMomentumLookback=50;
@@ -594,6 +591,18 @@ public:
     datetime           state_entered_time;
     int                retry_count;
 
+    // Signal pipeline caching - avoids redundant data fetching and feature calculation
+    MarketSnapshot     cached_context_market;
+    MarketSnapshot     cached_structure_market;
+    MarketSnapshot     cached_setup_market;
+    MarketSnapshot     cached_entry_market;
+    FeatureSet         cached_context_features;
+    FeatureSet         cached_structure_features;
+    FeatureSet         cached_setup_features;
+    FeatureSet         cached_entry_features;
+    bool               cache_valid;
+    datetime           cache_bar_time;
+
                         CSymbolRuntime()
     {
      symbol="";
@@ -616,22 +625,26 @@ public:
      state_entered_time = 0;
      retry_count = 0;
 
-     snapshot_generation=0;
-     snapshot.generation=0;
-     snapshot.snapshot_time=0;
-     snapshot.last_success_time=0;
-     snapshot.current_stage_code=0;
-     snapshot.last_block_reason_code=0;
-     snapshot.configured_style=STYLE_DAY_TRADING;
-     snapshot.regime_code=0;
-     snapshot.bias_code=0;
-     snapshot.long_code=0;
-     snapshot.short_code=0;
-     snapshot.regime_state=SNAP_NOT_EVALUATED;
-     snapshot.bias_state=SNAP_NOT_EVALUATED;
-     snapshot.long_state=SNAP_NOT_EVALUATED;
-     snapshot.short_state=SNAP_NOT_EVALUATED;
-    }
+snapshot_generation=0;
+      snapshot.generation=0;
+      snapshot.snapshot_time=0;
+      snapshot.last_success_time=0;
+      snapshot.current_stage_code=0;
+      snapshot.last_block_reason_code=0;
+      snapshot.configured_style=STYLE_DAY_TRADING;
+      snapshot.regime_code=0;
+      snapshot.bias_code=0;
+      snapshot.long_code=0;
+      snapshot.short_code=0;
+      snapshot.regime_state=SNAP_NOT_EVALUATED;
+      snapshot.bias_state=SNAP_NOT_EVALUATED;
+      snapshot.long_state=SNAP_NOT_EVALUATED;
+      snapshot.short_state=SNAP_NOT_EVALUATED;
+
+      // Initialize signal pipeline cache
+      cache_valid = false;
+      cache_bar_time = 0;
+     }
 
 // CObject interface
     virtual int Type(void) const { return 0x7778; } // Custom type ID for CSymbolRuntime
@@ -719,7 +732,7 @@ bool              Initialize(const string in_symbol,
        {
         // WS-2: Transition to INITIALIZING
         TransitionTo(RUNTIME_INITIALIZING, REASON_INIT_SUCCESS);
-        
+
         valid=false;
         last_failure="";
         retry_count = 0;
@@ -796,13 +809,10 @@ bool              Initialize(const string in_symbol,
           InpRangeLookback,
           InpHysteresisBars);
 
-       hybrid_engine.SetDivergenceParams(
-          InpRSIPeriod,
-          InpMACD_Fast,
-          InpMACD_Slow,
-          InpMACD_Signal,
-          InpPivotTolerancePercent,
-          InpMaxDivergenceAgeBars);
+hybrid_engine.SetDivergenceParams(
+           InpRSIPeriod,
+           InpPivotTolerancePercent,
+           InpMaxDivergenceAgeBars);
 
        hybrid_engine.SetMomentumParams(
           InpADXPeriod,
@@ -980,13 +990,13 @@ struct SubscriberRecord
         // 2) Wait for our turn using GetTickCount64 for accurate timeout
        ulong start_tick = GetTickCount64();
        int backoff_ms = 1;
-       
+
        while((int)(GetTickCount64() - start_tick) < timeout_ms)
          {
           long serving = 0;
           if(GlobalVariableCheck(serving_key))
              serving = (long)GlobalVariableGet(serving_key);
-           
+
           if(serving + 1 == my_ticket)
             {
              // 3) Atomically claim ownership: set serving to my_ticket only if still serving+1
@@ -1017,13 +1027,13 @@ struct SubscriberRecord
                }
              // CAS failed: another owner slipped in, re-read serving and retry
             }
-           
+
           // Exponential backoff with jitter: 1, 2, 4, 8, 16... max 50ms
           Sleep(backoff_ms);
           backoff_ms = backoff_ms * 2;
           if(backoff_ms > 50) backoff_ms = 50;
          }
-       
+
        // Timeout: ticket gap is harmless (FIFO order preserved), no cleanup needed
        return false;
       }
@@ -1034,10 +1044,10 @@ struct SubscriberRecord
        if(!acquired || lock_name=="") return;
        string serving_key = lock_name + "_serving";
        string owner_key = lock_name + "_owner";
-       
+
        // Atomically verify we're still the owner and release
        double my_chart_id = (double)ChartID();
-       
+
        // Double-check CAS: only clear owner if we still own it
        if(GlobalVariableSetOnCondition(owner_key, 0.0, my_chart_id))
          {
@@ -1045,7 +1055,7 @@ struct SubscriberRecord
           long current_serving = 0;
           if(GlobalVariableCheck(serving_key))
             current_serving = (long)GlobalVariableGet(serving_key);
-          
+
           // Only advance serving if it's still our ticket (prevents stale restart from skipping real holder)
           if(current_serving == my_ticket)
             {
@@ -1053,7 +1063,7 @@ struct SubscriberRecord
             }
          }
        // If CAS failed, another owner took over - do not advance serving
-       
+
        acquired = false;
        my_ticket = 0;
       }
@@ -1083,7 +1093,7 @@ public:
                         msg_type(type), from_chart(from), to_chart(to), payload(p), timestamp(TimeCurrent()), priority(pri) {}
 
 virtual int Type(void) const { return 0x777B; }
-    
+
     // Copy constructor for queue operations
     ChartMessage(const ChartMessage& src):
       msg_type(src.msg_type), from_chart(src.from_chart), to_chart(src.to_chart),
@@ -1098,7 +1108,7 @@ private:
    int          m_max_size;
 
 public:
-                     CChartMessageQueue(): m_max_size(1000) 
+                     CChartMessageQueue(): m_max_size(1000)
      {
       m_lock = CFairLock("ALGO_MSG_QUEUE_" + IntegerToString((long)ChartID()));
      }
@@ -1111,10 +1121,10 @@ bool Enqueue(const ChartMessage& msg)
       {
        if(m_queue.Total() >= m_max_size) return false;
        if(!m_lock.Acquire(100)) return false; // quick lock for queue ops
-       
+
        ChartMessage *m = new ChartMessage(msg);
        if(m == NULL) { m_lock.Release(); return false; }
-       
+
        // Insert by priority (0=high first), maintaining FIFO for equal priority
        // Scan from front to find first position where existing priority > new priority
        int insert_idx = m_queue.Total(); // default: append at end (lowest priority)
@@ -1137,7 +1147,7 @@ bool Enqueue(const ChartMessage& msg)
      {
       if(m_queue.Total() == 0) return false;
       if(!m_lock.Acquire(100)) return false;
-      
+
       ChartMessage *m = (ChartMessage*)m_queue.At(0);
       if(m)
         {
@@ -1152,7 +1162,7 @@ bool Enqueue(const ChartMessage& msg)
      }
 
    int Size() const { return m_queue.Total(); }
-   
+
    void Clear()
      {
       for(int i = 0; i < m_queue.Total(); i++)
@@ -1330,7 +1340,7 @@ public:
       bool   unknown_exposure;          // any unknown/ambiguous position
       bool   valid;                     // calculation succeeded
       datetime timestamp;               // when calculated
-      
+
                       UnifiedExposure(): positions_risk_pct(0), pending_risk_pct(0), reserved_risk_pct(0),
                           total_exposure_pct(0), equity(0), currency(""), unknown_exposure(false), valid(false), timestamp(0) {}
      };
@@ -1364,12 +1374,12 @@ CUnifiedExposureCalculator(): m_portfolio_risk(NULL), m_ledger(NULL),
      {
       UnifiedExposure result;
       result.timestamp = TimeCurrent();
-      
+
       double equity = GetCachedEquity();
       if(equity <= 0) { result.valid = false; return result; }
       result.equity = equity;
       result.currency = AccountInfoString(ACCOUNT_CURRENCY);
-      
+
       // 1. Broker positions risk (managed + unknown) - compute directly from positions
       double pos_risk = 0;
       bool unknown = false;
@@ -1378,7 +1388,7 @@ CUnifiedExposureCalculator(): m_portfolio_risk(NULL), m_ledger(NULL),
         {
          ulong ticket = PositionGetTicket(i);
          if(ticket == 0) continue;
-         
+
 double pl = PositionGetDouble(POSITION_PROFIT);
            double swap = PositionGetDouble(POSITION_SWAP);
            // POSITION_COMMISSION is deprecated; commission is obtained from deal history via HistorySelectByPosition().
@@ -1388,19 +1398,19 @@ double pl = PositionGetDouble(POSITION_PROFIT);
            double volume = PositionGetDouble(POSITION_VOLUME);
           string sym = PositionGetString(POSITION_SYMBOL);
           long magic = PositionGetInteger(POSITION_MAGIC);
-          
+
           // For now, count all positions as risk (simplified)
           // Risk = unrealized P&L + swap + commission (negative = risk)
           double position_risk = -(pl + swap + commission); // positive = at risk
           if(position_risk > 0)
              pos_risk += position_risk;
-          
+
           // Mark unknown if we can't verify magic ownership (simplified)
           unknown = true; // Conservative: assume some unknown exposure
          }
       result.positions_risk_pct = (equity > 0) ? (pos_risk / equity * 100.0) : 0;
       result.unknown_exposure = unknown;
-      
+
       // 2. Pending orders estimated risk (simplified: count pending orders)
       double pending_risk = 0;
       int orders_total = OrdersTotal();
@@ -1412,7 +1422,7 @@ double pl = PositionGetDouble(POSITION_PROFIT);
          pending_risk += equity * 0.001; // 0.1% per pending order
         }
       result.pending_risk_pct = (equity > 0) ? (pending_risk / equity * 100.0) : 0;
-      
+
       // 3. Ledger reservations (durable intent before execution)
       double reserved_risk = 0;
       if(m_portfolio_risk)
@@ -1422,7 +1432,7 @@ double pl = PositionGetDouble(POSITION_PROFIT);
             reserved_risk = agg.total_reserved_pct;
         }
       result.reserved_risk_pct = reserved_risk;
-      
+
       // Total unified exposure
       result.total_exposure_pct = result.positions_risk_pct + result.pending_risk_pct + result.reserved_risk_pct;
       result.valid = true;
@@ -1434,17 +1444,17 @@ double pl = PositionGetDouble(POSITION_PROFIT);
      {
       UnifiedExposure base = Calculate();
       if(!base.valid) return base;
-      
+
       UnifiedExposure stressed = base;
       stressed.equity = base.equity * (1.0 - equity_shock_pct / 100.0);
       if(stressed.equity <= 0) { stressed.valid = false; return stressed; }
-      
+
       // Positions risk increases with equity drop (same absolute risk, higher %)
       stressed.positions_risk_pct = (base.equity > 0) ? (base.positions_risk_pct * base.equity / stressed.equity * volatility_multiplier) : 0;
       stressed.pending_risk_pct *= volatility_multiplier;
       stressed.reserved_risk_pct *= volatility_multiplier;
       stressed.total_exposure_pct = stressed.positions_risk_pct + stressed.pending_risk_pct + stressed.reserved_risk_pct;
-      
+
       return stressed;
      }
    };
@@ -1482,7 +1492,7 @@ public:
          double price = (order_type == ORDER_TYPE_BUY) ? SymbolInfoDouble(symbol, SYMBOL_ASK) : SymbolInfoDouble(symbol, SYMBOL_BID);
          margin_rate = contract * price * m_base_margin_pct / 100.0;
         }
-      
+
       // Apply volatility adjustment
       double atr = 0;
       // Simple ATR proxy using daily range
@@ -1496,14 +1506,14 @@ public:
          double avg_range = sum_range / copied;
          double current_price = (order_type == ORDER_TYPE_BUY) ? SymbolInfoDouble(symbol, SYMBOL_ASK) : SymbolInfoDouble(symbol, SYMBOL_BID);
          double atr_pct = (current_price > 0) ? (avg_range / current_price * 100.0) : 0;
-         
+
          // Scale margin: higher ATR = higher margin requirement
          double vol_factor = 1.0 + atr_pct * 2.0; // 2x ATR as multiplier
          vol_factor = MathMin(vol_factor, m_max_margin_pct / m_base_margin_pct);
          vol_factor = MathMax(vol_factor, m_min_margin_pct / m_base_margin_pct);
          margin_rate *= vol_factor;
         }
-      
+
       return margin_rate * volume;
      }
 
@@ -1555,14 +1565,14 @@ void RunScenario(const StressScenario& scenario, StressResult& result) const
      {
       result.scenario_name = scenario.name;
       result.passed = true;
-      
+
       if(!m_exposure_calc || !m_margin_calc)
         {
          result.passed = false;
          result.details = "Dependencies not set";
          return;
         }
-      
+
       // Baseline
       CUnifiedExposureCalculator::UnifiedExposure base = m_exposure_calc.Calculate();
       if(!base.valid)
@@ -1571,9 +1581,9 @@ void RunScenario(const StressScenario& scenario, StressResult& result) const
          result.details = "Baseline exposure calculation failed";
          return;
         }
-      
+
       result.pre_stress_exposure_pct = base.total_exposure_pct;
-      
+
       // Apply stress
       CUnifiedExposureCalculator::UnifiedExposure stressed = m_exposure_calc.StressTest(scenario.equity_drop_pct, scenario.volatility_multiplier);
       if(!stressed.valid)
@@ -1582,9 +1592,9 @@ void RunScenario(const StressScenario& scenario, StressResult& result) const
          result.details = "Stress test calculation failed";
          return;
         }
-      
+
       result.post_stress_exposure_pct = stressed.total_exposure_pct;
-      
+
       // Check margin
       double free_margin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
       double required_margin = stressed.total_exposure_pct / 100.0 * stressed.equity;
@@ -1592,29 +1602,29 @@ void RunScenario(const StressScenario& scenario, StressResult& result) const
          result.margin_surplus_pct = (free_margin / required_margin) - 1.0;
       else
          result.margin_surplus_pct = 100.0; // no margin needed
-      
+
       // Check limits
       if(stressed.total_exposure_pct > 100.0) // > 100% equity at risk
         {
          result.passed = false;
          result.details = "Exposure exceeds equity under stress";
         }
-      
+
       if(result.margin_surplus_pct < 0.1) // less than 10% margin buffer
         {
          result.passed = false;
          result.details = "Insufficient margin buffer: " + DoubleToString(result.margin_surplus_pct * 100, 1) + "%";
         }
-      
+
       // Estimate liquidations needed
       double excess = MathMax(0, stressed.total_exposure_pct - 80.0); // target 80% max
       if(excess > 0 && base.positions_risk_pct > 0)
         {
          result.positions_liquidated = (int)MathCeil(excess / base.positions_risk_pct * 10); // rough estimate
         }
-      
-      result.details = "Equity shock: " + DoubleToString(scenario.equity_drop_pct, 1) + "%, Vol mult: " + 
-                       DoubleToString(scenario.volatility_multiplier, 1) + "x, Margin buffer: " + 
+
+      result.details = "Equity shock: " + DoubleToString(scenario.equity_drop_pct, 1) + "%, Vol mult: " +
+                       DoubleToString(scenario.volatility_multiplier, 1) + "x, Margin buffer: " +
                        DoubleToString(result.margin_surplus_pct * 100, 1) + "%";
      }
 
@@ -1627,7 +1637,7 @@ void RunScenario(const StressScenario& scenario, StressResult& result) const
        scenarios[2].name = "Severe"; scenarios[2].equity_drop_pct = 20.0; scenarios[2].volatility_multiplier = 3.0; scenarios[2].correlation_spike = 0.6; scenarios[2].max_concurrent_positions = 10;
        scenarios[3].name = "FlashCrash"; scenarios[3].equity_drop_pct = 30.0; scenarios[3].volatility_multiplier = 5.0; scenarios[3].correlation_spike = 0.8; scenarios[3].max_concurrent_positions = 5;
        scenarios[4].name = "BlackSwan"; scenarios[4].equity_drop_pct = 50.0; scenarios[4].volatility_multiplier = 10.0; scenarios[4].correlation_spike = 1.0; scenarios[4].max_concurrent_positions = 0;
-       
+
        for(int i = 0; i < 5; i++)
           RunScenario(scenarios[i], out[i]);
       }
@@ -1670,8 +1680,8 @@ int g_executed_mutation_count = 0;
 
 bool IsSafeModeActive()
 {
-   return (MQLInfoInteger(MQL_TESTER) != 0) && 
-          (MQLInfoInteger(MQL_VISUAL_MODE) != 0) && 
+   return (MQLInfoInteger(MQL_TESTER) != 0) &&
+          (MQLInfoInteger(MQL_VISUAL_MODE) != 0) &&
           InpDashboardSafeMode;
 }
 
@@ -1681,15 +1691,15 @@ bool IsSafeModeEnforced()
    // If InpEnforceSafeModeInTester is true, also enforce in Tester without Visual Mode
    bool in_tester = (MQLInfoInteger(MQL_TESTER) != 0);
    bool in_visual = (MQLInfoInteger(MQL_VISUAL_MODE) != 0);
-   
+
    // Outside Tester: Safe Mode enforced if enabled (fail-closed)
    if(!in_tester)
       return InpDashboardSafeMode;
-   
+
    // Inside Visual Tester: Safe Mode enforced if enabled
    if(in_visual)
       return InpDashboardSafeMode;
-   
+
    // Inside non-Visual Tester: Safe Mode enforced only if both enabled AND Enforce flag set
    return InpDashboardSafeMode && InpEnforceSafeModeInTester;
 }
@@ -1813,7 +1823,7 @@ string SnapshotGVKey(const string symbol, const string field)
      }
    string hash8 = IntegerToString((long)h, 16);
    if(StringLen(hash8) > 8) hash8 = StringSubstr(hash8, 0, 8);
-   
+
    // Map field names to short versions
    string field_short = field;
    if(field == "generation") field_short = "gen";
@@ -1830,7 +1840,7 @@ string SnapshotGVKey(const string symbol, const string field)
    else if(field == "bias_state") field_short = "bs";
    else if(field == "long_state") field_short = "ls";
    else if(field == "short_state") field_short = "ss";
-   
+
 string key = "AHSS_" + hash8 + "_" + field_short;
     // Safety: ensure key <= 63 chars (should be ~20 chars with new format)
     if(StringLen(key) > 63)
@@ -1862,94 +1872,94 @@ bool WriteSnapshotToGV(const string symbol,
   {
    bool all_ok = true;
    string err_details = "";
-   
+
    // Diagnostics: collect keys for logging
    string gv_keys_written[];
    string gv_keys_failed[];
    int written_count = 0;
    int failed_count = 0;
-   
+
    // Check each GlobalVariableSet call individually
    string key;
    datetime result;
    int err;
-   
+
    key = SnapshotGVKey(symbol, "generation");
    result = GlobalVariableSet(key, generation);
    if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "gen key=" + key + " err=" + IntegerToString(err); ResetLastError(); ArrayResize(gv_keys_failed, failed_count + 1); gv_keys_failed[failed_count] = key; failed_count++; }
    else { ArrayResize(gv_keys_written, written_count + 1); gv_keys_written[written_count] = key; written_count++; }
-   
+
    key = SnapshotGVKey(symbol, "snapshot_time");
    result = GlobalVariableSet(key, snapshot_time);
    if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "sn_t key=" + key + " err=" + IntegerToString(err); ResetLastError(); ArrayResize(gv_keys_failed, failed_count + 1); gv_keys_failed[failed_count] = key; failed_count++; }
    else { ArrayResize(gv_keys_written, written_count + 1); gv_keys_written[written_count] = key; written_count++; }
-   
+
    key = SnapshotGVKey(symbol, "last_success_time");
    result = GlobalVariableSet(key, last_success_time);
    if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "ls_t key=" + key + " err=" + IntegerToString(err); ResetLastError(); ArrayResize(gv_keys_failed, failed_count + 1); gv_keys_failed[failed_count] = key; failed_count++; }
    else { ArrayResize(gv_keys_written, written_count + 1); gv_keys_written[written_count] = key; written_count++; }
-   
+
    key = SnapshotGVKey(symbol, "current_stage");
    result = GlobalVariableSet(key, current_stage_code);
    if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "stg key=" + key + " err=" + IntegerToString(err); ResetLastError(); ArrayResize(gv_keys_failed, failed_count + 1); gv_keys_failed[failed_count] = key; failed_count++; }
    else { ArrayResize(gv_keys_written, written_count + 1); gv_keys_written[written_count] = key; written_count++; }
-   
+
    key = SnapshotGVKey(symbol, "last_block_reason");
    result = GlobalVariableSet(key, last_block_reason_code);
    if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "blk key=" + key + " err=" + IntegerToString(err); ResetLastError(); ArrayResize(gv_keys_failed, failed_count + 1); gv_keys_failed[failed_count] = key; failed_count++; }
    else { ArrayResize(gv_keys_written, written_count + 1); gv_keys_written[written_count] = key; written_count++; }
-   
+
    key = SnapshotGVKey(symbol, "configured_style");
    result = GlobalVariableSet(key, configured_style);
    if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "cfg key=" + key + " err=" + IntegerToString(err); ResetLastError(); ArrayResize(gv_keys_failed, failed_count + 1); gv_keys_failed[failed_count] = key; failed_count++; }
    else { ArrayResize(gv_keys_written, written_count + 1); gv_keys_written[written_count] = key; written_count++; }
-   
+
    key = SnapshotGVKey(symbol, "regime_code");
    result = GlobalVariableSet(key, regime_code);
    if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "reg key=" + key + " err=" + IntegerToString(err); ResetLastError(); ArrayResize(gv_keys_failed, failed_count + 1); gv_keys_failed[failed_count] = key; failed_count++; }
    else { ArrayResize(gv_keys_written, written_count + 1); gv_keys_written[written_count] = key; written_count++; }
-   
+
    key = SnapshotGVKey(symbol, "bias_code");
    result = GlobalVariableSet(key, bias_code);
    if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "bis key=" + key + " err=" + IntegerToString(err); ResetLastError(); ArrayResize(gv_keys_failed, failed_count + 1); gv_keys_failed[failed_count] = key; failed_count++; }
    else { ArrayResize(gv_keys_written, written_count + 1); gv_keys_written[written_count] = key; written_count++; }
-   
+
    key = SnapshotGVKey(symbol, "long_code");
    result = GlobalVariableSet(key, long_code);
    if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "lng key=" + key + " err=" + IntegerToString(err); ResetLastError(); ArrayResize(gv_keys_failed, failed_count + 1); gv_keys_failed[failed_count] = key; failed_count++; }
    else { ArrayResize(gv_keys_written, written_count + 1); gv_keys_written[written_count] = key; written_count++; }
-   
+
    key = SnapshotGVKey(symbol, "short_code");
    result = GlobalVariableSet(key, short_code);
    if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "sht key=" + key + " err=" + IntegerToString(err); ResetLastError(); ArrayResize(gv_keys_failed, failed_count + 1); gv_keys_failed[failed_count] = key; failed_count++; }
    else { ArrayResize(gv_keys_written, written_count + 1); gv_keys_written[written_count] = key; written_count++; }
-   
+
    key = SnapshotGVKey(symbol, "regime_state");
    result = GlobalVariableSet(key, regime_state);
    if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "rs key=" + key + " err=" + IntegerToString(err); ResetLastError(); ArrayResize(gv_keys_failed, failed_count + 1); gv_keys_failed[failed_count] = key; failed_count++; }
    else { ArrayResize(gv_keys_written, written_count + 1); gv_keys_written[written_count] = key; written_count++; }
-   
+
    key = SnapshotGVKey(symbol, "bias_state");
    result = GlobalVariableSet(key, bias_state);
    if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "bs key=" + key + " err=" + IntegerToString(err); ResetLastError(); ArrayResize(gv_keys_failed, failed_count + 1); gv_keys_failed[failed_count] = key; failed_count++; }
    else { ArrayResize(gv_keys_written, written_count + 1); gv_keys_written[written_count] = key; written_count++; }
-   
+
    key = SnapshotGVKey(symbol, "long_state");
    result = GlobalVariableSet(key, long_state);
    if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "ls key=" + key + " err=" + IntegerToString(err); ResetLastError(); ArrayResize(gv_keys_failed, failed_count + 1); gv_keys_failed[failed_count] = key; failed_count++; }
    else { ArrayResize(gv_keys_written, written_count + 1); gv_keys_written[written_count] = key; written_count++; }
-   
+
    key = SnapshotGVKey(symbol, "short_state");
    result = GlobalVariableSet(key, short_state);
    if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "ss key=" + key + " err=" + IntegerToString(err); ResetLastError(); ArrayResize(gv_keys_failed, failed_count + 1); gv_keys_failed[failed_count] = key; failed_count++; }
    else { ArrayResize(gv_keys_written, written_count + 1); gv_keys_written[written_count] = key; written_count++; }
-   
+
    if(!all_ok)
      {
       g_logger.Event(LOG_ERROR, "DASHBOARD", "SNAPSHOT_GV_WRITE_FAILED", symbol, "", "", "", "FAIL", "GV_WRITE",
                      "One or more GlobalVariableSet failed: " + err_details);
      }
-   
+
 // Diagnostics logging
     if(g_dashboard_diag_enabled)
       {
@@ -1979,7 +1989,7 @@ bool WriteSnapshotToGV(const string symbol,
          }
        g_dashboard_diag.LogSnapshotWrite(symbol, generation, all_ok, err_details, written_summary, failed_summary, max_key_len);
       }
-   
+
    return all_ok;
   }
 
@@ -2013,7 +2023,7 @@ string ExtRiskLockGVKey(const string field)
       for(int z = 0; z < 8 - StringLen(hash8); ++z) zeros += "0";
       hash8 = zeros + hash8;
      }
-   
+
    string field_short;
    if(field == "state") field_short = "st";
    else if(field == "reason") field_short = "rsn";
@@ -2022,7 +2032,7 @@ string ExtRiskLockGVKey(const string field)
    else if(field == "expiry") field_short = "exp";
    else if(field == "revision") field_short = "rev";
    else field_short = field; // fallback for unknown fields
-   
+
    string key = "AERL_" + hash8 + "_" + field_short;
    if(StringLen(key) > 63) key = StringSubstr(key, 0, 63);
    return key;
@@ -2211,37 +2221,37 @@ static const int ERL_RETRY_DELAY_MS = 100;
     string key;
     datetime result;
     int err;
-    
+
     key = ExtRiskLockGVKey("state");
     result = GlobalVariableSet(key, state_code);
     if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "st key=" + key + " err=" + IntegerToString(err); ResetLastError(); }
-    
+
     key = ExtRiskLockGVKey("reason");
     result = GlobalVariableSet(key, reason_code);
     if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "rsn key=" + key + " err=" + IntegerToString(err); ResetLastError(); }
-    
+
     key = ExtRiskLockGVKey("source");
     result = GlobalVariableSet(key, source_code);
     if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "src key=" + key + " err=" + IntegerToString(err); ResetLastError(); }
-    
+
     key = ExtRiskLockGVKey("updated_at");
     result = GlobalVariableSet(key, TimeCurrent());
     if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "upd key=" + key + " err=" + IntegerToString(err); ResetLastError(); }
-    
+
     key = ExtRiskLockGVKey("expiry");
     result = GlobalVariableSet(key, expiry);
     if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "exp key=" + key + " err=" + IntegerToString(err); ResetLastError(); }
-    
+
     key = ExtRiskLockGVKey("revision");
     result = GlobalVariableSet(key, revision);
     if(result == 0) { err = GetLastError(); all_ok = false; if(err_details != "") err_details += ", "; err_details += "rev key=" + key + " err=" + IntegerToString(err); ResetLastError(); }
-    
+
     if(!all_ok)
       {
        g_logger.Event(LOG_ERROR, "RISK", "EXT_RISK_LOCK_GV_WRITE_FAILED", "", "", "", "", "FAIL", "GV_WRITE",
                       "One or more GlobalVariableSet failed: " + err_details);
       }
-    
+
     return all_ok;
    }
 
@@ -2894,7 +2904,7 @@ RiskDecision risk;
       {
       string rejection_code, rejection_reason;
       CAlgoPortfolioRisk::ExtRiskLockState pr_lock_state = ToPortfolioRiskLockState(g_ext_risk_lock_state);
-      
+
       if(!g_portfolio_risk.CheckExternalRiskLock(pr_lock_state, rejection_code, rejection_reason))
         {
         risk.decision = RISK_REJECTED;
@@ -2905,7 +2915,7 @@ RiskDecision risk;
           legacy_signal.symbol, "", "", legacy_signal.signal_id,
           "REJECT", "EXT_RISK_LOCK", rejection_reason);
         g_logger.Risk(risk);
-        
+
 // Update Dashboard with ERL blocked state
          if(InpDashboard)
            {
@@ -2953,7 +2963,7 @@ RiskDecision risk;
       {
       string rejection_code, rejection_reason;
       CAlgoPortfolioRisk::ExtRiskLockState pr_lock_state = ToPortfolioRiskLockState(g_ext_risk_lock_state);
-      
+
       if(!g_portfolio_risk.CheckExternalRiskLock(pr_lock_state, rejection_code, rejection_reason))
         {
         risk.decision = RISK_REJECTED;
@@ -3110,11 +3120,11 @@ attempt_rec.serialization_version = 2;
         return;
        }
 }
-     
+
      // F-005.2: Ledger allocates attempt_magic atomically with Intent.
      // Copy to request so TradeExecutor uses it for broker-visible Magic.
      request.attempt_magic = attempt_rec.attempt_magic;
-     
+
      // Check ledger for blocking unresolved attempts
     string ledger_block = "";
     if(!g_execution_ledger.IsAvailable() ||g_execution_ledger.HasBlockingUnresolved(ledger_block))
@@ -3277,7 +3287,7 @@ g_logger.Event(
         {
         string rejection_code, rejection_reason;
         CAlgoPortfolioRisk::ExtRiskLockState pr_lock_state = ToPortfolioRiskLockState(g_ext_risk_lock_state);
-        
+
         if(!g_portfolio_risk.CheckExternalRiskLock(pr_lock_state, rejection_code, rejection_reason))
           {
           g_logger.Event(LOG_ERROR, "EXECUTION", "EXTERNAL_RISK_LOCK_BLOCK_REVALIDATE",
@@ -3404,7 +3414,7 @@ ExecutionResult result;
           return;
           }
 }
- 
+
 // SAFE MODE: Block all broker mutations when active
     // Only allows Visual Tester execution; fail-closed elsewhere
     if(IsSafeModeEnforced() && !IsSafeModeActive())
@@ -3497,7 +3507,7 @@ double executed_vol = result.executed_volume; // F3: executed_volume is the volu
                     double remaining_amount = 0.0;
                     if(attempt_rec.requested_volume > 0.0 && attempt_rec.risk_reserve_initial_amount > 0.0)
                        remaining_amount = attempt_rec.risk_reserve_initial_amount * (remaining_vol / attempt_rec.requested_volume);
-                    
+
                     // P3: Bounded retry on CAS revision mismatch
                     CExecutionLedger::ENUM_RESERVATION_LIFECYCLE_RESULT res = CExecutionLedger::RESERVATION_LIFECYCLE_DB_ERROR;
                     for(int retry = 0; retry < 3; retry++)
@@ -3749,12 +3759,16 @@ void ProcessEntryBarWait(CSymbolRuntime& runtime)
 
 // WS-2: Process market data fetching
 void ProcessDataFetch(CSymbolRuntime& runtime)
-  {
-   MarketSnapshot context_market;
-   MarketSnapshot structure_market;
-   MarketSnapshot setup_market;
-   MarketSnapshot entry_market;
-   string reason = "";
+   {
+    // Invalidate cache at start of new data fetch cycle
+    runtime.cache_valid = false;
+    runtime.cache_bar_time = 0;
+
+    MarketSnapshot context_market;
+    MarketSnapshot structure_market;
+    MarketSnapshot setup_market;
+    MarketSnapshot entry_market;
+    string reason = "";
 
    ResetLastError();
    if(!runtime.market_context.GetSnapshot(runtime.symbol, runtime.context_tf, context_market))
@@ -3807,86 +3821,102 @@ void ProcessDataFetch(CSymbolRuntime& runtime)
       return;
      }
 
-   // All snapshots fetched successfully - store for feature calculation
-   // We need to store these in runtime for the next state
-   runtime.TransitionTo(RUNTIME_CALCULATING, REASON_DATA_FETCH_OK);
-   ShowRuntimeGateStatus(runtime, "CALCULATING: FEATURES");
-   LogRuntimeGate(runtime, "DATA_FETCH_OK", "MARKET_DATA", "OK", "ALL_SNAPSHOTS");
-  }
+// All snapshots fetched successfully - store for feature calculation
+    // Cache snapshots in runtime for reuse in feature calculation and evaluation
+    runtime.cached_context_market = context_market;
+    runtime.cached_structure_market = structure_market;
+    runtime.cached_setup_market = setup_market;
+    runtime.cached_entry_market = entry_market;
+    runtime.cache_bar_time = context_market.closed_bar_time;
+    runtime.cache_valid = true;
+
+    runtime.TransitionTo(RUNTIME_CALCULATING, REASON_DATA_FETCH_OK);
+    ShowRuntimeGateStatus(runtime, "CALCULATING: FEATURES");
+    LogRuntimeGate(runtime, "DATA_FETCH_OK", "MARKET_DATA", "OK", "ALL_SNAPSHOTS");
+   }
 
 // WS-2: Process feature calculation
 void ProcessFeatureCalculation(CSymbolRuntime& runtime)
-  {
-   // Re-fetch snapshots (they were not stored - re-fetch for simplicity)
-   // In a production system, we'd cache them in the runtime object
-   MarketSnapshot context_market;
-   MarketSnapshot structure_market;
-   MarketSnapshot setup_market;
-   MarketSnapshot entry_market;
-   FeatureSet context_features;
-   FeatureSet structure_features;
-   FeatureSet setup_features;
-   FeatureSet entry_features;
+   {
+    // Use cached market snapshots from ProcessDataFetch
+    if(!runtime.cache_valid)
+      {
+       g_logger.Event(LOG_ERROR, "FEATURE", "CACHE_INVALID",
+                      runtime.symbol, "", "", "", "FAIL", "SIGNAL_FEATURES",
+                      "Market data cache invalid; re-fetch required");
+       ResetLastError();
+       runtime.TransitionTo(RUNTIME_BLOCKED_DATA, REASON_DATA_FETCH_FAILED);
+       ShowRuntimeGateStatus(runtime, "BLOCKED: CACHE INVALID");
+       LogRuntimeGate(runtime, "FEATURE_CALC", "CACHE_CHECK", "FAIL", "CACHE_INVALID");
+       return;
+      }
 
-   ResetLastError();
-   if(!runtime.market_context.GetSnapshot(runtime.symbol, runtime.context_tf, context_market) ||
-      !runtime.feature_context.Calculate(context_market, context_features))
-     {
-      g_logger.Event(LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
-                     runtime.symbol, "", "", "", "FAIL", "SIGNAL_FEATURES",
-                     "Context feature calculation failed", GetLastError());
-      ResetLastError();
-      runtime.TransitionTo(RUNTIME_BLOCKED_FEATURES, REASON_FEATURE_CALC_FAILED);
-      ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
-      LogRuntimeGate(runtime, "FEATURE_CALC", "CONTEXT_FEATURES", "FAIL", "CALC_FAILED");
-      return;
-     }
+    FeatureSet context_features;
+    FeatureSet structure_features;
+    FeatureSet setup_features;
+    FeatureSet entry_features;
 
-   ResetLastError();
-   if(!runtime.market_structure.GetSnapshot(runtime.symbol, runtime.structure_tf, structure_market) ||
-      !runtime.feature_structure.Calculate(structure_market, structure_features))
-     {
-      g_logger.Event(LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
-                     runtime.symbol, "", "", "", "FAIL", "STRUCTURE_FEATURES",
-                     "Structure feature calculation failed", GetLastError());
-      ResetLastError();
-      runtime.TransitionTo(RUNTIME_BLOCKED_FEATURES, REASON_FEATURE_CALC_FAILED);
-      ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
-      LogRuntimeGate(runtime, "FEATURE_CALC", "STRUCTURE_FEATURES", "FAIL", "CALC_FAILED");
-      return;
-     }
+    ResetLastError();
+    if(!runtime.feature_context.Calculate(runtime.cached_context_market, context_features))
+      {
+       g_logger.Event(LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
+                      runtime.symbol, "", "", "", "FAIL", "SIGNAL_FEATURES",
+                      "Context feature calculation failed", GetLastError());
+       ResetLastError();
+       runtime.TransitionTo(RUNTIME_BLOCKED_FEATURES, REASON_FEATURE_CALC_FAILED);
+       ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
+       LogRuntimeGate(runtime, "FEATURE_CALC", "CONTEXT_FEATURES", "FAIL", "CALC_FAILED");
+       return;
+      }
 
-   if(!runtime.market_setup.GetSnapshot(runtime.symbol, runtime.setup_tf, setup_market) ||
-      !runtime.feature_setup.Calculate(setup_market, setup_features))
-     {
-      g_logger.Event(LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
-                     runtime.symbol, "", "", "", "FAIL", "SETUP_FEATURES",
-                     "Setup feature calculation failed", GetLastError());
-      ResetLastError();
-      runtime.TransitionTo(RUNTIME_BLOCKED_FEATURES, REASON_FEATURE_CALC_FAILED);
-      ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
-      LogRuntimeGate(runtime, "FEATURE_CALC", "SETUP_FEATURES", "FAIL", "CALC_FAILED");
-      return;
-     }
+    ResetLastError();
+    if(!runtime.feature_structure.Calculate(runtime.cached_structure_market, structure_features))
+      {
+       g_logger.Event(LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
+                      runtime.symbol, "", "", "", "FAIL", "STRUCTURE_FEATURES",
+                      "Structure feature calculation failed", GetLastError());
+       ResetLastError();
+       runtime.TransitionTo(RUNTIME_BLOCKED_FEATURES, REASON_FEATURE_CALC_FAILED);
+       ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
+       LogRuntimeGate(runtime, "FEATURE_CALC", "STRUCTURE_FEATURES", "FAIL", "CALC_FAILED");
+       return;
+      }
 
-   if(!runtime.market_entry.GetSnapshot(runtime.symbol, runtime.entry_tf, entry_market) ||
-      !runtime.feature_entry.Calculate(entry_market, entry_features))
-     {
-      g_logger.Event(LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
-                     runtime.symbol, "", "", "", "FAIL", "ENTRY_FEATURES",
-                     "Entry feature calculation failed", GetLastError());
-      ResetLastError();
-      runtime.TransitionTo(RUNTIME_BLOCKED_FEATURES, REASON_FEATURE_CALC_FAILED);
-      ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
-      LogRuntimeGate(runtime, "FEATURE_CALC", "ENTRY_FEATURES", "FAIL", "CALC_FAILED");
-      return;
-     }
+    if(!runtime.feature_setup.Calculate(runtime.cached_setup_market, setup_features))
+      {
+       g_logger.Event(LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
+                      runtime.symbol, "", "", "", "FAIL", "SETUP_FEATURES",
+                      "Setup feature calculation failed", GetLastError());
+       ResetLastError();
+       runtime.TransitionTo(RUNTIME_BLOCKED_FEATURES, REASON_FEATURE_CALC_FAILED);
+       ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
+       LogRuntimeGate(runtime, "FEATURE_CALC", "SETUP_FEATURES", "FAIL", "CALC_FAILED");
+       return;
+      }
 
-   // All features calculated - check signal bar
-   runtime.TransitionTo(RUNTIME_WAIT_SIGNAL_BAR, REASON_FEATURE_CALC_OK);
-   ShowRuntimeGateStatus(runtime, "WAITING: SIGNAL BAR");
-   LogRuntimeGate(runtime, "FEATURE_CALC_OK", "FEATURES", "OK", "ALL_FEATURES");
-  }
+    if(!runtime.feature_entry.Calculate(runtime.cached_entry_market, entry_features))
+      {
+       g_logger.Event(LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
+                      runtime.symbol, "", "", "", "FAIL", "ENTRY_FEATURES",
+                      "Entry feature calculation failed", GetLastError());
+       ResetLastError();
+       runtime.TransitionTo(RUNTIME_BLOCKED_FEATURES, REASON_FEATURE_CALC_FAILED);
+       ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
+       LogRuntimeGate(runtime, "FEATURE_CALC", "ENTRY_FEATURES", "FAIL", "CALC_FAILED");
+       return;
+      }
+
+    // Cache calculated features for evaluation phase
+    runtime.cached_context_features = context_features;
+    runtime.cached_structure_features = structure_features;
+    runtime.cached_setup_features = setup_features;
+    runtime.cached_entry_features = entry_features;
+
+    // All features calculated - check signal bar
+    runtime.TransitionTo(RUNTIME_WAIT_SIGNAL_BAR, REASON_FEATURE_CALC_OK);
+    ShowRuntimeGateStatus(runtime, "WAITING: SIGNAL BAR");
+    LogRuntimeGate(runtime, "FEATURE_CALC_OK", "FEATURES", "OK", "ALL_FEATURES");
+   }
 
 // WS-2: Process signal bar wait
 void ProcessSignalBarWait(CSymbolRuntime& runtime)
@@ -3907,50 +3937,51 @@ void ProcessSignalBarWait(CSymbolRuntime& runtime)
 
 // WS-2: Process hybrid engine evaluation
 void ProcessEvaluation(CSymbolRuntime& runtime)
-  {
-   // Re-fetch data for evaluation (in production, cache from previous states)
-   MarketSnapshot context_market;
-   MarketSnapshot structure_market;
-   MarketSnapshot setup_market;
-   MarketSnapshot entry_market;
-   FeatureSet context_features;
-   FeatureSet structure_features;
-   FeatureSet setup_features;
-   FeatureSet entry_features;
+   {
+    // Re-fetch data for the new signal bar (detected in ProcessSignalBarWait)
+    // The cached data from ProcessDataFetch/ProcessFeatureCalculation is for the previous bar
+    MarketSnapshot context_market;
+    MarketSnapshot structure_market;
+    MarketSnapshot setup_market;
+    MarketSnapshot entry_market;
+    FeatureSet context_features;
+    FeatureSet structure_features;
+    FeatureSet setup_features;
+    FeatureSet entry_features;
 
-   // Fetch all data again
-   if(!runtime.market_context.GetSnapshot(runtime.symbol, runtime.context_tf, context_market) ||
-      !runtime.market_structure.GetSnapshot(runtime.symbol, runtime.structure_tf, structure_market) ||
-      !runtime.market_setup.GetSnapshot(runtime.symbol, runtime.setup_tf, setup_market) ||
-      !runtime.market_entry.GetSnapshot(runtime.symbol, runtime.entry_tf, entry_market))
-     {
-      runtime.TransitionTo(RUNTIME_BLOCKED_DATA, REASON_DATA_FETCH_FAILED);
-      return;
-     }
+    // Fetch all data for the new signal bar
+    if(!runtime.market_context.GetSnapshot(runtime.symbol, runtime.context_tf, context_market) ||
+       !runtime.market_structure.GetSnapshot(runtime.symbol, runtime.structure_tf, structure_market) ||
+       !runtime.market_setup.GetSnapshot(runtime.symbol, runtime.setup_tf, setup_market) ||
+       !runtime.market_entry.GetSnapshot(runtime.symbol, runtime.entry_tf, entry_market))
+      {
+       runtime.TransitionTo(RUNTIME_BLOCKED_DATA, REASON_DATA_FETCH_FAILED);
+       return;
+      }
 
-   if(!runtime.feature_context.Calculate(context_market, context_features) ||
-      !runtime.feature_structure.Calculate(structure_market, structure_features) ||
-      !runtime.feature_setup.Calculate(setup_market, setup_features) ||
-      !runtime.feature_entry.Calculate(entry_market, entry_features))
-     {
-      runtime.TransitionTo(RUNTIME_BLOCKED_FEATURES, REASON_FEATURE_CALC_FAILED);
-      return;
-     }
+    if(!runtime.feature_context.Calculate(context_market, context_features) ||
+       !runtime.feature_structure.Calculate(structure_market, structure_features) ||
+       !runtime.feature_setup.Calculate(setup_market, setup_features) ||
+       !runtime.feature_entry.Calculate(entry_market, entry_features))
+      {
+       runtime.TransitionTo(RUNTIME_BLOCKED_FEATURES, REASON_FEATURE_CALC_FAILED);
+       return;
+      }
 
-   // Portfolio state check
-   PortfolioState portfolio_state;
-   if(!g_state.GetPortfolioState(portfolio_state))
-     {
-      g_logger.Event(LOG_ERROR, "RISK", "RISK_STATE_UNAVAILABLE",
-                     runtime.symbol, "", "", "", "REJECT", "RISK_STATE",
-                     "Portfolio state is unavailable; entry blocked");
-      runtime.TransitionTo(RUNTIME_BLOCKED_DATA, REASON_DATA_FETCH_FAILED);
-      ShowRuntimeGateStatus(runtime, "BLOCKED: RISK STATE UNAVAILABLE");
-      LogRuntimeGate(runtime, "RISK_STATE", "PORTFOLIO_STATE", "BLOCK", "UNAVAILABLE");
-      return;
-     }
+    // Portfolio state check
+    PortfolioState portfolio_state;
+    if(!g_state.GetPortfolioState(portfolio_state))
+      {
+       g_logger.Event(LOG_ERROR, "RISK", "RISK_STATE_UNAVAILABLE",
+                      runtime.symbol, "", "", "", "REJECT", "RISK_STATE",
+                      "Portfolio state is unavailable; entry blocked");
+       runtime.TransitionTo(RUNTIME_BLOCKED_DATA, REASON_DATA_FETCH_FAILED);
+       ShowRuntimeGateStatus(runtime, "BLOCKED: RISK STATE UNAVAILABLE");
+       LogRuntimeGate(runtime, "RISK_STATE", "PORTFOLIO_STATE", "BLOCK", "UNAVAILABLE");
+       return;
+      }
 
-LogRiskLockTransition(portfolio_state);
+ LogRiskLockTransition(portfolio_state);
 
     if(portfolio_state.trading_locked)
       {
@@ -3978,7 +4009,7 @@ LogRiskLockTransition(portfolio_state);
 
     // Build feature context and evaluate
    runtime.TransitionTo(RUNTIME_EVALUATING, REASON_EVALUATION_START);
-   
+
    bool ok = false;
    FeatureContext ctx = runtime.hybrid_engine.BuildFeatureContext(
                            context_market,
@@ -4141,7 +4172,7 @@ bool AttemptRuntimeRecovery(CSymbolRuntime& runtime)
      }
 
    runtime.retry_count++;
-   
+
    // Try to re-validate basic requirements
    MarketSnapshot test_snapshot;
    if(!runtime.market_context.GetSnapshot(runtime.symbol, runtime.context_tf, test_snapshot))
@@ -4267,7 +4298,7 @@ int MapBlockReasonToCode(ENUM_RUNTIME_STATE state)
 
      // Use the runtime's hybrid engine news service
      NewsFeatures news = runtime.hybrid_engine.EvaluateNews(runtime.symbol, TimeTradeServer(), portfolio_state);
-     
+
      // Check if entry should be blocked based on news (service handles fail-closed for UNAVAILABLE)
      return runtime.hybrid_engine.ShouldBlockEntry(news, runtime.symbol);
     }
@@ -4804,7 +4835,7 @@ string ComputeConfigFingerprint()
    s += "MODE=" + IntegerToString((int)InpMode) + "|";
    s += "LIVECONFIRM=" + (InpLiveAutoConfirm ? "1" : "0") + "|";
    s += "GROUP=" + InpStrategyGroupKey + "|";
-   
+
    // Fix 3: Include timeframe roles (resolved from style)
    ENUM_TIMEFRAMES ctx_tf, struct_tf, setup_tf, entry_tf;
    SelectStyleTimeframes(InpTradingStyle, ctx_tf, struct_tf, setup_tf, entry_tf);
@@ -4812,7 +4843,7 @@ string ComputeConfigFingerprint()
    s += "STRUCT_TF=" + IntegerToString((int)struct_tf) + "|";
    s += "SETUP_TF=" + IntegerToString((int)setup_tf) + "|";
    s += "ENTRY_TF=" + IntegerToString((int)entry_tf) + "|";
-   
+
    // Fix 3: Include risk parameters (group 09)
    s += "RISK_PCT=" + DoubleToString(InpRiskPercent, 2) + "|";
    s += "DAILY_LOSS_LIM=" + DoubleToString(InpDailyLossLimit, 2) + "|";
@@ -4824,7 +4855,7 @@ string ComputeConfigFingerprint()
    s += "MAX_PORTF_RISK=" + DoubleToString(InpMaxPortfolioRisk, 2) + "|";
    s += "MARGIN_SAFETY=" + DoubleToString(InpMarginSafetyFraction, 2) + "|";
    s += "DEVIATION=" + IntegerToString(InpDeviationPoints) + "|";
-   
+
    // P2-1: Include missing position management params (group 12)
    s += "BE_ENABLED=" + (InpBreakEven ? "1" : "0") + "|";
    s += "BE_TRIGGER_R=" + DoubleToString(InpBreakEvenTriggerR, 2) + "|";
@@ -4835,7 +4866,7 @@ string ComputeConfigFingerprint()
    s += "TRAIL_ATR_MULT=" + DoubleToString(InpTrailingATRMultiplier, 2) + "|";
    s += "TIME_EXIT_ENABLED=" + (InpTimeExit ? "1" : "0") + "|";
    s += "MAX_HOLD_MIN=" + IntegerToString(InpMaxHoldingMinutes) + "|";
-   
+
    // Fix 3: Include hybrid decision thresholds (group 03)
    s += "MIN_RR=" + DoubleToString(InpMinRR, 2) + "|";
    s += "MIN_SCORE=" + DoubleToString(InpMinScore, 1) + "|";
@@ -4844,28 +4875,25 @@ string ComputeConfigFingerprint()
    s += "ENTRY_TOL_DAY=" + DoubleToString(InpEntryToleranceDay, 1) + "|";
    s += "ENTRY_TOL_SWING=" + DoubleToString(InpEntryToleranceSwing, 1) + "|";
    s += "ALLOW_MEAN_REV=" + (InpAllowMeanReversion ? "1" : "0") + "|";
-   
+
    // Fix 3: Include volume profile params (group 04)
    s += "PROF_ENABLED=" + (InpProfileEnabled ? "1" : "0") + "|";
    s += "PROF_SESS_BARS=" + IntegerToString(InpProfileSessionBars) + "|";
    s += "PROF_ROLL_BARS=" + IntegerToString(InpProfileRollingBars) + "|";
    s += "PROF_VA_PCT=" + DoubleToString(InpValueAreaPercent, 2) + "|";
-   
+
    // Fix 3: Include liquidity/structure params (group 05)
    s += "SWING_LOOKBACK=" + IntegerToString(InpSwingLookback) + "|";
    s += "EQUAL_TOL_PTS=" + IntegerToString(InpEqualTolerancePoints) + "|";
    s += "MAX_LVL_AGE=" + IntegerToString(InpMaxLevelAgeBars) + "|";
    s += "SWEEP_CONF_BARS=" + IntegerToString(InpSweepConfirmBars) + "|";
-   
-   // Fix 3: Include divergence/momentum params (group 06)
-   s += "RSI_PERIOD=" + IntegerToString(InpRSIPeriod) + "|";
-   s += "MACD_FAST=" + IntegerToString(InpMACD_Fast) + "|";
-   s += "MACD_SLOW=" + IntegerToString(InpMACD_Slow) + "|";
-   s += "MACD_SIG=" + IntegerToString(InpMACD_Signal) + "|";
-   s += "PIVOT_TOL_PCT=" + DoubleToString(InpPivotTolerancePercent, 3) + "|";
-   s += "MAX_DIV_AGE=" + IntegerToString(InpMaxDivergenceAgeBars) + "|";
-   s += "MOM_LOOKBACK=" + IntegerToString(InpMomentumLookback) + "|";
-   
+
+// Fix 3: Include divergence/momentum params (group 06)
+    s += "RSI_PERIOD=" + IntegerToString(InpRSIPeriod) + "|";
+    s += "PIVOT_TOL_PCT=" + DoubleToString(InpPivotTolerancePercent, 3) + "|";
+    s += "MAX_DIV_AGE=" + IntegerToString(InpMaxDivergenceAgeBars) + "|";
+    s += "MOM_LOOKBACK=" + IntegerToString(InpMomentumLookback) + "|";
+
    // Fix 3: Include regime params (group 07)
    s += "ADX_PERIOD=" + IntegerToString(InpADXPeriod) + "|";
    s += "ADX_TREND_THRESH=" + IntegerToString(InpADXTrendThreshold) + "|";
@@ -4873,7 +4901,7 @@ string ComputeConfigFingerprint()
    s += "LOW_VOL_RATIO=" + DoubleToString(InpLowVolatilityRatio, 2) + "|";
    s += "RANGE_LOOKBACK=" + IntegerToString(InpRangeLookback) + "|";
    s += "HYST_BARS=" + IntegerToString(InpHysteresisBars) + "|";
-   
+
    // Fix 3: Include news filter params (group 08)
    s += "NEWS_ENABLED=" + (InpNewsEnabled ? "1" : "0") + "|";
    s += "NEWS_PREVENT=" + (InpNewsPreventNewEntries ? "1" : "0") + "|";
@@ -4883,14 +4911,14 @@ string ComputeConfigFingerprint()
    s += "NEWS_IMPACT=" + IntegerToString(InpNewsImpactThreshold) + "|";
    // P2-1: Include missing news close positions param
    s += "NEWS_CLOSE_POS=" + (InpNewsClosePositions ? "1" : "0") + "|";
-   
+
    // Fix 3: Include session/spread filters (group 10)
    s += "SESS_ENABLED=" + (InpSessionFilter ? "1" : "0") + "|";
    s += "SESS_START=" + IntegerToString(InpSessionStartHour) + "|";
    s += "SESS_END=" + IntegerToString(InpSessionEndHour) + "|";
    s += "SPREAD_FILTER=" + (InpUseSpreadFilter ? "1" : "0") + "|";
    s += "MAX_SPREAD=" + IntegerToString(InpMaxSpreadPoints) + "|";
-   
+
    // Fix 3: Include freshness params (group 13)
    s += "FRESH_CTX=" + IntegerToString(InpFreshnessContextSeconds) + "|";
    s += "FRESH_STRUCT=" + IntegerToString(InpFreshnessStructureSeconds) + "|";
@@ -4898,12 +4926,12 @@ string ComputeConfigFingerprint()
    s += "FRESH_ENTRY=" + IntegerToString(InpFreshnessEntrySeconds) + "|";
    // P2-1: Include freshness overrides
    s += "FRESH_OVERRIDES=" + InpFreshnessOverrides + "|";
-   
+
    // Symbol universe: automatic broker-discovered discovery (no user toggle in fingerprint).
-   
+
    // Magic for style
    s += "MAGIC=" + IntegerToString((int)MagicForStyle(InpTradingStyle)) + "|";
-   
+
    // Simple deterministic hash (not cryptographic)
    uint h = 5381;
    for(int i = 0; i < StringLen(s); i++)
@@ -4986,7 +5014,7 @@ int OnInit()
          "FAIL", "INIT", "MODE_BACKTEST requires Strategy Tester", 0);
       return INIT_PARAMETERS_INCORRECT;
 }
- 
+
  g_dashboard.Enable(InpDashboard);
     g_dashboard.SetTitle("ALGO HYBRID");
     // Apply dashboard config early so it persists even if initialization later fails
@@ -5004,7 +5032,7 @@ int OnInit()
 
 // Initialize Metrics Exporter (WP-07)
     g_metrics_exporter.Initialize(&g_logger, IntegerToString((long)ChartID()), 10);
-    
+
     // Initialize Alert Manager (WP-07)
     g_alert_manager.Initialize(&g_logger, &g_metrics_exporter);
     g_alert_manager.SetThresholds(
@@ -5050,7 +5078,7 @@ int OnInit()
           g_dashboard_diag_enabled = false;
          }
 }
- 
+
 // Safe Dashboard-Only Mode status
     bool safe_mode_active = IsSafeModeActive();
     bool safe_mode_enforced = IsSafeModeEnforced();
@@ -5106,7 +5134,7 @@ bool RefreshTradingState()
       {
       ENUM_REJECTION_REASON lock_reason_code = REJECT_NONE;
       string lock_reason = "";
-      
+
       switch(ext_lock_state.state)
         {
         case EXT_RISK_LOCK_LOCKED:
@@ -5132,16 +5160,16 @@ bool RefreshTradingState()
           lock_reason = "";
           break;
         }
-      
+
       g_risk_engine.SetExternalLock(
         (lock_reason_code != REJECT_NONE),
         lock_reason_code,
         lock_reason);
-      
+
 // Store globally for PortfolioRisk checks in ProcessHybridDecision
        g_ext_risk_lock_state = ext_lock_state;
        g_ext_risk_lock_state_valid = true;
-       
+
        // Update Dashboard with ERL state (valid unlocked/disabled state)
        if(InpDashboard)
          {
@@ -5154,7 +5182,7 @@ bool RefreshTradingState()
              g_dashboard.SetExternalRiskLockState("DISABLED", "ExternalRiskLock", true, "Feature disabled by configuration");
             }
          }
-       
+
        // Log state changes
       static int s_last_ext_lock_revision = -1;
       if(ext_lock_state.revision != s_last_ext_lock_revision)
@@ -5347,7 +5375,7 @@ if(g_coordinator_mode == COORD_MODE_COORDINATOR)
              g_logger.Event(LOG_WARNING, "SYSTEM", "COORDINATOR_LOST", _Symbol, "", "", "", "FAIL", "AUTHORITY", "Heartbeat/validation failed");
 }
         }
- 
+
       // Chart Context registration retry
      if(g_coordinator_mode == COORD_MODE_CHART_CONTEXT && g_reg_state == REG_STATE_PENDING)
        {
@@ -5416,13 +5444,13 @@ int res_count = g_execution_ledger.ReconcileReservations(account_key, res_reason
 
    // WP-07: Metrics Exporter & Alert Manager periodic updates
    g_metrics_exporter.OnTimer();
-   
+
    // Collect metrics for alerting
    double used_margin = AccountInfoDouble(ACCOUNT_MARGIN);
-   double margin_level = (used_margin > 0) ? 
+   double margin_level = (used_margin > 0) ?
                          (AccountInfoDouble(ACCOUNT_EQUITY) / used_margin * 100.0) : 0;
    g_alert_manager.CheckMarginLevel(margin_level);
-   
+
    PortfolioState pstate;
    if(g_state.GetPortfolioState(pstate))
    {
@@ -5430,7 +5458,7 @@ int res_count = g_execution_ledger.ReconcileReservations(account_key, res_reason
       // Note: PortfolioState doesn't have max_drawdown_pct, use total_open_risk_percent as proxy
       g_alert_manager.CheckDrawdown(pstate.total_open_risk_percent * 100.0);
       g_alert_manager.CheckPositionCount(pstate.total_positions);
-      
+
       // Update metrics exporter with portfolio data
       // PortfolioState has: total_open_risk_percent (exposure), total_positions
       // No: unrealized_pnl, realized_pnl, pending_orders, max_drawdown_pct
@@ -5441,7 +5469,7 @@ int res_count = g_execution_ledger.ReconcileReservations(account_key, res_reason
          pstate.total_positions,
          0  // pending_orders - not available in PortfolioState
       );
-      
+
       // Account metrics
       g_metrics_exporter.SetAccountMetrics(
          AccountInfoDouble(ACCOUNT_BALANCE),
@@ -5451,12 +5479,12 @@ int res_count = g_execution_ledger.ReconcileReservations(account_key, res_reason
          margin_level
       );
    }
-   
+
    // News blackout check - simplified: check if any position has NEWS_BLOCKED status
    // We can't easily access HybridEngine's news service from here
    // SetNewsMetrics with 0 for now
    g_metrics_exporter.SetNewsMetrics(0, 0);
-   
+
    // Engine metrics
 g_metrics_exporter.SetEngineMetrics(
        TimeCurrent() - g_ea_start_time, // uptime in seconds
@@ -6318,7 +6346,7 @@ bool RetryUIRevalidateFreshPlan(CSymbolRuntime &runtime,
      {
      string rejection_code, rejection_reason;
      CAlgoPortfolioRisk::ExtRiskLockState pr_lock_state = ToPortfolioRiskLockState(g_ext_risk_lock_state);
-     
+
      if(!g_portfolio_risk.CheckExternalRiskLock(pr_lock_state, rejection_code, rejection_reason))
        {
        reason = "EXTERNAL_RISK_LOCK_BLOCK_RETRY:" + rejection_reason;
@@ -6505,7 +6533,7 @@ if(!g_execution_ledger.MarkSubmissionMayHaveOccurred(request.attempt_id, "E2.6 r
         g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_EXT_RISK_LOCK"; return;
         }
 }
- 
+
     // SAFE MODE: Block all broker mutations when active
     // Only allows Visual Tester execution; fail-closed elsewhere
     if(IsSafeModeEnforced() && !IsSafeModeActive())
@@ -6524,7 +6552,7 @@ if(!g_execution_ledger.MarkSubmissionMayHaveOccurred(request.attempt_id, "E2.6 r
         }
       g_retry_handoff.active=false; g_retry_ui_status="HANDOFF_SAFE_MODE_BLOCKED"; return;
       }
- 
+
     bool execution_ok = g_executor.Execute(request, result); // broker call only via executor (timer path)
    g_executed_mutation_count++;
    g_logger.Trade(result);
@@ -6809,7 +6837,7 @@ void OnDeinit(const int reason)
    EventKillTimer();
    RetryUIClear();
    g_dashboard.Clear();
-   
+
    // F18: Clean up runtime objects (CArrayObj ownership - delete all elements)
    for(int i = g_runtime.Total() - 1; i >= 0; i--)
      {
@@ -6820,7 +6848,7 @@ void OnDeinit(const int reason)
         }
      }
    g_runtime.Clear();
-   
+
    g_logger.Shutdown();
    g_system_ready=false;
   }
