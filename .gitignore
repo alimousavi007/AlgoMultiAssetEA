@@ -20,6 +20,8 @@
 
 # Project documentation
 !README.md
+!docs/
+!docs/**
 
 # =========================================================
 # CASE A: Repository root = MT5 Data Folder
