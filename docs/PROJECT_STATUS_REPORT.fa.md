@@ -21,7 +21,7 @@ M1 هنوز فاز جاریِ تأییدشده نیست؛ تصمیمات انس�
 - هشدار `origin.txt` mismatch نیز ریسک P2 موجود و پذیرفته‌شده است.
 - `DT-001` درباره امضای/پارامتر `OnChartEvent` در Technical Debt **تغییر به NOT A DEFECT** با شواهد (Workstream D) — امضای `OnChartEvent` در خط ۶۵۸۰ معتبر است.
 - معیار خروج M0 علاوه بر کامپایل پاک، تعیین تکلیف مستند همه یافته‌های E2.6 را نیز لازم می‌داند.
-- **بلاکِر اصلی:** **M1-DEC-D (Retry Handoff Non-Resumption Acceptance)** با وضعیت **REJECTED — ALTERNATIVE REQUIRED** و `Blocking Phase = M0`.
+- **بلاکِر اصلی:** **M1-DEC-D (Retry Handoff Non-Resumption Acceptance)** — تصمیم معماری **OWNER SELECTED: ALTERNATIVE A (Design Baseline)**، اما **پیاده‌سازی بلاک شده** توسط ۶ finding CRITICAL از risk-auditor (FINDING-001, 002, 003, 004, 007, 008) و ۴ finding CRITICAL/HIGH از code-reviewer (P1-1 through P1-4). نیاز به اعتبارسنجی M5 و mitigations قبل از پیاده‌سازی.
 
 تا رفع یا تعیین تکلیف مستند موارد بالا، M0 را **IN PROGRESS / EXIT GATE NOT MET** نگه می‌داریم.
 
@@ -66,7 +66,7 @@ M1 هنوز فاز جاریِ تأییدشده نیست؛ تصمیمات انس�
 
 | فاز | هدف طبق نقشه راه | وضعیت فعلی | مانع / معیار ادامه |
 |---|---|---|---|
-| **M0** | پایه، تثبیت baseline و دروازه ایمنی | **IN PROGRESS — فاز جاری** | M1-DEC-D REJECTED (ALTERNATIVE REQUIRED)، DT-001 disposition، D-019 status، compile baseline verification، docs accuracy |
+| **M0** | پایه، تثبیت baseline و دروازه ایمنی | **IN PROGRESS — فاز جاری** | M1-DEC-D OWNER SELECTED (Alternative A Design Baseline, Impl Blocked)، DT-001 disposition، D-019 status، compile baseline verification، docs accuracy |
 | **M1** | تصمیمات معماری و قراردادها | **PREPARATION PARTIAL — شروع رسمی/خروج تأیید نشده** | تصمیمات U-001 تا U-005 و مدل اعتماد اپراتور U-007/DT-002 همچنان نیازمند تصمیم انسانی |
 | **M2** | ساده‌سازی Coordinator، EventChartCustom و Scheduler | **NOT STARTED IN ROADMAP SEQUENCE** | وابسته به بسته‌شدن M1 و تصمیمات معماری مرتبط |
 | **M3** | هندسه سیگنال و Featureها | **NOT OPENED AS A PHASE**؛ یک اصلاح محدود زودتر انجام شده | وابسته به M2؛ D-001 CONFLICT (Setup vs Structure timeframe) باید حل شود |
@@ -109,7 +109,7 @@ M1 هنوز فاز جاریِ تأییدشده نیست؛ تصمیمات انس�
 
 | شناسه | شدت | شرح | وضعیت عملیاتی |
 |---|---|---|---|
-| **M1-DEC-D** | **P0 — BLOCKER** | Retry Handoff Non-Resumption Acceptance | **REJECTED — ALTERNATIVE REQUIRED**؛ Blocking Phase = M0 |
+| **M1-DEC-D** | **P0 — BLOCKER** | Retry Handoff Non-Resumption Acceptance | **OWNER SELECTED: ALTERNATIVE A (Design Baseline)** — **IMPLEMENTATION BLOCKED** by CRITICAL safety findings (FINDING-001, 002, 003, 004, 007, 008; P1-1 through P1-4). Requires M5 validation & mitigations before implementation. |
 | **DT-001** | ~~P0 (listed)~~ **NOT A DEFECT** | OnChartEvent signature concern | **NOT A DEFECT** (Workstream D) — disposition updated |
 | **B-003 / DT-002 / U-007** | P1 | احراز هویت اپراتور برای Authority Recovery | OPEN؛ `HashOperatorToken()` = `UNVERIFIED`؛ Recovery Fail-Closed |
 | **B-004 / DT-005 / U-008** | P1 | تضمین‌های دوام و هم‌زمانی SQLite/MQL5 | UNVERIFIED؛ تست در M5 لازم |
@@ -124,9 +124,9 @@ M1 هنوز فاز جاریِ تأییدشده نیست؛ تصمیمات انس�
 
 **بسته بعدی: بستن دروازه M0؛ نه شروع M2/M3.**
 
-1. **M1-DEC-D Alternative Decision:** ارائه و تصمیم‌گیری بر روی راهکار جایگزین Retry Handoff (سند `docs/M1-DEC-D-Retry-Handoff-Alternatives.md` موجود است)
+1. **M1-DEC-D Implementation Gate:** حل موارد CRITICAL (FINDING-001..008, P1-1..P1-4)، اعتبارسنجی M5، schema migration برای `config_fingerprint` — طراحی Alternative A **تایید شده** (Design Baseline)، پیاده‌سازی **بلاک شده**.
 2. **DT-001 Disposition:** **تکمیل شده** — به‌روزرسانی به `NOT A DEFECT` با شواهد (commit 2d82f1e / خط ۶۵۸۰ EA)
-3. **D-019 Status:** تناقض با U-006/DT-003 حل شود (دowngrade یا explicit risk acceptance)
+3. **D-019 Status:** تناقض با U-006/DT-003 حل شود (downgrade یا explicit risk acceptance)
 4. **Compile Baseline Verification:** کامپایل رسمی با لاگ تازه و EX5 SHA-256 در M0 scope
 5. **Architecture Docs Accuracy:** اسناد معماری باید به‌عنوان reference قابل اعتماد باشند (اصلاح‌های انجام شده)
 
@@ -155,32 +155,77 @@ M1 هنوز فاز جاریِ تأییدشده نیست؛ تصمیمات انس�
 
 ---
 
-## 9. به‌روزرسانی تصمیم M1-DEC-D — ۲۰۲۶-۱۱-۲۲
+## 9. به‌روزرسانی تصمیم M1-DEC-D — ۲۰۲۶-۱۱-۲۲ (نسخه کامل: v1 رد، v2 انتخاب Alternative A)
 
-**وضعیت فاز جاری: `M0 = IN PROGRESS — EXIT GATE NOT MET`**
+**وضعیت فاز جاری: `M0 = IN PROGRESS — EXIT GATE NOT MET` (طراحی تصمیمdone، پیاده‌سازی بلاک شده)**
 
-### تصمیم انسانی ثبت‌شده
+### ۹.۱ تاریخچه تصمیم
 
+#### v1 (اولین تصمیم) — ۲۰۲۶-۱۱-۲۲
 | شناسه | موضوع | تصمیم کاربر | وضعیت |
 |---|---|---|---|
-| **M1-DEC-D** | Retry Handoff Non-Resumption Acceptance؛ عدم Resume خودکار Retry Handoff پس از Restart و اصل Visibility ≠ Authority | **عدم پذیرش؛ طراحی راهکار جایگزین لازم است** | **REJECTED — ALTERNATIVE REQUIRED** |
+| **M1-DEC-D (v1)** | پذیرش عدم Resume خودکار Retry Handoff پس از Restart (Visibility ≠ Authority) | **عدم پذیرش؛ طراحی راهکار جایگزین لازم است** | **REJECTED — ALTERNATIVE REQUIRED** |
 
-توضیح تکمیلی از سوی کاربر ارائه نشده است.
+**توضیح:** مالک پروژه سیاست پیشنهادی مبنی بر موقت‌بودن Retry Handoff و Resume نشدن خودکار آن پس از Restart را نپذیرفت.
 
-### اثر بر Exit Gate فاز صفر
+---
 
-- رکورد مرجع `M0_BASELINE_AND_E2_6_GATE.md` این تصمیم را با `Blocking Phase = M0` مشخص کرده و آن را در فهرست `M0_BLOCKED` آورده است.
-- با رد سیاست پیشنهادی، این مانع رفع نشده است؛ در نتیجه Exit Gate فاز صفر همچنان برقرار نیست.
-- رد این گزینه به‌معنای تأیید Resume خودکار، ایجاد اختیار Retry پس از Restart، یا پذیرش ریسک نیست.
-- راهکار جایگزین هنوز طراحی و تصویب نشده و هیچ تغییر کدی بر اساس این تصمیم مجاز نشده است.
+#### v2 (تصمیم نهایی) — ۲۰۲۶-۱۱-۲۲
+| شناسه | موضوع | تصمیم کاربر | وضعیت |
+|---|---|---|---|
+| **M1-DEC-D (v2)** | انتخاب معماری بازیابی Retry Handoff | **APPROVED — ALTERNATIVE A (Durable Recovery with Automated Revalidation)** | **OWNER SELECTED — DESIGN BASELINE ONLY** |
 
-### محدوده تغییر این به‌روزرسانی
+**معماری Alternative A:**
+- بازیابی خودکار **فقط** برای وضعیت `INTERRUPTED_INTENT_DURABLE_NOT_SUBMITTED` با `submission_allowed=0`
+- در OnInit: Query `GetInterruptedRetryHandoffs()` و بازسازی handoff موقت
+- پردازش از طریق `ProcessRetryPendingHandoff()` موجود
+- اعتبارسنجی کامل پیش از Submit
+- **نیاز به تأیید مجدد صریح اپراتور (explicit re-consent) در هر Restart**
 
-فقط پاسخ انسانی M1-DEC-D و اثر مستقیم آن بر Gate ثبت شد. نقشه راه `REBUILD_ROADMAP.fa.md`، تصمیمات APPROVED قبلی، سیاست‌های D-006 و D-015، و سایر تصمیمات باز تغییر نکردند.
+### ۹.۲ موارد CRITICAL بلاک‌کننده پیاده‌سازی (باید قبل از هر تغییر کد حل شوند)
+
+| Finding | شدت | توضیح | منبع |
+|---------|------|--------|------|
+| **FINDING-001** | CRITICAL | Zustand `INTENT_DURABLE_NOT_SUBMITTED` + `submission_allowed=1` (Bound but not marked) از Approval Event تازه جدا نشدنی. کرش بعد از `MarkSubmissionBound` = وضعیت مبهم. | Risk-Auditor |
+| **FINDING-002** | CRITICAL | `RecoverUnresolved` در OnInit تمام `INTENT_DURABLE_NOT_SUBMITTED` را quarantine کرده و `RECONCILIATION_REQUIRED` می‌کند. Alternative A با این در تضاد است. | Risk-Auditor |
+| **FINDING-003** | HIGH | تضمین دوام SQLite بین `MarkSubmissionBound` و `MarkSubmissionMayHaveOccurred` = **UNVERIFIED** (D-008, DT-005, B-004) | Risk-Auditor |
+| **FINDING-004** | HIGH | `ProcessRetryPendingHandoff` فعلاً `submission_allowed` را چک نمی‌کند | Risk-Auditor |
+| **FINDING-007** | HIGH | اعتبارسنجی Config/Account/Symbol/News در restart recovery ناقص | Risk-Auditor |
+| **FINDING-008** | HIGH | Alternative A بایستی operator consent را دور می‌زند (مخالف طراحی E2.6) | Risk-Auditor |
+| **P1-1** | CRITICAL | Alt A با init quarantine (`RecoverUnresolved`) ناسازگار | Code-Reviewer |
+| **P1-2** | CRITICAL | Alt A می‌تواند bound intent را auto-resubmit کند (duplicate order) | Code-Reviewer |
+| **P1-3** | HIGH | `config_fingerprint` در approval events پایدار نیست — "No schema change" نادرست | Code-Reviewer |
+| **P1-4** | CRITICAL | Alt C snippet در OnInit یک no-op است (قبلاً توسط RecoverUnresolved انجام شده) | Code-Reviewer |
+
+### ۹.۳ پیش‌نیازهای پیاده‌سازی (Implementation Gate)
+
+**پیاده‌سازی مجاز نیست** تا زمانی که تمام موارد زیر حل و اثبات شوند:
+
+- [ ] FINDING-001: `submission_allowed=1` از auto-recovery مستثنی شود (reconciliation required)
+- [ ] FINDING-002: `RecoverUnresolved` برای `INTENT_DURABLE_NOT_SUBMITTED` غیرفعال/مشروط شود
+- [ ] FINDING-003: `UNVERIFIED` دوام SQLite پذیرفته شود؛ bound-not-marked = reconciliation
+- [ ] FINDING-004: چک `submission_allowed` در recovery path اضافه شود
+- [ ] FINDING-007: اعتبارسنجی کامل Context (symbol, contract, news, config) در restart recovery
+- [ ] FINDING-008: تأیید مجدد صریح اپراتور (explicit re-consent) در هر restart
+- [ ] P1-3: `config_fingerprint` در `retry_approval_events` پایدار شود (schema migration v6)
+- [ ] اعتبارسنجی M5: تست‌های SQLite crash/recovery، broker reconciliation، restart tests
+
+### ۹.۴ اثر بر Exit Gate فاز صفر
+
+- **M1-DEC-D طراحی:** RESOLVED (Alternative A انتخاب شده به‌عنوان Design Baseline)
+- **M1-DEC-D پیاده‌سازی:** BLOCKED (باید موارد CRITICAL حل شوند)
+- **M0 Exit Gate:** همچنان `BLOCKED` — تصمیم طراحی گرفته شده اما گیت پیاده‌سازی باز است
+- **Phase 1:** نمی‌تواند آغاز شود تا گیت پیاده‌سازی M1-DEC-D باز باشد
+
+### ۹.۵ محدوده تغییر
+
+فقط تصمیم M1-DEC-D و اثر مستقیم آن ثبت شده. نقشه راه `REBUILD_ROADMAP.fa.md`، تصمیمات APPROVED قبلی، سیاست‌های D-006 و D-015، و سایر تصمیمات باز تغییر نکرده‌اند.
+
+---
 
 ### اقدام بعدی مجاز در M0
 
-طراحی گزینه یا گزینه‌های جایگزین برای Retry Handoff، مقایسه پیامدهای آن‌ها برای Restart، Authority، Ledger و Attempt lifecycle، و ارائه تصمیم صریح برای تأیید انسانی. تا آن زمان M0 باز می‌ماند و شروع رسمی M1 مجاز نیست.
+حل موارد CRITICAL/HIGH شناسایی شده در بازبینی‌های مستقل (risk-auditor، code-reviewer)، و تکمیل اعتبارسنجی M5. تا آن زمان M0 باز می‌ماند و شروع رسمی M1 و پیاده‌سازی M1-DEC-D مجاز نیست.
 
 ---
 
@@ -306,7 +351,7 @@ M1 هنوز فاز جاریِ تأییدشده نیست؛ تصمیمات انس�
 
 | Risk | Severity | Status | Notes |
 |---|---|---|---|
-| **M1-DEC-D blocks M0 exit** | **P0 — BLOCKER** | **OPEN** | Human decision REJECTED — ALTERNATIVE REQUIRED; alternative designed (`docs/M1-DEC-D-Retry-Handoff-Alternatives.md`) but not yet decided |
+| **M1-DEC-D blocks M0 exit** | **P0 — BLOCKER** | **OPEN** | **OWNER SELECTED: ALTERNATIVE A (Design Baseline)** — Implementation BLOCKED by 10 CRITICAL/HIGH findings from independent reviews. M5 validation + mitigations required before implementation. |
 | **DT-001 disposition** | **P0** | **RESOLVED — NOT_A_DEFECT** | Fixed in code (commit 2d82f1e); Technical Debt updated to NOT_A_DEFECT; disposition formalized in M0 gate |
 | **D-019 vs U-006/DT-003 conflict** | **P1** | **OPEN** | D-019 APPROVED (code) / U-006 UNDECIDED (architecture) / DT-003 OPEN (debt) — documented but not resolved |
 | **Compile baseline M0-scope UNVERIFIED** | **P1** | **OPEN** | Worktree verified; M0 read-only constraint prevents formal verification in this phase |
@@ -320,7 +365,7 @@ M1 هنوز فاز جاریِ تأییدشده نیست؛ تصمیمات انس�
 
 ### PHASE 0 = **IN PROGRESS — EXIT GATE NOT MET**
 
-**Primary blocker:** **M1-DEC-D (Retry Handoff Non-Resumption) — REJECTED, ALTERNATIVE REQUIRED, Blocking Phase = M0**. Alternative designed but not yet decided.
+**Primary blocker:** **M1-DEC-D (Retry Handoff Non-Resumption) — OWNER SELECTED: ALTERNATIVE A (Design Baseline), IMPLEMENTATION BLOCKED**. 10 CRITICAL/HIGH findings from independent reviews (risk-auditor: FINDING-001,002,003,004,007,008; code-reviewer: P1-1,P1-2,P1-3,P1-4) must be resolved. M5 validation + mitigations required before implementation.
 
 **Secondary blockers:**
 - D-019 vs U-006/DT-003 status consistency
@@ -330,7 +375,7 @@ M1 هنوز فاز جاریِ تأییدشده نیست؛ تصمیمات انس�
 **Code health:** The underlying trading system invariants **hold in source** — 10/11 security contracts PASS, 1 PARTIAL (timeframe independence wording); all risk controls (margin, loss limits, positions, concentration, news fail-closed, authority epoch fencing, no auto-retry, reconciliation) are enforced fail-closed. The defect is in **documentation accuracy**, not runtime safety.
 
 **Authorization required for M0 closure:**
-1. Human decision on M1-DEC-D alternative (Retry Handoff policy)
+1. **M1-DEC-D Implementation Gate cleared** — all 10 CRITICAL/HIGH findings resolved, M5 validation complete
 2. D-019/U-006/DT-003 status resolution
 3. Fresh compile log (0 errors/0 warnings) verified in M0 scope
 4. Architecture docs serve as trustworthy exit gate reference (corrections applied)
