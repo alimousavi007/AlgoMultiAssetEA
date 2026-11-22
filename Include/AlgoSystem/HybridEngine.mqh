@@ -193,12 +193,23 @@ public:
          prevent_entries, close_on_news);
      }
 
-   void              SetNewsEnabled(bool enabled)
-     {
-      m_news_service.SetEnabled(enabled);
-     }
+void              SetNewsEnabled(bool enabled)
+      {
+       m_news_service.SetEnabled(enabled);
+      }
 
-   void              SetSpreadFilterParams(bool use_filter, double max_spread_points)
+    // WS-2: News evaluation for runtime state machine
+    NewsFeatures      EvaluateNews(const string symbol, datetime current_time, const PortfolioState& portfolio_state)
+      {
+       return m_news_service.Evaluate(symbol, current_time, portfolio_state);
+      }
+
+    bool              ShouldBlockEntry(const NewsFeatures& news, const string symbol) const
+      {
+       return m_news_service.ShouldBlockEntry(news, symbol);
+      }
+
+    void              SetSpreadFilterParams(bool use_filter, double max_spread_points)
      {
       m_use_spread_filter=use_filter;
       m_max_spread_points=max_spread_points;

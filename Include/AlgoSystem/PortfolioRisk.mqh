@@ -70,6 +70,8 @@ public:
       int        revision;           // Revision counter
       bool       valid;              // True if state was successfully read
       bool       fail_closed;        // True if fail-closed mode enabled
+      bool       read_complete;      // True if all source fields were read and validated
+      bool       stale;              // True if timestamp/expiry policy detected stale data
       };
 
 private:
@@ -438,14 +440,30 @@ public:
                                string &rejection_code,
                                string &rejection_reason) const
       {
-       if(!lock_state.valid)
-         {
-         rejection_code = "EXTERNAL_RISK_LOCK_INVALID";
-         rejection_reason = "External Risk Lock state read failed";
-         return false;
-         }
+// Check if read was complete and valid
+        if(!lock_state.read_complete)
+          {
+          rejection_code = "EXTERNAL_RISK_LOCK_INCOMPLETE_READ";
+          rejection_reason = "External Risk Lock read incomplete: not all fields validated";
+          return false;
+          }
+        
+        if(!lock_state.valid)
+          {
+          rejection_code = "EXTERNAL_RISK_LOCK_INVALID";
+          rejection_reason = "External Risk Lock state read failed";
+          return false;
+          }
 
-       if(lock_state.state == 0) // DISABLED
+        // Check staleness (fail-closed)
+        if(lock_state.stale && lock_state.fail_closed)
+          {
+          rejection_code = "EXTERNAL_RISK_LOCK_STALE";
+          rejection_reason = "External Risk Lock data stale (TTL expired or clock failure): " + lock_state.reason;
+          return false;
+          }
+
+        if(lock_state.state == 0) // DISABLED
          {
          return true; // Feature disabled - no block
          }
