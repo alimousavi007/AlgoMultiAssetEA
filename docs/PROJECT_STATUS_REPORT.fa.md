@@ -19,7 +19,7 @@ M1 هنوز فاز جاریِ تأییدشده نیست؛ تصمیمات انس�
 - تمام **۲۲/۲۲ Critical Invariants** پاس شده‌اند.
 - شکست Harness مربوط به اختلاف کپی StdLib با نصب ترمینال است؛ به‌عنوان ریسک P2 موجود و پذیرفته‌شده گزارش شده.
 - هشدار `origin.txt` mismatch نیز ریسک P2 موجود و پذیرفته‌شده است.
-- `DT-001` درباره امضای/پارامتر `OnChartEvent` در Technical Debt هنوز به‌عنوان P0 ثبت شده، اما بازبینی کد (Workstream D) نشان داد `NOT A DEFECT` — امضای `OnChartEvent` در خط ۶۵۸۰ معتبر است.
+- `DT-001` درباره امضای/پارامتر `OnChartEvent` در Technical Debt **تغییر به NOT A DEFECT** با شواهد (Workstream D) — امضای `OnChartEvent` در خط ۶۵۸۰ معتبر است.
 - معیار خروج M0 علاوه بر کامپایل پاک، تعیین تکلیف مستند همه یافته‌های E2.6 را نیز لازم می‌داند.
 - **بلاکِر اصلی:** **M1-DEC-D (Retry Handoff Non-Resumption Acceptance)** با وضعیت **REJECTED — ALTERNATIVE REQUIRED** و `Blocking Phase = M0`.
 
@@ -110,7 +110,7 @@ M1 هنوز فاز جاریِ تأییدشده نیست؛ تصمیمات انس�
 | شناسه | شدت | شرح | وضعیت عملیاتی |
 |---|---|---|---|
 | **M1-DEC-D** | **P0 — BLOCKER** | Retry Handoff Non-Resumption Acceptance | **REJECTED — ALTERNATIVE REQUIRED**؛ Blocking Phase = M0 |
-| **DT-001** | P0 (listed) | OnChartEvent signature concern | **NOT A DEFECT** (Workstream D) — needs disposition update |
+| **DT-001** | ~~P0 (listed)~~ **NOT A DEFECT** | OnChartEvent signature concern | **NOT A DEFECT** (Workstream D) — disposition updated |
 | **B-003 / DT-002 / U-007** | P1 | احراز هویت اپراتور برای Authority Recovery | OPEN؛ `HashOperatorToken()` = `UNVERIFIED`؛ Recovery Fail-Closed |
 | **B-004 / DT-005 / U-008** | P1 | تضمین‌های دوام و هم‌زمانی SQLite/MQL5 | UNVERIFIED؛ تست در M5 لازم |
 | **B-005** | P1 | تست‌های یکپارچگی و رفتاری اجرا نشده | NOT RUN؛ مجوز مستقل MT5/Strategy Tester لازم |
@@ -125,7 +125,7 @@ M1 هنوز فاز جاریِ تأییدشده نیست؛ تصمیمات انس�
 **بسته بعدی: بستن دروازه M0؛ نه شروع M2/M3.**
 
 1. **M1-DEC-D Alternative Decision:** ارائه و تصمیم‌گیری بر روی راهکار جایگزین Retry Handoff (سند `docs/M1-DEC-D-Retry-Handoff-Alternatives.md` موجود است)
-2. **DT-001 Disposition:** به‌روزرسانی به `NOT A DEFECT` با شواهد (commit 2d82f1e / خط ۶۵۸۰ EA)
+2. **DT-001 Disposition:** **تکمیل شده** — به‌روزرسانی به `NOT A DEFECT` با شواهد (commit 2d82f1e / خط ۶۵۸۰ EA)
 3. **D-019 Status:** تناقض با U-006/DT-003 حل شود (دowngrade یا explicit risk acceptance)
 4. **Compile Baseline Verification:** کامپایل رسمی با لاگ تازه و EX5 SHA-256 در M0 scope
 5. **Architecture Docs Accuracy:** اسناد معماری باید به‌عنوان reference قابل اعتماد باشند (اصلاح‌های انجام شده)
@@ -307,7 +307,7 @@ M1 هنوز فاز جاریِ تأییدشده نیست؛ تصمیمات انس�
 | Risk | Severity | Status | Notes |
 |---|---|---|---|
 | **M1-DEC-D blocks M0 exit** | **P0 — BLOCKER** | **OPEN** | Human decision REJECTED — ALTERNATIVE REQUIRED; alternative designed (`docs/M1-DEC-D-Retry-Handoff-Alternatives.md`) but not yet decided |
-| **DT-001 disposition needed** | **P0** | **OPEN** | Fixed in code (commit 2d82f1e); Technical Debt updated to NOT_A_DEFECT; needs formal disposition in M0 gate |
+| **DT-001 disposition** | **P0** | **RESOLVED — NOT_A_DEFECT** | Fixed in code (commit 2d82f1e); Technical Debt updated to NOT_A_DEFECT; disposition formalized in M0 gate |
 | **D-019 vs U-006/DT-003 conflict** | **P1** | **OPEN** | D-019 APPROVED (code) / U-006 UNDECIDED (architecture) / DT-003 OPEN (debt) — documented but not resolved |
 | **Compile baseline M0-scope UNVERIFIED** | **P1** | **OPEN** | Worktree verified; M0 read-only constraint prevents formal verification in this phase |
 | **Input audit consumer mapping incomplete** | **P2** | **OPEN** | 83 inputs documented; consumer/ConfigFingerprint per-input pending |
@@ -323,7 +323,6 @@ M1 هنوز فاز جاریِ تأییدشده نیست؛ تصمیمات انس�
 **Primary blocker:** **M1-DEC-D (Retry Handoff Non-Resumption) — REJECTED, ALTERNATIVE REQUIRED, Blocking Phase = M0**. Alternative designed but not yet decided.
 
 **Secondary blockers:**
-- DT-001 disposition formalization (code fixed, debt register updated)
 - D-019 vs U-006/DT-003 status consistency
 - Compile baseline M0-scope verification
 - D-001 CONFLICT (Setup vs Structure timeframe independence)
@@ -332,10 +331,9 @@ M1 هنوز فاز جاریِ تأییدشده نیست؛ تصمیمات انس�
 
 **Authorization required for M0 closure:**
 1. Human decision on M1-DEC-D alternative (Retry Handoff policy)
-2. DT-001 formal disposition in M0 gate
-3. D-019/U-006/DT-003 status resolution
-4. Fresh compile log (0 errors/0 warnings) verified in M0 scope
-5. Architecture docs serve as trustworthy exit gate reference (corrections applied)
+2. D-019/U-006/DT-003 status resolution
+3. Fresh compile log (0 errors/0 warnings) verified in M0 scope
+4. Architecture docs serve as trustworthy exit gate reference (corrections applied)
 
 **Phase 1 cannot start until Phase 0 Exit Gate is met per REBUILD_ROADMAP.fa.md.**
 

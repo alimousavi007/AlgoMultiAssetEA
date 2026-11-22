@@ -899,7 +899,7 @@ RESTART → GetInterruptedRetryHandoffs() →
 ```markdown
 ## M1-DEC-D: Retry Handoff Non-Resumption Acceptance
 
-**Status**: APPROVED  
+**Status**: PROPOSAL / PENDING APPROVAL  
 **Date**: 2026-11-22  
 **Decision Owner**: [Pending]
 
