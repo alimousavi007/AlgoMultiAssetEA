@@ -161,17 +161,13 @@ public:
          range_lookback, hysteresis_bars);
      }
 
-   void              SetDivergenceParams(int rsi_period,
-                                         int macd_fast,
-                                         int macd_slow,
-                                         int macd_signal,
-                                         double pivot_tolerance_percent,
-                                         int max_age_bars)
-     {
-      m_divergence_engine.SetParameters(
-         rsi_period, macd_fast, macd_slow, macd_signal,
-         pivot_tolerance_percent, max_age_bars);
-     }
+void              SetDivergenceParams(int rsi_period,
+                                          double pivot_tolerance_percent,
+                                          int max_age_bars)
+      {
+       m_divergence_engine.SetParameters(
+          rsi_period, pivot_tolerance_percent, max_age_bars);
+      }
 
    void              SetMomentumParams(int atr_period,
                                        int roc_period,
