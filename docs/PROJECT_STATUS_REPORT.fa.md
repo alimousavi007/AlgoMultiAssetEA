@@ -21,7 +21,7 @@ M1 هنوز فاز جاریِ تأییدشده نیست؛ تصمیمات انس�
 - هشدار `origin.txt` mismatch نیز ریسک P2 موجود و پذیرفته‌شده است.
 - `DT-001` درباره امضای/پارامتر `OnChartEvent` در Technical Debt **تغییر به NOT A DEFECT** با شواهد (Workstream D) — امضای `OnChartEvent` در خط ۶۵۸۰ معتبر است.
 - معیار خروج M0 علاوه بر کامپایل پاک، تعیین تکلیف مستند همه یافته‌های E2.6 را نیز لازم می‌داند.
-- **بلاکِر اصلی:** **M1-DEC-D (Retry Handoff Non-Resumption Acceptance)** با وضعیت **REJECTED — ALTERNATIVE REQUIRED** و `Blocking Phase = M0`.
+- **بلاکِر اصلی:** **M1-DEC-D (Retry Handoff Non-Resumption Acceptance)** — تصمیم معماری **OWNER SELECTED: ALTERNATIVE A (Design Baseline)**، اما **پیاده‌سازی بلاک شده** توسط ۶ finding CRITICAL از risk-auditor (FINDING-001, 002, 003, 004, 007, 008) و ۴ finding CRITICAL/HIGH از code-reviewer (P1-1 through P1-4). نیاز به اعتبارسنجی M5 و mitigations قبل از پیاده‌سازی.
 
 تا رفع یا تعیین تکلیف مستند موارد بالا، M0 را **IN PROGRESS / EXIT GATE NOT MET** نگه می‌داریم.
 
@@ -66,7 +66,7 @@ M1 هنوز فاز جاریِ تأییدشده نیست؛ تصمیمات انس�
 
 | فاز | هدف طبق نقشه راه | وضعیت فعلی | مانع / معیار ادامه |
 |---|---|---|---|
-| **M0** | پایه، تثبیت baseline و دروازه ایمنی | **IN PROGRESS — فاز جاری** | M1-DEC-D REJECTED (ALTERNATIVE REQUIRED)، DT-001 disposition، D-019 status، compile baseline verification، docs accuracy |
+| **M0** | پایه، تثبیت baseline و دروازه ایمنی | **IN PROGRESS — فاز جاری** | M1-DEC-D OWNER SELECTED (Alternative A Design Baseline, Impl Blocked)، DT-001 disposition، D-019 status، compile baseline verification، docs accuracy |
 | **M1** | تصمیمات معماری و قراردادها | **PREPARATION PARTIAL — شروع رسمی/خروج تأیید نشده** | تصمیمات U-001 تا U-005 و مدل اعتماد اپراتور U-007/DT-002 همچنان نیازمند تصمیم انسانی |
 | **M2** | ساده‌سازی Coordinator، EventChartCustom و Scheduler | **NOT STARTED IN ROADMAP SEQUENCE** | وابسته به بسته‌شدن M1 و تصمیمات معماری مرتبط |
 | **M3** | هندسه سیگنال و Featureها | **NOT OPENED AS A PHASE**؛ یک اصلاح محدود زودتر انجام شده | وابسته به M2؛ D-001 CONFLICT (Setup vs Structure timeframe) باید حل شود |
@@ -109,7 +109,7 @@ M1 هنوز فاز جاریِ تأییدشده نیست؛ تصمیمات انس�
 
 | شناسه | شدت | شرح | وضعیت عملیاتی |
 |---|---|---|---|
-| **M1-DEC-D** | **P0 — BLOCKER** | Retry Handoff Non-Resumption Acceptance | **REJECTED — ALTERNATIVE REQUIRED**؛ Blocking Phase = M0 |
+| **M1-DEC-D** | **P0 — BLOCKER** | Retry Handoff Non-Resumption Acceptance | **OWNER SELECTED: ALTERNATIVE A (Design Baseline)** — **IMPLEMENTATION BLOCKED** by CRITICAL safety findings (FINDING-001, 002, 003, 004, 007, 008; P1-1 through P1-4). Requires M5 validation & mitigations before implementation. |
 | **DT-001** | ~~P0 (listed)~~ **NOT A DEFECT** | OnChartEvent signature concern | **NOT A DEFECT** (Workstream D) — disposition updated |
 | **B-003 / DT-002 / U-007** | P1 | احراز هویت اپراتور برای Authority Recovery | OPEN؛ `HashOperatorToken()` = `UNVERIFIED`؛ Recovery Fail-Closed |
 | **B-004 / DT-005 / U-008** | P1 | تضمین‌های دوام و هم‌زمانی SQLite/MQL5 | UNVERIFIED؛ تست در M5 لازم |
@@ -124,9 +124,9 @@ M1 هنوز فاز جاریِ تأییدشده نیست؛ تصمیمات انس�
 
 **بسته بعدی: بستن دروازه M0؛ نه شروع M2/M3.**
 
-1. **M1-DEC-D Alternative Decision:** ارائه و تصمیم‌گیری بر روی راهکار جایگزین Retry Handoff (سند `docs/M1-DEC-D-Retry-Handoff-Alternatives.md` موجود است)
+1. **M1-DEC-D Implementation Gate:** حل موارد CRITICAL (FINDING-001..008, P1-1..P1-4)، اعتبارسنجی M5، schema migration برای `config_fingerprint` — طراحی Alternative A **تایید شده** (Design Baseline)، پیاده‌سازی **بلاک شده**.
 2. **DT-001 Disposition:** **تکمیل شده** — به‌روزرسانی به `NOT A DEFECT` با شواهد (commit 2d82f1e / خط ۶۵۸۰ EA)
-3. **D-019 Status:** تناقض با U-006/DT-003 حل شود (دowngrade یا explicit risk acceptance)
+3. **D-019 Status:** تناقض با U-006/DT-003 حل شود (downgrade یا explicit risk acceptance)
 4. **Compile Baseline Verification:** کامپایل رسمی با لاگ تازه و EX5 SHA-256 در M0 scope
 5. **Architecture Docs Accuracy:** اسناد معماری باید به‌عنوان reference قابل اعتماد باشند (اصلاح‌های انجام شده)
 
@@ -351,7 +351,7 @@ M1 هنوز فاز جاریِ تأییدشده نیست؛ تصمیمات انس�
 
 | Risk | Severity | Status | Notes |
 |---|---|---|---|
-| **M1-DEC-D blocks M0 exit** | **P0 — BLOCKER** | **OPEN** | Human decision REJECTED — ALTERNATIVE REQUIRED; alternative designed (`docs/M1-DEC-D-Retry-Handoff-Alternatives.md`) but not yet decided |
+| **M1-DEC-D blocks M0 exit** | **P0 — BLOCKER** | **OPEN** | **OWNER SELECTED: ALTERNATIVE A (Design Baseline)** — Implementation BLOCKED by 10 CRITICAL/HIGH findings from independent reviews. M5 validation + mitigations required before implementation. |
 | **DT-001 disposition** | **P0** | **RESOLVED — NOT_A_DEFECT** | Fixed in code (commit 2d82f1e); Technical Debt updated to NOT_A_DEFECT; disposition formalized in M0 gate |
 | **D-019 vs U-006/DT-003 conflict** | **P1** | **OPEN** | D-019 APPROVED (code) / U-006 UNDECIDED (architecture) / DT-003 OPEN (debt) — documented but not resolved |
 | **Compile baseline M0-scope UNVERIFIED** | **P1** | **OPEN** | Worktree verified; M0 read-only constraint prevents formal verification in this phase |
@@ -365,7 +365,7 @@ M1 هنوز فاز جاریِ تأییدشده نیست؛ تصمیمات انس�
 
 ### PHASE 0 = **IN PROGRESS — EXIT GATE NOT MET**
 
-**Primary blocker:** **M1-DEC-D (Retry Handoff Non-Resumption) — REJECTED, ALTERNATIVE REQUIRED, Blocking Phase = M0**. Alternative designed but not yet decided.
+**Primary blocker:** **M1-DEC-D (Retry Handoff Non-Resumption) — OWNER SELECTED: ALTERNATIVE A (Design Baseline), IMPLEMENTATION BLOCKED**. 10 CRITICAL/HIGH findings from independent reviews (risk-auditor: FINDING-001,002,003,004,007,008; code-reviewer: P1-1,P1-2,P1-3,P1-4) must be resolved. M5 validation + mitigations required before implementation.
 
 **Secondary blockers:**
 - D-019 vs U-006/DT-003 status consistency
@@ -375,7 +375,7 @@ M1 هنوز فاز جاریِ تأییدشده نیست؛ تصمیمات انس�
 **Code health:** The underlying trading system invariants **hold in source** — 10/11 security contracts PASS, 1 PARTIAL (timeframe independence wording); all risk controls (margin, loss limits, positions, concentration, news fail-closed, authority epoch fencing, no auto-retry, reconciliation) are enforced fail-closed. The defect is in **documentation accuracy**, not runtime safety.
 
 **Authorization required for M0 closure:**
-1. Human decision on M1-DEC-D alternative (Retry Handoff policy)
+1. **M1-DEC-D Implementation Gate cleared** — all 10 CRITICAL/HIGH findings resolved, M5 validation complete
 2. D-019/U-006/DT-003 status resolution
 3. Fresh compile log (0 errors/0 warnings) verified in M0 scope
 4. Architecture docs serve as trustworthy exit gate reference (corrections applied)
