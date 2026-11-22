@@ -155,32 +155,77 @@ M1 هنوز فاز جاریِ تأییدشده نیست؛ تصمیمات انس�
 
 ---
 
-## 9. به‌روزرسانی تصمیم M1-DEC-D — ۲۰۲۶-۱۱-۲۲
+## 9. به‌روزرسانی تصمیم M1-DEC-D — ۲۰۲۶-۱۱-۲۲ (نسخه کامل: v1 رد، v2 انتخاب Alternative A)
 
-**وضعیت فاز جاری: `M0 = IN PROGRESS — EXIT GATE NOT MET`**
+**وضعیت فاز جاری: `M0 = IN PROGRESS — EXIT GATE NOT MET` (طراحی تصمیمdone، پیاده‌سازی بلاک شده)**
 
-### تصمیم انسانی ثبت‌شده
+### ۹.۱ تاریخچه تصمیم
 
+#### v1 (اولین تصمیم) — ۲۰۲۶-۱۱-۲۲
 | شناسه | موضوع | تصمیم کاربر | وضعیت |
 |---|---|---|---|
-| **M1-DEC-D** | Retry Handoff Non-Resumption Acceptance؛ عدم Resume خودکار Retry Handoff پس از Restart و اصل Visibility ≠ Authority | **عدم پذیرش؛ طراحی راهکار جایگزین لازم است** | **REJECTED — ALTERNATIVE REQUIRED** |
+| **M1-DEC-D (v1)** | پذیرش عدم Resume خودکار Retry Handoff پس از Restart (Visibility ≠ Authority) | **عدم پذیرش؛ طراحی راهکار جایگزین لازم است** | **REJECTED — ALTERNATIVE REQUIRED** |
 
-توضیح تکمیلی از سوی کاربر ارائه نشده است.
+**توضیح:** مالک پروژه سیاست پیشنهادی مبنی بر موقت‌بودن Retry Handoff و Resume نشدن خودکار آن پس از Restart را نپذیرفت.
 
-### اثر بر Exit Gate فاز صفر
+---
 
-- رکورد مرجع `M0_BASELINE_AND_E2_6_GATE.md` این تصمیم را با `Blocking Phase = M0` مشخص کرده و آن را در فهرست `M0_BLOCKED` آورده است.
-- با رد سیاست پیشنهادی، این مانع رفع نشده است؛ در نتیجه Exit Gate فاز صفر همچنان برقرار نیست.
-- رد این گزینه به‌معنای تأیید Resume خودکار، ایجاد اختیار Retry پس از Restart، یا پذیرش ریسک نیست.
-- راهکار جایگزین هنوز طراحی و تصویب نشده و هیچ تغییر کدی بر اساس این تصمیم مجاز نشده است.
+#### v2 (تصمیم نهایی) — ۲۰۲۶-۱۱-۲۲
+| شناسه | موضوع | تصمیم کاربر | وضعیت |
+|---|---|---|---|
+| **M1-DEC-D (v2)** | انتخاب معماری بازیابی Retry Handoff | **APPROVED — ALTERNATIVE A (Durable Recovery with Automated Revalidation)** | **OWNER SELECTED — DESIGN BASELINE ONLY** |
 
-### محدوده تغییر این به‌روزرسانی
+**معماری Alternative A:**
+- بازیابی خودکار **فقط** برای وضعیت `INTERRUPTED_INTENT_DURABLE_NOT_SUBMITTED` با `submission_allowed=0`
+- در OnInit: Query `GetInterruptedRetryHandoffs()` و بازسازی handoff موقت
+- پردازش از طریق `ProcessRetryPendingHandoff()` موجود
+- اعتبارسنجی کامل پیش از Submit
+- **نیاز به تأیید مجدد صریح اپراتور (explicit re-consent) در هر Restart**
 
-فقط پاسخ انسانی M1-DEC-D و اثر مستقیم آن بر Gate ثبت شد. نقشه راه `REBUILD_ROADMAP.fa.md`، تصمیمات APPROVED قبلی، سیاست‌های D-006 و D-015، و سایر تصمیمات باز تغییر نکردند.
+### ۹.۲ موارد CRITICAL بلاک‌کننده پیاده‌سازی (باید قبل از هر تغییر کد حل شوند)
+
+| Finding | شدت | توضیح | منبع |
+|---------|------|--------|------|
+| **FINDING-001** | CRITICAL | Zustand `INTENT_DURABLE_NOT_SUBMITTED` + `submission_allowed=1` (Bound but not marked) از Approval Event تازه جدا نشدنی. کرش بعد از `MarkSubmissionBound` = وضعیت مبهم. | Risk-Auditor |
+| **FINDING-002** | CRITICAL | `RecoverUnresolved` در OnInit تمام `INTENT_DURABLE_NOT_SUBMITTED` را quarantine کرده و `RECONCILIATION_REQUIRED` می‌کند. Alternative A با این در تضاد است. | Risk-Auditor |
+| **FINDING-003** | HIGH | تضمین دوام SQLite بین `MarkSubmissionBound` و `MarkSubmissionMayHaveOccurred` = **UNVERIFIED** (D-008, DT-005, B-004) | Risk-Auditor |
+| **FINDING-004** | HIGH | `ProcessRetryPendingHandoff` فعلاً `submission_allowed` را چک نمی‌کند | Risk-Auditor |
+| **FINDING-007** | HIGH | اعتبارسنجی Config/Account/Symbol/News در restart recovery ناقص | Risk-Auditor |
+| **FINDING-008** | HIGH | Alternative A بایستی operator consent را دور می‌زند (مخالف طراحی E2.6) | Risk-Auditor |
+| **P1-1** | CRITICAL | Alt A با init quarantine (`RecoverUnresolved`) ناسازگار | Code-Reviewer |
+| **P1-2** | CRITICAL | Alt A می‌تواند bound intent را auto-resubmit کند (duplicate order) | Code-Reviewer |
+| **P1-3** | HIGH | `config_fingerprint` در approval events پایدار نیست — "No schema change" نادرست | Code-Reviewer |
+| **P1-4** | CRITICAL | Alt C snippet در OnInit یک no-op است (قبلاً توسط RecoverUnresolved انجام شده) | Code-Reviewer |
+
+### ۹.۳ پیش‌نیازهای پیاده‌سازی (Implementation Gate)
+
+**پیاده‌سازی مجاز نیست** تا زمانی که تمام موارد زیر حل و اثبات شوند:
+
+- [ ] FINDING-001: `submission_allowed=1` از auto-recovery مستثنی شود (reconciliation required)
+- [ ] FINDING-002: `RecoverUnresolved` برای `INTENT_DURABLE_NOT_SUBMITTED` غیرفعال/مشروط شود
+- [ ] FINDING-003: `UNVERIFIED` دوام SQLite پذیرفته شود؛ bound-not-marked = reconciliation
+- [ ] FINDING-004: چک `submission_allowed` در recovery path اضافه شود
+- [ ] FINDING-007: اعتبارسنجی کامل Context (symbol, contract, news, config) در restart recovery
+- [ ] FINDING-008: تأیید مجدد صریح اپراتور (explicit re-consent) در هر restart
+- [ ] P1-3: `config_fingerprint` در `retry_approval_events` پایدار شود (schema migration v6)
+- [ ] اعتبارسنجی M5: تست‌های SQLite crash/recovery، broker reconciliation، restart tests
+
+### ۹.۴ اثر بر Exit Gate فاز صفر
+
+- **M1-DEC-D طراحی:** RESOLVED (Alternative A انتخاب شده به‌عنوان Design Baseline)
+- **M1-DEC-D پیاده‌سازی:** BLOCKED (باید موارد CRITICAL حل شوند)
+- **M0 Exit Gate:** همچنان `BLOCKED` — تصمیم طراحی گرفته شده اما گیت پیاده‌سازی باز است
+- **Phase 1:** نمی‌تواند آغاز شود تا گیت پیاده‌سازی M1-DEC-D باز باشد
+
+### ۹.۵ محدوده تغییر
+
+فقط تصمیم M1-DEC-D و اثر مستقیم آن ثبت شده. نقشه راه `REBUILD_ROADMAP.fa.md`، تصمیمات APPROVED قبلی، سیاست‌های D-006 و D-015، و سایر تصمیمات باز تغییر نکرده‌اند.
+
+---
 
 ### اقدام بعدی مجاز در M0
 
-طراحی گزینه یا گزینه‌های جایگزین برای Retry Handoff، مقایسه پیامدهای آن‌ها برای Restart، Authority، Ledger و Attempt lifecycle، و ارائه تصمیم صریح برای تأیید انسانی. تا آن زمان M0 باز می‌ماند و شروع رسمی M1 مجاز نیست.
+حل موارد CRITICAL/HIGH شناسایی شده در بازبینی‌های مستقل (risk-auditor، code-reviewer)، و تکمیل اعتبارسنجی M5. تا آن زمان M0 باز می‌ماند و شروع رسمی M1 و پیاده‌سازی M1-DEC-D مجاز نیست.
 
 ---
 

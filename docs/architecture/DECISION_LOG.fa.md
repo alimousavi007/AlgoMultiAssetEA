@@ -110,22 +110,89 @@
 
 ---
 
-## ۹. ثبت تصمیم انسانی M1-DEC-D — ۲۰۲۶-۱۱-۲۲
+## ۹. ثبت تصمیم انسانی M1-DEC-D — ۲۰۲۶-۱۱-۲۲ (تاریخچه کامل)
 
+### ۹.۱ تصمیم اول (رد پیشنهادی)
 | شناسه | موضوع | پاسخ مالک پروژه | وضعیت تصمیم | اثر بر Gate |
 |------|--------|----------------|-------------|-------------|
-| **M1-DEC-D** | پذیرش عدم Resume خودکار Retry Handoff پس از Restart (Visibility ≠ Authority) | **رد شد؛ طراحی راهکار جایگزین لازم است** | **REJECTED — ALTERNATIVE REQUIRED** | **M0 BLOCKED**؛ تصمیم جایگزین هنوز ارائه یا تصویب نشده است |
+| **M1-DEC-D (v1)** | پذیرش عدم Resume خودکار Retry Handoff پس از Restart (Visibility ≠ Authority) | **رد شد؛ طراحی راهکار جایگزین لازم است** | **REJECTED — ALTERNATIVE REQUIRED** | **M0 BLOCKED** |
 
-**شرح پاسخ انسانی:** مالک پروژه سیاست پیشنهادی مبنی بر موقت‌بودن Retry Handoff و Resume نشدن خودکار آن پس از Restart را نپذیرفت. توضیح تکمیلی دیگری ارائه نشد.
-
-**وضعیت اقدام:**
-- این پاسخ، پذیرش ریسک نیست و به‌معنای تصویب رفتار معکوس یا Resume خودکار نیز نیست.
-- هیچ راهکار جایگزینی در این تصمیم تصویب نشده است؛ طراحی و ارزیابی گزینه جایگزین همچنان لازم است.
-- تا زمان ارائه راهکار جایگزین و اخذ تصمیم انسانی، هیچ تغییر کدی یا تغییر رفتاری بر مبنای این تصمیم مجاز نشده است.
-- طبق رکورد مرجع `M0_BASELINE_AND_E2_6_GATE.md` که `M1-DEC-D` را با `Blocking Phase = M0` و در فهرست `M0_BLOCKED` ثبت کرده، دروازه خروج M0 باز می‌ماند.
-
-**محدوده تغییر:** فقط پاسخ M1-DEC-D ثبت شد. هیچ‌یک از تصمیمات APPROVED قبلی، D-001 تا D-029، تغییر نکرده‌اند (D-030 حذف/ادغام شده)؛ سایر U-ها، تصمیمات باز، و نقشه راه نیز با این ثبت تغییر نمی‌کنند.
+**توضیح:** مالک پروژه سیاست پیشنهادی مبنی بر موقت‌بودن Retry Handoff و Resume نشدن خودکار آن پس از Restart را نپذیرفت.
 
 ---
+
+### ۹.۲ تصمیم نهایی — انتخاب Alternative A (۲۰۲۶-۱۱-۲۲)
+
+| شناسه | موضوع | تصمیم مالک پروژه | وضعیت تصمیم | اثر بر Gate |
+|------|--------|------------------|-------------|-------------|
+| **M1-DEC-D** | Retry Handoff Non-Resumption Acceptance — انتخاب معماری بازیابی | **APPROVED — ALTERNATIVE A (Durable Recovery with Automated Revalidation)** | **OWNER SELECTED — DESIGN BASELINE** | **M1-DEC-D RESOLVED (Design)** |
+
+**Alternative A — Durable Recovery with Automated Revalidation:**
+
+**معماری:**
+- بازیابی خودکار تنها برای وضعیت `INTERRUPTED_INTENT_DURABLE_NOT_SUBMITTED`
+- در OnInit: Query `GetInterruptedRetryHandoffs()` و بازسازی handoff موقت
+- پردازش از طریق `ProcessRetryPendingHandoff()` موجود
+- اعتبارسنجی کامل پیش از Submit
+
+**شرایط پیش‌نیاز (Preconditions) — باید همگی برقرار باشند:**
+1. Approval Event معتبر، پایدار و خوانا باشد
+2. `action_id` و `new_attempt_id` با هم تطبیق داشته باشند
+3. `setup_claims.current_attempt_id` همان Attempt را نشان دهد
+4. Retry Sequence دقیقاً مطابق Approval Event باشد
+5. Attempt دقیقاً در وضعیت `INTENT_DURABLE_NOT_SUBMITTED` باشد
+6. `submission_allowed == 0` (استثنا: `submission_allowed == 1` = RECONCILIATION_REQUIRED، کلا auto-recovery)
+7. هیچ مدرک Submit، Order، Deal، Position، Partial Fill یا Broker Execution وجود نداشته باشد
+8. Account Login و Server با حساب فعلی یکسان باشند
+9. Strategy Group و Config Fingerprint معتبر و مطابق باشند
+10. Symbol و Logical Setup Identity تغییر نکرده باشند
+11. Coordinator و Authority با Epoch معتبر تأیید شوند
+12. News Gate و Risk Gate تازه پاس شده باشند
+
+**اعتبارسنجی مجدد (اجباری پیش از Submit):**
+- تولید Plan تازه از HybridEngine
+- اعتبارسنجی Setup و تازگی
+- RiskEngine + PortfolioRisk
+- اعتبارسنجی Symbol/Contract
+- Authority/Epoch
+- Ledger/Attempt State
+- عدم Attempt/Submission تکراری
+
+**موارد ممنوع برای Auto-Recovery (Fail-Closed):**
+- `SUBMISSION_MAY_HAVE_OCCURRED` / `RECONCILIATION_REQUIRED` / Submitted / Partial Fill
+- Broker Evidence موجود / Attempt unreadable or missing
+- Approval/Event ناقص / Account-Server-Config mismatch
+- Authority نامعتبر / ORPHANED / SQLite Transaction نامطمئن
+- `submission_allowed == 1` (Bound but not marked) — باید Reconciliation شود
+
+**Idempotency / Restart تکراری:**
+- یک Approval Event فقط یک‌بار قابل مصرف (Claim/Retry Sequence با CAS کنترل)
+- Authority/Epoch fencing مانع دو Instance همزمان
+- عدم Coordinator معتبر = بلاک Submit
+
+---
+
+### ۹.۳ محدودیت‌های حیاتی و موارد UNVERIFIED (باید قبل از پیاده‌سازی حل شوند)
+
+| مورد | شدت | توضیح | بلوکر پیاده‌سازی |
+|------|------|--------|------------------|
+| **FINDING-001** | CRITICAL | Zustand `INTENT_DURABLE_NOT_SUBMITTED` + `submission_allowed=1` (Bound but not marked) از Approval Event تازه جدا نشدنی است. اگر Prozess بعد از `MarkSubmissionBound` کرش کند، وضعیت شبیه تازه به نظر می‌رسد. | بله — باید `submission_allowed=1` را از auto-recovery مستثنی کنیم |
+| **FINDING-002** | CRITICAL | `RecoverUnresolved` در OnInit تمام `INTENT_DURABLE_NOT_SUBMITTED` را cuarantine کرده و `RECONCILIATION_REQUIRED` می‌کند. Alternative A با این در تضاد است. | بله — باید RecoverUnresolved غیرفعال/مشروط شود |
+| **FINDING-003** | HIGH | تضمین دوام SQLite بین `MarkSubmissionBound` و `MarkSubmissionMayHaveOccurred` = **UNVERIFIED** (D-008, DT-005, B-004) | بله — bound-not-marked به‌عنوان مبهم تلقی شود |
+| **FINDING-004** | HIGH | `ProcessRetryPendingHandoff` فعلاً `submission_allowed` را چک نمی‌کند | بله — باید در recovery path اضافه شود |
+| **FINDING-007** | HIGH | اعتبارسنجی Config/Account/Symbol/News در restart recovery ناقص است | بله — باید کامل شود |
+| **FINDING-008** | HIGH | Alternative A بایستی operator consent را دور می‌زند (مخالف طراحی E2.6) | بله — باید re-consent explicit اضافه شود |
+| **FINDING-003 (Risk-Auditor)** | UNVERIFIED | SQLite/MQL5 crash durability، WAL fsync، lock contention = ناشناخته | بله — تست M5 لازم |
+
+**مهم:** این تصمیم **تنها طراحی معماری** است. **پیاده‌سازی مجاز نیست** تا زمانی که تمام موارد CRITICAL/HIGH حل و تست‌های مربوطه (M5) انجام شوند. تصمیم D-009، D-010، D-015، D-016 و قراردادهای Fail-Closed دیگر **باقی و غیرقابل تضعیف** می‌مانند.
+
+---
+
+### ۹.۴ تاریخچه کامل
+- **۲۰۲۶-۱۱-۲۲ (v1):** پیشنهاد عدم Resume خودکار — **REJECTED**
+- **۲۰۲۶-۱۱-۲۲ (v2):** انتخاب Alternative A — **OWNER SELECTED** (Design Baseline only)
+
+---
+
 *این ثبت THE منبع حقیقت برای تمام تصمیمات تایید شده است. هیچ کد، کامنت، یا مستندات قدیمی نمی‌تواند تصمیمات اینجا را 덮어쓰다 کند.*
 

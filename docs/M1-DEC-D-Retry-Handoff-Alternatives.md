@@ -1,10 +1,21 @@
 # M1-DEC-D: Retry Handoff Non-Resumption Acceptance — Architecture Alternatives
 
 **Document Type**: Design Analysis & Decision Record  
-**Status**: DRAFT — Pending Owner Approval  
+**Status**: OWNER SELECTED — ALTERNATIVE A (Design Baseline Only)  
 **Date**: 2026-11-22  
 **Task Classification**: Architecture Design / Decision Support  
 **Evidence Level**: STATIC SOURCE TRACE (read-only, no runtime verification)
+
+---
+
+## ⚠️ IMPORTANT NOTICE
+
+**This decision records the OWNER'S ARCHITECTURAL SELECTION of Alternative A. It does NOT authorize implementation.**
+
+**Implementation is BLOCKED** pending resolution of CRITICAL safety findings identified by independent risk audit (see Section 4.5). All CRITICAL/HIGH findings must be resolved and M5 validation completed before any code changes.
+
+**Previous Decision (v1):** REJECTED — ALTERNATIVE REQUIRED  
+**Current Decision (v2):** OWNER SELECTED — ALTERNATIVE A (Durable Recovery with Automated Revalidation) — **DESIGN BASELINE ONLY**
 
 ---
 
@@ -18,11 +29,12 @@ This document provides a complete read-only trace of the ACTUAL Retry Handoff be
 - After restart: visibility only via `GetInterruptedRetryHandoffs`, NO automatic resubmission
 - Fail-closed design: ambiguous states → RECONCILIATION_REQUIRED
 
-**Decision Required**: Choose architecture for retry handoff non-resumption acceptance that balances:
-- Safety (no duplicate submissions)
-- Operability (recover legitimate retries)
-- Auditability (clear state transitions)
-- Complexity (implementation burden)
+**Owner Decision (v2):** ALTERNATIVE A SELECTED — Durable Recovery with Automated Revalidation  
+**Implementation Status:** BLOCKED — CRITICAL safety findings must be resolved first (see Section 4.5)
+
+**Previous Decision (v1):** REJECTED — ALTERNATIVE REQUIRED
+
+**Decision Required (for Implementation):** Resolve all CRITICAL/HIGH findings in Section 4.5, complete M5 validation, then re-evaluate.
 
 ---
 
@@ -839,69 +851,120 @@ RESTART → GetInterruptedRetryHandoffs() →
 
 ---
 
-## PART 4: HUMAN DECISION OUTPUT
+## PART 4: HUMAN DECISION OUTPUT — OWNER SELECTED ALTERNATIVE A
 
-### 4.1 Recommended Alternative
+### 4.1 Owner Decision: Alternative A — Durable Recovery with Automated Revalidation
 
-**RECOMMENDATION: Alternative C — Reconcile-and-Recreate**
+**Status**: OWNER SELECTED — DESIGN BASELINE ONLY  
+**Date**: 2026-11-22  
+**Decision Owner**: Project Owner
 
-**Rationale**:
-1. **Safest**: Fail-closed by default; all interrupted handoffs marked RECONCILIATION_REQUIRED
-2. **Simplest**: Minimal new code; reuses existing `MarkReconciliationRequired()`
-3. **No schema change**: No migration required
-4. **Preserves all decisions**: D-006 through D-018 intact
-5. **Matches current behavior**: Extends existing fail-closed philosophy
-6. **Lowest implementation risk**: No new tables, no new UI flows
-7. **Clear audit trail**: All interruptions logged as RECONCILIATION_REQUIRED
+### 4.2 Alternative A — Design Specification (as Selected)
 
-**Trade-offs**:
-- **Higher operator burden**: Manual resolution required
-- **Slower recovery**: No automatic resumption
-- **Requires training**: Operators must understand reconciliation workflow
+**Architecture:**
+- Automatic resumption ONLY for `INTERRUPTED_INTENT_DURABLE_NOT_SUBMITTED` state
+- On OnInit: Query `GetInterruptedRetryHandoffs()` and recreate transient handoff
+- Process via existing `ProcessRetryPendingHandoff()` timer path
+- Full pre-submit revalidation mandatory
 
-**Mitigation**:
-- Clear UI status: "INTERRUPTED_RECONCILIATION_REQUIRED"
-- Operator runbook: Step-by-step resolution guide
-- Audit log: Track all manual resolutions
+**Preconditions (ALL must pass):**
+1. Approval Event valid, durable, readable
+2. `action_id` and `new_attempt_id` match
+3. `setup_claims.current_attempt_id` points to this attempt
+4. Retry Sequence matches approval event
+5. Attempt state == `INTENT_DURABLE_NOT_SUBMITTED`
+6. **`submission_allowed == 0`** (CRITICAL: `submission_allowed == 1` → RECONCILIATION_REQUIRED, NO auto-recovery)
+7. No broker evidence (tickets, deals, positions, partial fills)
+8. Account Login/Server match current
+9. Strategy Group + Config Fingerprint match
+10. Symbol + Logical Setup Key unchanged
+11. Coordinator + Authority + Epoch valid
+12. News Gate + Risk Gate freshly passed
 
-### 4.2 Remaining Risks
+**Mandatory Revalidation Before Submit:**
+- Fresh Plan from HybridEngine
+- Setup freshness validation
+- RiskEngine + PortfolioRisk
+- Symbol/Contract validation
+- Authority/Epoch validation
+- Ledger/Attempt state validation
+- Duplicate Attempt/Submission check
 
-| Risk | Severity | Mitigation |
-|------|----------|------------|
-| Operator ignores RECONCILIATION_REQUIRED | Medium | Dashboard alert; blocking unresolved checks |
-| Operator resolves incorrectly | Medium | Training; audit log; reversible actions |
-| Increased support burden | Low | Documentation; runbook |
-| Slower recovery time | Low | Acceptable for safety |
+**Fail-Closed Exclusions (NO auto-recovery):**
+- `SUBMISSION_MAY_HAVE_OCCURRED` / `RECONCILIATION_REQUIRED` / Submitted / Partial Fill
+- Broker evidence present / Attempt unreadable or missing
+- Approval/Event incomplete / Account-Server-Config mismatch
+- Authority invalid / ORPHANED / SQLite transaction uncertain
+- **`submission_allowed == 1` (Bound but not marked) → RECONCILIATION_REQUIRED**
 
-### 4.3 Contracts That Don't Change
+**Idempotency / Restart Safety:**
+- One approval event = one consumption (Claim/Retry Sequence CAS)
+- Authority/Epoch fencing prevents concurrent instances
+- No valid Coordinator = block submission
 
-**UNCHANGED**:
-- D-006: Durable intent (SQLite)
-- D-007: Attempt identity (distinct attempt_id)
-- D-008: Ledger schema (v5, no migration)
-- D-009: Fail-closed submission
-- D-010: Recovery fail-safe
-- D-011: Execution ledger authority
-- D-012: Setup claim lifecycle
-- D-014: Authority fencing (epoch)
-- D-015: Risk revalidation
-- D-016: Reconciliation required for ambiguous
-- D-017: No auto-close for conflict
-- D-018: Conflict block scope
+---
 
-**NEW BEHAVIOR**:
-- On OnInit: Mark all INTERRUPTED_INTENT_DURABLE_NOT_SUBMITTED as RECONCILIATION_REQUIRED
-- No automatic retry resumption
-- Operator must manually resolve or create new retry
+### 4.3 CRITICAL Safety Findings — IMPLEMENTATION BLOCKED
 
-### 4.4 Exact Decision Record Text
+**Independent Risk Audit (risk-auditor) and Code Review (code-reviewer) identified the following BLOCKING findings:**
+
+| Finding | Severity | Description | Source | Blocking |
+|---------|----------|-------------|--------|----------|
+| **FINDING-001** | CRITICAL | `INTENT_DURABLE_NOT_SUBMITTED` + `submission_allowed=1` (Bound but not marked) indistinguishable from fresh approved retry. Crash after `MarkSubmissionBound` but before `MarkSubmissionMayHaveOccurred` leaves state identical to recoverable intent. | `ExecutionLedger.mqh:1271-1320, 1377-1430, 3379-3383` | YES |
+| **FINDING-002** | CRITICAL | `RecoverUnresolved` in OnInit quarantines ALL `INTENT_DURABLE_NOT_SUBMITTED` → `RECONCILIATION_REQUIRED`. Alt A conflicts with existing fail-closed quarantine. | `ExecutionLedger.mqh:1960-2025, 2029-2105; EA.mq5:4620` | YES |
+| **FINDING-003** | HIGH | SQLite durability between `MarkSubmissionBound` and `MarkSubmissionMayHaveOccurred` = **UNVERIFIED** (D-008, DT-005, B-004). Separate transactions, no proven fsync/WAL guarantees. | Project decisions D-008, DT-005, B-004 | YES |
+| **FINDING-004** | HIGH | `ProcessRetryPendingHandoff` does NOT validate `submission_allowed` before submit. | `EA.mq5:6351-6550` | YES |
+| **FINDING-007** | HIGH | Config/Account/Symbol/News validation incomplete in restart recovery path. | `EA.mq5:6365-6380` | YES |
+| **FINDING-008** | HIGH | Alt A bypasses operator consent gate (violates E2.6 design). | E2.6 architecture | YES |
+
+**Code Review (code-reviewer) Additional P1 Findings:**
+- P1-1: Alt A incompatible with init quarantine (`RecoverUnresolved` already marks as `RECONCILIATION_REQUIRED`)
+- P1-2: Alt A can auto-resubmit bound intent (duplicate order path)
+- P1-3: `config_fingerprint` not persisted in approval events — "No schema change" is FALSE
+- P1-4: Alt C's OnInit snippet is no-op (already done by `RecoverUnresolved`)
+
+---
+
+### 4.4 Required Mitigations Before Implementation
+
+| Mitigation | Finding | Status |
+|------------|---------|--------|
+| Exclude `submission_allowed=1` from auto-recovery (require reconciliation) | FINDING-001, FINDING-004 | NOT DONE |
+| Disable/modify `RecoverUnresolved` for `INTENT_DURABLE_NOT_SUBMITTED` or make conditional | FINDING-002 | NOT DONE |
+| Accept `UNVERIFIED` SQLite durability; treat bound-not-marked as ambiguous | FINDING-003 | DESIGN DECISION NEEDED |
+| Add full context revalidation (symbol, contract, news, config) to restart recovery | FINDING-007 | NOT DONE |
+| Require explicit operator re-consent on restart (do not auto-convert inspection to active handoff) | FINDING-008 | NOT DONE |
+| Persist `config_fingerprint` in `retry_approval_events` (schema change required) | P1-3 | NOT DONE |
+
+---
+
+### 4.5 Implementation Gate
+
+**IMPLEMENTATION NOT AUTHORIZED** until ALL of the above are resolved and evidenced:
+
+- [ ] FINDING-001 resolved: `submission_allowed` discrimination implemented
+- [ ] FINDING-002 resolved: `RecoverUnresolved` modified or gated
+- [ ] FINDING-003 acknowledged: `UNVERIFIED` durability documented, bound-not-marked = reconciliation
+- [ ] FINDING-004 resolved: `submission_allowed` check added to recovery path
+- [ ] FINDING-007 resolved: Full context revalidation in restart recovery
+- [ ] FINDING-008 resolved: Explicit operator re-consent required
+- [ ] P1-3 resolved: `config_fingerprint` persisted (schema v6 migration)
+- [ ] M5 validation completed: SQLite crash/recovery, broker reconciliation, restart tests
+- [ ] Code review of implementation against this design baseline
+
+**Previous Decision (v1):** REJECTED — ALTERNATIVE REQUIRED (2026-11-22)  
+**Current Decision (v2):** OWNER SELECTED — ALTERNATIVE A (Design Baseline Only) (2026-11-22)
+
+---
+
+### 4.6 Exact Decision Record Text
 
 ```markdown
 ## M1-DEC-D: Retry Handoff Non-Resumption Acceptance
 
-**Status**: PROPOSAL / PENDING APPROVAL  
+**Status**: OWNER SELECTED — ALTERNATIVE A (DESIGN BASELINE ONLY)  
 **Date**: 2026-11-22  
-**Decision Owner**: [Pending]
+**Decision Owner**: Project Owner
 
 ### Context
 After restart, approved retry handoffs (INTENT_DURABLE_NOT_SUBMITTED) remain in a 
@@ -909,63 +972,55 @@ durable but non-submitted state. Current implementation provides visibility only
 no automatic resubmission occurs.
 
 ### Decision
-**Alternative C — Reconcile-and-Recreate**
+**Alternative A — Durable Recovery with Automated Revalidation**
 
 On system initialization (OnInit):
 1. Query `GetInterruptedRetryHandoffs()` for all interrupted handoffs
 2. For each `INTERRUPTED_INTENT_DURABLE_NOT_SUBMITTED`:
-   - Call `MarkReconciliationRequired(new_attempt_id, "RESTART_INTERRUPTION")`
-3. Display in dashboard as RECONCILIATION_REQUIRED
-4. No automatic resubmission
+   - **EXCLUDE** if `submission_allowed == 1` (bound but not marked) → mark RECONCILIATION_REQUIRED
+   - **EXCLUDE** if any broker evidence exists (tickets, deals, positions, partial fills)
+   - **EXCLUDE** if `account_login/server`, `config_fingerprint`, `symbol`, `strategy_group_key` mismatch
+   - **EXCLUDE** if Authority/Epoch invalid or ORPHANED
+   - **REQUIRE** explicit operator re-consent before activating handoff
+   - Recreate transient handoff (`g_retry_handoff`) from durable approval event
+   - Process via `ProcessRetryPendingHandoff()` with FULL revalidation
+3. No automatic resubmission without all preconditions met
 
 Operator must:
-- Review each RECONCILIATION_REQUIRED attempt
-- Manually resolve (close, modify, or abandon)
-- OR create fresh retry approval (new action_id, new approval event)
+- Explicitly re-authorize each interrupted retry on restart
+- Review any RECONCILIATION_REQUIRED attempts manually
 
 ### Rationale
-- **Safety**: Fail-closed by default; no automatic broker submission
-- **Simplicity**: Minimal code change; reuses existing MarkReconciliationRequired()
-- **No migration**: No schema change required
-- **Auditability**: All interruptions logged
-- **Preserves decisions**: D-006 through D-018 intact
+- **Safety**: Fail-closed by default; bound-but-not-marked excluded; operator consent required
+- **Operability**: Recovers legitimate uncommitted retries
+- **Auditability**: All interruptions logged; operator actions recorded
+
+### CRITICAL CONDITIONS (Implementation Blocked Until Resolved)
+1. `submission_allowed=1` discrimination implemented
+2. `RecoverUnresolved` gated for `INTENT_DURABLE_NOT_SUBMITTED`
+3. `config_fingerprint` persisted in approval events (schema migration)
+4. Full context revalidation in restart recovery
+5. Explicit operator re-consent gate
+6. M5 validation: SQLite crash/recovery, broker reconciliation, restart tests
 
 ### Consequences
-**Positive**:
-- Safest option (no duplicate submissions)
-- Simplest implementation
+**Positive** (if mitigations implemented):
+- Safe recovery of legitimate uncommitted retries
+- Reduced operator burden for clear-cut cases
 - Clear audit trail
 
 **Negative**:
-- Higher operator burden
-- Slower recovery (manual resolution required)
-- Requires operator training
-
-### Implementation
-** OnInit() enhancement:
-```mql5
-// After GetInterruptedRetryHandoffs() call
-for(int i=0; i<g_retry_interrupted_count; i++)
-  {
-   if(g_retry_interrupted[i].status_code == "INTERRUPTED_INTENT_DURABLE_NOT_SUBMITTED")
-     {
-      g_execution_ledger.MarkReconciliationRequired(
-          g_retry_interrupted[i].new_attempt_id,
-          "RESTART_INTERRUPTION: Interrupted retry handoff marked for reconciliation");
-     }
-  }
-```
-
-### Verification
-- Restart after approval → new attempt marked RECONCILIATION_REQUIRED
-- No automatic submission
-- Operator can resolve or create new retry
-- Audit log records all actions
+- Requires schema migration (v6)
+- Requires `RecoverUnresolved` behavior change
+- Requires explicit operator re-consent on every restart
+- M5 validation effort significant
 
 ### References
 - Source trace: This document, Part 1
-- ExecutionLedger.mqh: MarkReconciliationRequired() lines 1522-1556
-- AlgoMultiAssetEA.mq5: GetInterruptedRetryHandoffs() lines 6115-6159
+- Risk Audit: FINDING-001 through FINDING-008 (Section 4.3)
+- Code Review: P1-1 through P1-4, P2-1 through P2-10
+- ExecutionLedger.mqh: MarkSubmissionBound (1271), MarkSubmissionMayHaveOccurred (1377), RecoverUnresolved (1960)
+- AlgoMultiAssetEA.mq5: OnInit (4935), ProcessRetryPendingHandoff (6351), RetryUILoadInterruptedList (6115)
 ```
 
 ---

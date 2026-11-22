@@ -99,18 +99,19 @@ MarketData → Features → Regime → Strategies → SignalEngine → TradeFilt
 | **B-003** | احراز هویت اپراتور WS1 (PKI/HMAC/IdP) پیاده‌سازی نشده | P1 | OPEN — بازیابی Fail-Closed حفظ شده (`HashOperatorToken() == "UNVERIFIED"`) |
 | **B-004** | اعتبار SQLite/MQL5 (تصادم، سریالی) | P1 | UNVERIFIED — Fail-safe recovery در جایگاه |
 | **B-005** | تست‌های یکپارچه اجرایی (Strategy Tester/MT5) | P1 | NOT RUN — مجوز مجزا لازم |
-| **M1-DEC-D** | Retry Handoff Non-Resumption Acceptance | P0 | **REJECTED — ALTERNATIVE REQUIRED** — بلوکر M0 |
+| **M1-DEC-D** | Retry Handoff Non-Resumption Acceptance | P0 | **OWNER SELECTED: ALTERNATIVE A (Design Baseline)** — **IMPLEMENTATION BLOCKED** by CRITICAL safety findings (FINDING-001, 002, 003, 004, 007, 008; P1-1 through P1-4). Requires M5 validation & mitigations before implementation. |
 
 ---
 
 ## ۸. بسته پیاده‌سازی بعدی (M0 → M1)
 
 **بسته کوچک بعدی:**
-1. ثبت تصمیمات انسانی A–E و M1-DEC-D (مدل اعتماد رویداد نمودار، F-E26-005، محافظت نمونه-واحد،リカバری مالک مرده، مالکیت جهان نماد، Retry Handoff policy)
+1. ثبت تصمیمات انسانی A–E و M1-DEC-D (مدل اعتماد رویداد نمودار، F-E26-005، محافظت نمونه-واحد،リカバری مالک مرده، مالکیت جهان نماد، Retry Handoff policy — **Design Baseline Done, Impl Blocked**)
 2. مستندات قراردادهای هدف دقیق برای فاز M2
 3. تصمیم معماری برای Setup vs Structure timeframe independence (D-001 CONFLICT)
+4. **M1-DEC-D Implementation Gate:** حل موارد CRITICAL (FINDING-001..008, P1-1..P1-4)، اعتبارسنجی M5، schema migration برای `config_fingerprint`
 
-**شرط پیش‌نیاز:** کامپایل پایه پاک (✅ تایید شده در این جلسه — ۰ خطا/۰ هشدار، EX5 تازه تأیید شده)
+**شرط پیش‌نیاز:** کامپایل پایه پاک (✅ تایید شده در این جلسه — ۰ خطا/۰ هشدار، EX5 تازه تأیید شده) + **M1-DEC-D Implementation Gate باز**
 
 ---
 

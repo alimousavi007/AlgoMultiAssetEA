@@ -54,7 +54,7 @@ Evidence sources: current source inspection (`Experts/AlgoMultiAssetEA.mq5`, `In
 | A | Chart event protocol trust model **A** (trusted cooperating local EAs) vs **B** (untrusted local actor) or full retirement path | `HUMAN_DECISION_REQUIRED` | Determines whether `CHARTREG_*`/`SNAPREG_*` remain bounded local protocol, need hardening, or retire in M7 after dependency proof. | M2/M7 scope; protocol retirement |
 | B | **F-E26-005** position-management policy under authority loss | `HUMAN_DECISION_REQUIRED` | Safety-critical: what managed-position actions are allowed/blocked/fail-closed when authority is lost/uncertain. | M1/M5/M6 safety contract |
 | C | Single-instance guard design & dead-owner recovery | `HUMAN_DECISION_REQUIRED` | `account_authority` is account/server-login scoped (`Ledger` key usage around authority APIs; EA `:2022,3267,3497`) and suitable as **single-coordinator-per-account** guard statically, **not** a universal instance guard; recovery semantics must be explicit/fail-safe. | M1/M2 |
-| D | Retry handoff after restart / explicit acceptance of non-resumption semantics | `HUMAN_DECISION_REQUIRED` → **REJECTED — ALTERNATIVE REQUIRED (M1-DEC-D)** | R1 adds read-only interrupted visibility, **not** restore/submit. User must explicitly accept no auto-resume; approval remains non-executing until fresh handoff path runs. | **M0 BLOCKED** |
+| D | Retry handoff after restart / explicit acceptance of non-resumption semantics | `HUMAN_DECISION_REQUIRED` → **REJECTED — ALTERNATIVE REQUIRED (v1)** → **OWNER SELECTED: ALTERNATIVE A (v2)** | R1 adds read-only interrupted visibility, **not** restore/submit. v1: REJECTED. v2: Alternative A selected as Design Baseline ONLY — automated recovery for `INTERRUPTED_INTENT_DURABLE_NOT_SUBMITTED` with `submission_allowed=0`, full revalidation, explicit operator re-consent. **IMPLEMENTATION BLOCKED** pending CRITICAL findings resolution (see `M1-DEC-D-Retry-Handoff-Alternatives.md` §4.3). | **M0 BLOCKED (Design Resolved, Impl Blocked)** |
 | E | Symbol universe ownership (explicit input list / controlled Market Watch / existing mechanism) | `HUMAN_DECISION_REQUIRED` | Required before M2/M3 to avoid host-chart coupling or unsafe implicit universe. | M2/M3 |
 | Arch | Single-EA / multi-symbol / one terminal / one account | `APPROVED (direction, per task)` | Guides roadmap only; implementation remains blocked by M0 gate, decisions A–E, and validation evidence. | n/a (non-detail) |
 
@@ -78,19 +78,19 @@ Evidence sources: current source inspection (`Experts/AlgoMultiAssetEA.mq5`, `In
 |---|---|---|
 | Baseline actual and repeatable | **PASS** | Git baseline recorded from read-only commands; source refs recorded. |
 | All known E2.6 findings have status and required action | **PASS (documented)** | See reconciliation table and ledger below. |
-| No hidden/unowned P0/P1 safety risk remains | **FAIL** | **M1-DEC-D REJECTED — ALTERNATIVE REQUIRED** is an unresolved P0 decision blocking M0 exit. P1 safety invariants are static but runtime-unverified; no hidden P1 regression found in reviewed scope beyond known open decisions/UNVERIFIED evidence. |
-| Human decisions A–E/F-E26-005/handoff acceptance separated clearly | **FAIL (handoff acceptance REJECTED)** | M1-DEC-D rejected; alternative not yet provided/approved. Decisions A–E remain open. |
+| No hidden/unowned P0/P1 safety risk remains | **FAIL** | **M1-DEC-D: Alternative A selected (Design Baseline), but IMPLEMENTATION BLOCKED** by CRITICAL findings (FINDING-001, FINDING-002, FINDING-003, FINDING-004, FINDING-007, FINDING-008). These are P0/P1 safety risks requiring resolution before implementation. P1 safety invariants are static but runtime-unverified. |
+| Human decisions A–E/F-E26-005/handoff acceptance separated clearly | **PARTIAL (handoff: Design Resolved, Impl Blocked)** | M1-DEC-D: Alternative A selected as Design Baseline. Implementation blocked by CRITICAL safety findings. Decisions A–E remain open. |
 | M1/M2 dependencies and M3 start blockers clear | **PASS (documented)** | M3 must not start before M2 ownership/safety/scheduler design and relevant decisions/evidence; M5 arbitration gap blocks safe concurrent candidate commit. |
 | No runtime/DB/compile/test claim without execution | **PASS** | All such items marked `NOT RUN`/`UNVERIFIED`. |
 
-**Exit decision:** `M0_BLOCKED`
+**Exit decision:** `M0_BLOCKED` (Design decisions documented; implementation gate blocked by safety findings)
 
 ## M1/M2 Prerequisites
 
-- **M1 may be prepared (design/contract work) only after:** **M1-DEC-D alternative is provided and human decision obtained**; decisions B/C/E are captured; AUTH/RS/F-E26 static dispositions accepted as baseline with UNVERIFIED runtime noted.
+- **M1 may be prepared (design/contract work) only after:** **M1-DEC-D Alternative A selected as Design Baseline**; decisions B/C/E are captured; AUTH/RS/F-E26 static dispositions accepted as baseline with UNVERIFIED runtime noted. **Implementation requires CRITICAL findings resolution first.**
 - **M2 start blockers:** decision A (or retirement plan) impact, decision C (single owner/authority/dead-owner recovery), decision E (symbol universe), and proof that chart/coordinator retirement candidates are not execution-safety dependencies.
 - **M3 must not start before M2:** host ownership, chart-independent scheduler semantics, official MQL5 event/timer constraints for managed symbols, **and Setup vs Structure timeframe independence (D-001 CONFLICT)** are unresolved; starting M3 before M2 risks host-chart coupling and unsafe ownership.
-- **M5 blocker:** `PortfolioRisk` simultaneous-candidate reservation/serialization is not evidenced; until designed and verified, multi-candidate commit path must remain fail-closed/sequential by design.
+- **M5 blocker:** `PortfolioRisk` simultaneous-candidate reservation/serialization is not evidenced; until designed and verified, multi-candidate commit path must remain fail-closed/sequential by design. **M5 validation also required for M1-DEC-D Alternative A implementation** (SQLite crash/recovery, broker reconciliation, restart tests).
 
 ## Unverified Evidence
 
@@ -139,12 +139,13 @@ Evidence sources: current source inspection (`Experts/AlgoMultiAssetEA.mq5`, `In
 
 ## Final Declaration
 
-`M0_BLOCKED`
+`M0_BLOCKED` (Design decisions documented; implementation gate blocked by safety findings)
 
 Blockers (actual):
-1. **P0** **M1-DEC-D REJECTED — ALTERNATIVE REQUIRED** — retry handoff non-resumption acceptance not obtained; alternative design created (`docs/M1-DEC-D-Retry-Handoff-Alternatives.md`) but not yet decided.
+1. **P0 — M1-DEC-D Alternative A: Design Baseline SELECTED, Implementation BLOCKED** — CRITICAL safety findings (FINDING-001, FINDING-002, FINDING-003, FINDING-004, FINDING-007, FINDING-008 from risk-auditor; P1-1 through P1-4 from code-reviewer) must be resolved before any code changes. See `docs/M1-DEC-D-Retry-Handoff-Alternatives.md` §4.3.
 2. Human decisions open: **A, B/F-E26-005, C, E** (architecture direction approved; details not approved).
 3. Validation evidence absent: compile/MQL5 validation, tests, MT5 runtime/Strategy Tester, live DB/migration/concurrency, broker/reconciliation — **`NOT RUN`/`UNVERIFIED`**.
 4. Open technical items requiring disposition/acceptance: `SNAPREG_ACK` handler-only semantics (`OPEN/UNVERIFIED`), PortfolioRisk simultaneous-candidate reservation gap for M5 (`OPEN`), P3 observability gaps (`OPEN`), residual AUTH-003/SQLite durability uncertainty (`UNVERIFIED`), D-001 CONFLICT (Setup vs Structure timeframe).
+5. **M1-DEC-D Implementation Gate:** Requires M5 validation (SQLite crash/recovery, broker reconciliation, restart tests) and schema migration for `config_fingerprint` persistence.
 
 Skipped/NOT RUN by constraint: all code/config edits, all compile/test/runtime/DB/broker operations, all git mutation, and any non-M0 broad re-audit.
