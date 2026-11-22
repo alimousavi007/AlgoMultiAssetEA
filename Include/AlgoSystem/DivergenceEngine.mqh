@@ -7,8 +7,9 @@
 //+------------------------------------------------------------------+
 //| Divergence Engine                                                 |
 //|                                                                  |
-//| Detects regular and hidden divergence using confirmed pivots.    |
-//| Uses RSI and MACD histogram as divergence sources.               |
+//| Detects regular and hidden divergence using confirmed RSI pivots.|
+//| MACD histogram is read but not currently used in divergence logic;|
+//| RSI-only versus RSI+MACD combination requires strategy decision. |
 //+------------------------------------------------------------------+
 class CDivergenceEngine
   {
@@ -27,80 +28,76 @@ private:
    bool               m_initialized;
    datetime           m_last_bar_time;
 
-   ENUM_DIVERGENCE_TYPE m_last_divergence;
-   datetime            m_last_divergence_time;
-   datetime            m_last_pivot_time;
+ENUM_DIVERGENCE_TYPE m_last_divergence;
+    datetime            m_last_divergence_time;
+    datetime            m_last_pivot_time;
 
-   int m_rsi_handle;
-   int m_macd_main_handle;
-   int m_macd_signal_handle;
+    int                 m_rsi_handle;
+    int                 m_macd_main_handle;
+    int                 m_macd_signal_handle;
 
-   double m_rsi[];
-   double m_macd_main[];
-   double m_macd_signal[];
-   double m_macd_hist[];
+    double              m_rsi[];
+    double              m_macd_main[];
+    double              m_macd_signal[];
 
 private:
-   bool CreateHandles()
-     {
-      ResetLastError();
+    bool CreateHandles()
+    {
+        ResetLastError();
 
-       m_rsi_handle=iRSI(
-           m_symbol, m_timeframe, m_rsi_period, PRICE_CLOSE);
-      if(m_rsi_handle==INVALID_HANDLE)
-         return false;
+        m_rsi_handle = iRSI(
+            m_symbol, m_timeframe, m_rsi_period, PRICE_CLOSE);
+        if(m_rsi_handle == INVALID_HANDLE)
+            return false;
 
-       m_macd_main_handle=iMACD(
-          m_symbol, m_timeframe,
-          m_macd_fast, m_macd_slow, m_macd_signal_period,
-          PRICE_CLOSE);
-      if(m_macd_main_handle==INVALID_HANDLE)
-         return false;
+        m_macd_main_handle = iMACD(
+            m_symbol, m_timeframe,
+            m_macd_fast, m_macd_slow, m_macd_signal_period,
+            PRICE_CLOSE);
+        if(m_macd_main_handle == INVALID_HANDLE)
+            return false;
 
-      return true;
-     }
+        return true;
+    }
 
-   void ReleaseHandles()
-     {
-      if(m_rsi_handle!=INVALID_HANDLE)
-         IndicatorRelease(m_rsi_handle);
-      if(m_macd_main_handle!=INVALID_HANDLE)
-         IndicatorRelease(m_macd_main_handle);
+    void ReleaseHandles()
+    {
+        if(m_rsi_handle != INVALID_HANDLE)
+            IndicatorRelease(m_rsi_handle);
+        if(m_macd_main_handle != INVALID_HANDLE)
+            IndicatorRelease(m_macd_main_handle);
 
-      m_rsi_handle=INVALID_HANDLE;
-      m_macd_main_handle=INVALID_HANDLE;
-     }
+        m_rsi_handle = INVALID_HANDLE;
+        m_macd_main_handle = INVALID_HANDLE;
+    }
 
-   bool CopyIndicatorData(int lookback)
-     {
-      if(m_rsi_handle==INVALID_HANDLE || m_macd_main_handle==INVALID_HANDLE)
-         return false;
+    bool CopyIndicatorData(int lookback)
+    {
+        if(m_rsi_handle == INVALID_HANDLE || m_macd_main_handle == INVALID_HANDLE)
+            return false;
 
-      ResetLastError();
+        ResetLastError();
 
-      int copied_rsi=CopyBuffer(m_rsi_handle, 0, 0, lookback, m_rsi);
-      if(copied_rsi<=0)
-         return false;
+        int copied_rsi = CopyBuffer(m_rsi_handle, 0, 0, lookback, m_rsi);
+        if(copied_rsi <= 0)
+            return false;
 
-      double macd_main[], macd_signal[], macd_hist[];
-      int copied_macd=CopyBuffer(m_macd_main_handle, 0, 0, lookback, macd_main);
-      int copied_signal=CopyBuffer(m_macd_main_handle, 1, 0, lookback, macd_signal);
-      int copied_hist=CopyBuffer(m_macd_main_handle, 2, 0, lookback, macd_hist);
+        double macd_main[], macd_signal[];
+        int copied_macd = CopyBuffer(m_macd_main_handle, 0, 0, lookback, macd_main);
+        int copied_signal = CopyBuffer(m_macd_main_handle, 1, 0, lookback, macd_signal);
 
-      if(copied_macd<=0 || copied_signal<=0 || copied_hist<=0)
-         return false;
+        if(copied_macd <= 0 || copied_signal <= 0)
+            return false;
 
-      ArrayCopy(m_macd_main, macd_main);
-      ArrayCopy(m_macd_signal, macd_signal);
-      ArrayCopy(m_macd_hist, macd_hist);
+        ArrayCopy(m_macd_main, macd_main);
+        ArrayCopy(m_macd_signal, macd_signal);
 
-      ArraySetAsSeries(m_rsi, true);
-      ArraySetAsSeries(m_macd_main, true);
-      ArraySetAsSeries(m_macd_signal, true);
-      ArraySetAsSeries(m_macd_hist, true);
+        ArraySetAsSeries(m_rsi, true);
+        ArraySetAsSeries(m_macd_main, true);
+        ArraySetAsSeries(m_macd_signal, true);
 
-      return true;
-     }
+        return true;
+    }
 
    bool FindPivotHigh(const double& array[],
                       int center,
