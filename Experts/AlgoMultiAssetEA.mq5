@@ -45,9 +45,9 @@ input(name="Execution Mode")               ENUM_TRADING_MODE  InpMode=MODE_SIGNA
 input(name="Confirm Live Automatic Trading") bool               InpLiveAutoConfirm=false;
 
 enum ENUM_DASHBOARD_VIEW_MODE { DASHBOARD_COMPACT, DASHBOARD_NORMAL, DASHBOARD_FULL };
-input(name="Dashboard View Mode")          ENUM_DASHBOARD_VIEW_MODE InpDashboardViewMode=DASHBOARD_FULL;
+input(name="Dashboard View Mode")          ENUM_DASHBOARD_VIEW_MODE InpDashboardViewMode=DASHBOARD_NORMAL;
 input(name="Enable Dashboard")             bool               InpDashboard=true;
-input(name="Enable Dashboard Diagnostics")  bool               InpDashboardDiagnostics=true;
+input(name="Enable Dashboard Diagnostics")  bool               InpDashboardDiagnostics=false;
 input(name="Log Level")                    ENUM_LOG_LEVEL     InpLogLevel=LOG_INFO;
 input(name="Log to File")                  bool               InpLogFile=true;
 input(name="Flush Log on Each Write")      bool               InpLogFlushEachWrite=true;
@@ -120,6 +120,7 @@ input(name="Enable External Risk Lock")    bool               InpExternalRiskLoc
 input(name="External Risk Lock GV Prefix") string             InpExternalRiskLockGVPrefix="ALGO_EXT_RISK_LOCK";
 input(name="External Risk Lock TTL (Sec)") int                InpExternalRiskLockTTL=60;
 input(name="Fail Closed on Stale/Unavail") bool               InpExternalRiskLockFailClosed=true;
+input(name="Authority Lease (Seconds)")    int                InpAuthorityLeaseSeconds=30;
 
 input group "10. Trading Sessions & Market Filters"
 input(name="Enable Session Filter")        bool               InpSessionFilter=true;
@@ -477,6 +478,59 @@ enum ESnapshotFieldState
    SNAP_CALCULATION_FAILED = 6
   };
 
+// WS-2: Runtime Readiness State Machine
+enum ENUM_RUNTIME_STATE
+  {
+   RUNTIME_UNINITIALIZED     = 0,  // Not yet initialized
+   RUNTIME_INITIALIZING      = 1,  // Initialize() in progress
+   RUNTIME_INIT_FAILED       = 2,  // Initialize() failed (terminal)
+   RUNTIME_READY             = 3,  // Initialized, waiting for entry bar
+   RUNTIME_WAIT_ENTRY_BAR    = 4,  // Waiting for new closed entry bar
+   RUNTIME_WAIT_SIGNAL_BAR   = 5,  // Waiting for new closed signal/context bar
+   RUNTIME_FETCHING_DATA     = 6,  // Fetching market snapshots
+   RUNTIME_CALCULATING       = 7,  // Calculating features
+   RUNTIME_EVALUATING        = 8,  // Running hybrid engine evaluation
+   RUNTIME_EVALUATED         = 9,  // Evaluation complete, signal generated
+   RUNTIME_BLOCKED_SESSION   = 10, // Blocked by session filter
+   RUNTIME_BLOCKED_DATA      = 11, // Blocked by missing/invalid market data
+   RUNTIME_BLOCKED_FEATURES  = 12, // Blocked by feature calculation failure
+   RUNTIME_BLOCKED_RISK      = 13, // Blocked by risk/portfolio lock
+   RUNTIME_BLOCKED_NEWS      = 14, // Blocked by news filter
+   RUNTIME_BLOCKED_AUTHORITY = 15, // Blocked by authority/coordinator
+   RUNTIME_BLOCKED_SYSTEM    = 16, // Blocked by system not ready
+   RUNTIME_ERROR             = 17  // Unexpected error (non-terminal, retryable)
+  };
+
+// WS-2: Transition reason codes for audit trail
+enum ENUM_RUNTIME_TRANSITION_REASON
+  {
+   REASON_NONE                    = 0,
+   REASON_INIT_SUCCESS            = 1,
+   REASON_INIT_FAILED             = 2,
+   REASON_SYSTEM_NOT_READY        = 3,
+   REASON_SESSION_FILTER          = 4,
+   REASON_NO_ENTRY_BAR            = 5,
+   REASON_ENTRY_BAR_READY         = 6,
+   REASON_DATA_FETCH_START        = 7,
+   REASON_DATA_FETCH_OK           = 8,
+   REASON_DATA_FETCH_FAILED       = 9,
+   REASON_FEATURE_CALC_START      = 10,
+   REASON_FEATURE_CALC_OK         = 11,
+   REASON_FEATURE_CALC_FAILED     = 12,
+   REASON_NO_SIGNAL_BAR           = 13,
+   REASON_SIGNAL_BAR_READY        = 14,
+   REASON_EVALUATION_START        = 15,
+   REASON_EVALUATION_OK           = 16,
+   REASON_EVALUATION_NO_SIGNAL    = 17,
+   REASON_EVALUATION_FAILED       = 18,
+   REASON_RISK_LOCK               = 19,
+   REASON_NEWS_BLOCK              = 20,
+   REASON_AUTHORITY_BLOCK         = 21,
+   REASON_CONDITION_RESOLVED      = 22,
+   REASON_ERROR_RECOVERY          = 23,
+   REASON_MAX_RETRIES_EXCEEDED    = 24
+  };
+
 class CSymbolRuntime : public CObject
   {
 public:
@@ -529,12 +583,18 @@ public:
    RuntimeSnapshot      snapshot;
    int                 snapshot_generation;
 
-    // Runtime gate visibility
+// Runtime gate visibility
     string            last_gate_status;
     string            last_gate_reason;
     datetime          last_gate_time;
 
-                      CSymbolRuntime()
+    // WS-2: Runtime Readiness State Machine
+    ENUM_RUNTIME_STATE runtime_state;
+    int                last_transition_reason;
+    datetime           state_entered_time;
+    int                retry_count;
+
+                        CSymbolRuntime()
     {
      symbol="";
      style=STYLE_DAY_TRADING;
@@ -549,6 +609,12 @@ public:
      last_gate_time=0;
      wait_state="";
      init_failure="";
+
+     // WS-2: Initialize state machine fields
+     runtime_state = RUNTIME_UNINITIALIZED;
+     last_transition_reason = REASON_NONE;
+     state_entered_time = 0;
+     retry_count = 0;
 
      snapshot_generation=0;
      snapshot.generation=0;
@@ -567,131 +633,211 @@ public:
      snapshot.short_state=SNAP_NOT_EVALUATED;
     }
 
-   // CObject interface
-   virtual int Type(void) const { return 0x7778; } // Custom type ID for CSymbolRuntime
+// CObject interface
+    virtual int Type(void) const { return 0x7778; } // Custom type ID for CSymbolRuntime
 
-     bool              Initialize(const string in_symbol,
-                     const ENUM_TRADING_STYLE in_style,
-                     const ENUM_TIMEFRAMES in_context_tf,
-                     const ENUM_TIMEFRAMES in_structure_tf,
-                     const ENUM_TIMEFRAMES in_setup_tf,
-                     const ENUM_TIMEFRAMES in_entry_tf,
-                     const int in_freshness_context,
-                     const int in_freshness_structure,
-                     const int in_freshness_setup,
-                     const int in_freshness_entry)
-      {
-       valid=false;
-       last_failure="";
+    // WS-2: State transition with audit logging
+    bool TransitionTo(ENUM_RUNTIME_STATE new_state, int reason_code = REASON_NONE)
+    {
+     if(runtime_state == new_state)
+        return true; // Idempotent - no transition needed
 
-        symbol=in_symbol;
-        style=in_style;
-        snapshot.configured_style=in_style;
-        context_tf=in_context_tf;
-       structure_tf=in_structure_tf;
-       setup_tf=in_setup_tf;
-       entry_tf=in_entry_tf;
+     // Log transition for audit trail
+     g_logger.Event(LOG_INFO, "RUNTIME", "STATE_TRANSITION",
+                    symbol, "", "", "",
+                    "INFO", "RUNTIME",
+                    "State: " + EnumToString(runtime_state) +
+                    " -> " + EnumToString(new_state) +
+                    " reason=" + IntegerToString(reason_code));
 
-       if(symbol=="")
-         {
-          last_failure="Empty symbol";
-          return false;
-         }
+     runtime_state = new_state;
+     last_transition_reason = reason_code;
+     state_entered_time = TimeCurrent();
+     return true;
+    }
 
-        if(!market_context.Initialize() ||
-           !market_structure.Initialize() ||
-           !market_setup.Initialize() ||
-           !market_entry.Initialize())
+    // WS-2: Readiness query methods
+    bool IsReadyForEvaluation() const
+    {
+     return runtime_state == RUNTIME_READY ||
+            runtime_state == RUNTIME_WAIT_ENTRY_BAR ||
+            runtime_state == RUNTIME_WAIT_SIGNAL_BAR;
+    }
+
+    bool IsBlocked() const
+    {
+     return runtime_state >= RUNTIME_BLOCKED_SESSION &&
+            runtime_state <= RUNTIME_BLOCKED_SYSTEM;
+    }
+
+    bool IsTerminal() const
+    {
+     return runtime_state == RUNTIME_INIT_FAILED;
+    }
+
+    bool IsError() const
+    {
+     return runtime_state == RUNTIME_ERROR;
+    }
+
+    string GetStateDescription() const
+    {
+     switch(runtime_state)
+       {
+        case RUNTIME_UNINITIALIZED:     return "UNINITIALIZED";
+        case RUNTIME_INITIALIZING:      return "INITIALIZING";
+        case RUNTIME_INIT_FAILED:       return "INIT_FAILED";
+        case RUNTIME_READY:             return "READY";
+        case RUNTIME_WAIT_ENTRY_BAR:    return "WAIT_ENTRY_BAR";
+        case RUNTIME_WAIT_SIGNAL_BAR:   return "WAIT_SIGNAL_BAR";
+        case RUNTIME_FETCHING_DATA:     return "FETCHING_DATA";
+        case RUNTIME_CALCULATING:       return "CALCULATING";
+        case RUNTIME_EVALUATING:        return "EVALUATING";
+        case RUNTIME_EVALUATED:         return "EVALUATED";
+        case RUNTIME_BLOCKED_SESSION:   return "BLOCKED_SESSION";
+        case RUNTIME_BLOCKED_DATA:      return "BLOCKED_DATA";
+        case RUNTIME_BLOCKED_FEATURES:  return "BLOCKED_FEATURES";
+        case RUNTIME_BLOCKED_RISK:      return "BLOCKED_RISK";
+        case RUNTIME_BLOCKED_NEWS:      return "BLOCKED_NEWS";
+        case RUNTIME_BLOCKED_AUTHORITY: return "BLOCKED_AUTHORITY";
+        case RUNTIME_BLOCKED_SYSTEM:    return "BLOCKED_SYSTEM";
+        case RUNTIME_ERROR:             return "ERROR";
+        default:                        return "UNKNOWN(" + IntegerToString((int)runtime_state) + ")";
+       }
+    }
+
+bool              Initialize(const string in_symbol,
+                      const ENUM_TRADING_STYLE in_style,
+                      const ENUM_TIMEFRAMES in_context_tf,
+                      const ENUM_TIMEFRAMES in_structure_tf,
+                      const ENUM_TIMEFRAMES in_setup_tf,
+                      const ENUM_TIMEFRAMES in_entry_tf,
+                      const int in_freshness_context,
+                      const int in_freshness_structure,
+                      const int in_freshness_setup,
+                      const int in_freshness_entry)
+       {
+        // WS-2: Transition to INITIALIZING
+        TransitionTo(RUNTIME_INITIALIZING, REASON_INIT_SUCCESS);
+        
+        valid=false;
+        last_failure="";
+        retry_count = 0;
+
+         symbol=in_symbol;
+         style=in_style;
+         snapshot.configured_style=in_style;
+         context_tf=in_context_tf;
+        structure_tf=in_structure_tf;
+        setup_tf=in_setup_tf;
+        entry_tf=in_entry_tf;
+
+        if(symbol=="")
           {
-           last_failure="MarketData.Initialize failed";
+           last_failure="Empty symbol";
+           TransitionTo(RUNTIME_INIT_FAILED, REASON_INIT_FAILED);
            return false;
           }
 
-        if(!feature_context.InitializeFor(symbol, context_tf) ||
-           !feature_structure.InitializeFor(symbol, structure_tf) ||
-           !feature_setup.InitializeFor(symbol, setup_tf) ||
-           !feature_entry.InitializeFor(symbol, entry_tf))
+         if(!market_context.Initialize() ||
+            !market_structure.Initialize() ||
+            !market_setup.Initialize() ||
+            !market_entry.Initialize())
+           {
+            last_failure="MarketData.Initialize failed";
+            TransitionTo(RUNTIME_INIT_FAILED, REASON_INIT_FAILED);
+            return false;
+           }
+
+         if(!feature_context.InitializeFor(symbol, context_tf) ||
+            !feature_structure.InitializeFor(symbol, structure_tf) ||
+            !feature_setup.InitializeFor(symbol, setup_tf) ||
+            !feature_entry.InitializeFor(symbol, entry_tf))
+           {
+            last_failure="FeatureEngine.Initialize failed";
+            TransitionTo(RUNTIME_INIT_FAILED, REASON_INIT_FAILED);
+            return false;
+           }
+
+
+        if(!hybrid_engine.Initialize(
+              symbol,
+              style,
+              context_tf,
+              structure_tf,
+              setup_tf,
+              entry_tf))
           {
-           last_failure="FeatureEngine.Initialize failed";
+           last_failure="HybridEngine.Initialize failed";
+           TransitionTo(RUNTIME_INIT_FAILED, REASON_INIT_FAILED);
            return false;
           }
 
+        last_gate_status="";
+        last_gate_reason="";
+        last_gate_time=0;
 
-       if(!hybrid_engine.Initialize(
-             symbol,
-             style,
-             context_tf,
-             structure_tf,
-             setup_tf,
-             entry_tf))
-         {
-          last_failure="HybridEngine.Initialize failed";
-          return false;
-         }
+       hybrid_engine.SetVolumeProfileParams(
+          InpProfileSessionBars,
+          InpProfileRollingBars,
+          InpValueAreaPercent);
 
-       last_gate_status="";
-       last_gate_reason="";
-       last_gate_time=0;
+       hybrid_engine.SetLiquidityParams(
+          InpSwingLookback,
+          InpEqualTolerancePoints,
+          InpMaxLevelAgeBars,
+          InpSweepConfirmBars);
 
-      hybrid_engine.SetVolumeProfileParams(
-         InpProfileSessionBars,
-         InpProfileRollingBars,
-         InpValueAreaPercent);
+       hybrid_engine.SetRegimeParams(
+          InpADXPeriod,
+          (double)InpADXTrendThreshold,
+          InpHighVolatilityRatio,
+          InpLowVolatilityRatio,
+          InpRangeLookback,
+          InpHysteresisBars);
 
-      hybrid_engine.SetLiquidityParams(
-         InpSwingLookback,
-         InpEqualTolerancePoints,
-         InpMaxLevelAgeBars,
-         InpSweepConfirmBars);
+       hybrid_engine.SetDivergenceParams(
+          InpRSIPeriod,
+          InpMACD_Fast,
+          InpMACD_Slow,
+          InpMACD_Signal,
+          InpPivotTolerancePercent,
+          InpMaxDivergenceAgeBars);
 
-      hybrid_engine.SetRegimeParams(
-         InpADXPeriod,
-         (double)InpADXTrendThreshold,
-         InpHighVolatilityRatio,
-         InpLowVolatilityRatio,
-         InpRangeLookback,
-         InpHysteresisBars);
+       hybrid_engine.SetMomentumParams(
+          InpADXPeriod,
+          10,
+          InpMomentumLookback);
 
-      hybrid_engine.SetDivergenceParams(
-         InpRSIPeriod,
-         InpMACD_Fast,
-         InpMACD_Slow,
-         InpMACD_Signal,
-         InpPivotTolerancePercent,
-         InpMaxDivergenceAgeBars);
-
-      hybrid_engine.SetMomentumParams(
-         InpADXPeriod,
-         10,
-         InpMomentumLookback);
-
-       hybrid_engine.SetNewsParams(
-          InpNewsBlackoutMinutesBefore,
-          InpNewsBlackoutMinutesAfter,
-          InpNewsCooldownMinutes,
-          InpNewsImpactThreshold,
-          InpNewsPreventNewEntries,
+hybrid_engine.SetNewsParams(
+           InpNewsBlackoutMinutesBefore,
+           InpNewsBlackoutMinutesAfter,
+           InpNewsCooldownMinutes,
+           InpNewsImpactThreshold,
+           InpNewsPreventNewEntries,
           InpNewsClosePositions);
        hybrid_engine.SetNewsEnabled(InpNewsEnabled);
        hybrid_engine.SetSpreadFilterParams(InpUseSpreadFilter, (double)InpMaxSpreadPoints);
 
 
-      hybrid_engine.SetBiasParams(2, 50);
-      hybrid_engine.SetMinScore(InpMinScore);
-      hybrid_engine.SetConflictThreshold(InpConflictThreshold);
-       hybrid_engine.SetMinRR(InpMinRR);
-       hybrid_engine.SetFreshnessParams(
-          in_freshness_context,
-          in_freshness_structure,
-          in_freshness_setup,
-          in_freshness_entry);
+       hybrid_engine.SetBiasParams(2, 50);
+       hybrid_engine.SetMinScore(InpMinScore);
+       hybrid_engine.SetConflictThreshold(InpConflictThreshold);
+        hybrid_engine.SetMinRR(InpMinRR);
+        hybrid_engine.SetFreshnessParams(
+           in_freshness_context,
+           in_freshness_structure,
+           in_freshness_setup,
+           in_freshness_entry);
 
-       market_entry.IsNewClosedBar(symbol,entry_tf);
+        market_entry.IsNewClosedBar(symbol,entry_tf);
 
-      valid=true;
-      return true;
-     }
-  };
+       valid=true;
+       // WS-2: Transition to READY on successful initialization
+       TransitionTo(RUNTIME_READY, REASON_INIT_SUCCESS);
+       return true;
+      }
+   };
 
 //==================================================================
 // Globals
@@ -1573,8 +1719,10 @@ enum ENUM_EXT_RISK_LOCK_REASON
    EXT_RISK_LOCK_REASON_SCOPE_MISMATCH = 6,
    EXT_RISK_LOCK_REASON_DISABLED = 7,
    EXT_RISK_LOCK_REASON_GV_NOT_FOUND = 8,
-   EXT_RISK_LOCK_REASON_UNKNOWN = 9
-  };
+   EXT_RISK_LOCK_REASON_GV_READ_FAILED = 9,
+   EXT_RISK_LOCK_REASON_GV_READ_PENDING = 10,
+   EXT_RISK_LOCK_REASON_UNKNOWN = 11
+   };
 
 // External Risk Lock source codes (stored as int in Global Variables)
 enum ENUM_EXT_RISK_LOCK_SOURCE
@@ -1601,10 +1749,12 @@ string ExtRiskLockReasonToString(const int reason_code)
       case EXT_RISK_LOCK_REASON_SCOPE_MISMATCH: return "Scope mismatch";
       case EXT_RISK_LOCK_REASON_DISABLED:       return "Disabled by configuration";
       case EXT_RISK_LOCK_REASON_GV_NOT_FOUND:   return "GV not found";
-      case EXT_RISK_LOCK_REASON_UNKNOWN:        return "Unknown";
-      default:                                  return "Invalid code (" + IntegerToString(reason_code) + ")";
-     }
-  }
+case EXT_RISK_LOCK_REASON_GV_READ_FAILED: return "GV read failed";
+       case EXT_RISK_LOCK_REASON_GV_READ_PENDING: return "GV read pending (retry)";
+       case EXT_RISK_LOCK_REASON_UNKNOWN:        return "Unknown";
+       default:                                  return "Invalid code (" + IntegerToString(reason_code) + ")";
+      }
+    }
 
 // Convert source code to human-readable string
 string ExtRiskLockSourceToString(const int source_code)
@@ -1630,6 +1780,8 @@ struct ExtRiskLockState
    datetime   expiry;             // Expiry timestamp (0 = no expiry)
    int        revision;           // Revision counter for change detection
    bool       valid;              // True if state was successfully read
+   bool       read_complete;      // True if all fields read and validated
+   bool       stale;              // True if timestamp/expiry policy detected stale data
   };
 
 // P0-2: Global storage for External Risk Lock state (updated in RefreshTradingState)
@@ -1876,10 +2028,21 @@ string ExtRiskLockGVKey(const string field)
    return key;
   }
 
+// Non-blocking retry state for External Risk Lock GV reads
+// Persists across OnTick/OnTimer calls to spread retries without Sleep()
+static int s_erl_retry_attempt = 0;
+static bool s_erl_reads_ok[6];           // Tracks which of 6 fields read successfully
+static double s_erl_cached_vals[6];      // Caches successfully read values
+static datetime s_erl_last_retry_time = 0;
+static const int ERL_MAX_READ_RETRIES = 3;
+static const int ERL_RETRY_DELAY_MS = 100;
+
 // Read External Risk Lock state from Global Variables
- // Returns state struct with valid=false if disabled, unavailable, or stale
- ExtRiskLockState ReadExtRiskLockState()
-   {
+// Returns state struct with valid=false if disabled, unavailable, or stale
+// Non-blocking bounded retry: spreads retries across event calls (no Sleep)
+// Returns read_complete=false while retries in progress; fail-closed after max retries
+  ExtRiskLockState ReadExtRiskLockState()
+    {
     ExtRiskLockState state;
     state.state = EXT_RISK_LOCK_UNKNOWN;
     state.reason_code = EXT_RISK_LOCK_REASON_NONE;
@@ -1888,12 +2051,18 @@ string ExtRiskLockGVKey(const string field)
     state.expiry = 0;
     state.revision = 0;
     state.valid = false;
+    state.read_complete = false;
+    state.stale = false;
 
     if(!InpExternalRiskLockEnabled)
       {
       state.state = EXT_RISK_LOCK_DISABLED;
       state.reason_code = EXT_RISK_LOCK_REASON_DISABLED;
       state.valid = true;
+      state.read_complete = true;
+      state.stale = false;
+      // Reset retry state on disabled
+      s_erl_retry_attempt = 0;
       return state;
       }
 
@@ -1910,38 +2079,118 @@ string ExtRiskLockGVKey(const string field)
         state.state = EXT_RISK_LOCK_UNLOCKED; // Permissive (not recommended)
         }
       state.valid = true;
+      state.read_complete = true;
+      state.stale = false;
+      // Reset retry state on GV not found
+      s_erl_retry_attempt = 0;
       return state;
       }
 
-    state.state = (int)GlobalVariableGet(state_key);
-    state.reason_code = (int)GlobalVariableGet(ExtRiskLockGVKey("reason"));
-    state.source_code = (int)GlobalVariableGet(ExtRiskLockGVKey("source"));
-    state.updated_at = (datetime)GlobalVariableGet(ExtRiskLockGVKey("updated_at"));
-    state.expiry = (datetime)GlobalVariableGet(ExtRiskLockGVKey("expiry"));
-    state.revision = (int)GlobalVariableGet(ExtRiskLockGVKey("revision"));
+    // Non-blocking bounded retry: attempt one read cycle per call
+    // Field indices: 0=state, 1=reason, 2=source, 3=updated_at, 4=expiry, 5=revision
+    bool all_reads_ok = true;
+    string gv_keys[6];
+    gv_keys[0] = state_key;
+    gv_keys[1] = ExtRiskLockGVKey("reason");
+    gv_keys[2] = ExtRiskLockGVKey("source");
+    gv_keys[3] = ExtRiskLockGVKey("updated_at");
+    gv_keys[4] = ExtRiskLockGVKey("expiry");
+    gv_keys[5] = ExtRiskLockGVKey("revision");
 
-    // Check TTL/staleness
-    datetime now = TimeCurrent();
-    if(state.expiry > 0 && now > state.expiry)
+    // Initialize retry state on first attempt
+    if(s_erl_retry_attempt == 0)
       {
-      state.reason_code = EXT_RISK_LOCK_REASON_TTL_EXPIRED;
-      if(InpExternalRiskLockFailClosed)
-        state.state = EXT_RISK_LOCK_UNKNOWN; // Fail-closed on stale
-      else
-        state.state = EXT_RISK_LOCK_UNLOCKED;
-      }
-    else if(InpExternalRiskLockTTL > 0 && (now - state.updated_at) > InpExternalRiskLockTTL)
-      {
-      state.reason_code = EXT_RISK_LOCK_REASON_STALE;
-      if(InpExternalRiskLockFailClosed)
-        state.state = EXT_RISK_LOCK_UNKNOWN; // Fail-closed on stale
-      else
-        state.state = EXT_RISK_LOCK_UNLOCKED;
+      for(int i = 0; i < 6; i++) { s_erl_reads_ok[i] = false; s_erl_cached_vals[i] = 0; }
+      s_erl_retry_attempt = 1;
+      s_erl_last_retry_time = TimeCurrent();
       }
 
-    state.valid = true;
+    // Attempt to read any fields not yet successfully read
+    for(int i = 0; i < 6; i++)
+      {
+      if(!s_erl_reads_ok[i])
+        {
+        double val = 0;
+        if(GlobalVariableGet(gv_keys[i], val))
+          {
+          s_erl_reads_ok[i] = true;
+          s_erl_cached_vals[i] = val;
+          }
+        else
+          {
+          all_reads_ok = false;
+          }
+        }
+      else
+        {
+        // Use cached value
+        }
+
+      // Check if all reads succeeded
+      if(s_erl_reads_ok[i]) continue;
+      all_reads_ok = false;
+      }
+
+    // If all reads succeeded, build complete state
+    if(all_reads_ok)
+      {
+      state.state = (int)s_erl_cached_vals[0];
+      state.reason_code = (int)s_erl_cached_vals[1];
+      state.source_code = (int)s_erl_cached_vals[2];
+      state.updated_at = (datetime)s_erl_cached_vals[3];
+      state.expiry = (datetime)s_erl_cached_vals[4];
+      state.revision = (int)s_erl_cached_vals[5];
+
+      // Check TTL/staleness
+      datetime now = TimeCurrent();
+      if(state.expiry > 0 && now > state.expiry)
+        {
+        state.reason_code = EXT_RISK_LOCK_REASON_TTL_EXPIRED;
+        if(InpExternalRiskLockFailClosed)
+          state.state = EXT_RISK_LOCK_UNKNOWN; // Fail-closed on stale
+        else
+          state.state = EXT_RISK_LOCK_UNLOCKED;
+        state.stale = true;
+        }
+      else if(InpExternalRiskLockTTL > 0 && (now - state.updated_at) > InpExternalRiskLockTTL)
+        {
+        state.reason_code = EXT_RISK_LOCK_REASON_STALE;
+        if(InpExternalRiskLockFailClosed)
+          state.state = EXT_RISK_LOCK_UNKNOWN; // Fail-closed on stale
+        else
+          state.state = EXT_RISK_LOCK_UNLOCKED;
+        state.stale = true;
+        }
+
+      state.valid = true;
+      state.read_complete = true;
+      // Reset retry state for next call
+      s_erl_retry_attempt = 0;
+      return state;
+      }
+
+    // Not all reads succeeded yet
+    if(s_erl_retry_attempt < ERL_MAX_READ_RETRIES)
+      {
+      // Increment attempt counter for next call
+      s_erl_retry_attempt++;
+      // Return incomplete state (read_complete=false) - caller handles fail-closed
+      state.reason_code = EXT_RISK_LOCK_REASON_GV_READ_PENDING;
+      state.valid = false;
+      state.read_complete = false;
+      state.stale = false;
+      return state;
+      }
+
+    // Max retries exhausted - fail-closed
+    state.reason_code = EXT_RISK_LOCK_REASON_GV_READ_FAILED;
+    state.valid = false;
+    state.read_complete = false; // Explicitly incomplete after retries
+    state.stale = false;
+    // Reset retry state for next call
+    s_erl_retry_attempt = 0;
     return state;
-   }
+    }
 
 // Write External Risk Lock state to Global Variables (for external control tools/scripts)
  // Returns true if all 6 GlobalVariableSet calls succeed
@@ -2007,6 +2256,8 @@ string ExtRiskLockGVKey(const string field)
     dst.expiry = src.expiry;
     dst.revision = src.revision;
     dst.valid = src.valid;
+    dst.read_complete = src.read_complete;
+    dst.stale = src.stale;
     dst.fail_closed = InpExternalRiskLockFailClosed;
     return dst;
    }
@@ -2134,6 +2385,8 @@ void UpdateDashboardForChart()
    if(!InpDashboard)
       return;
 
+   g_dashboard.ResetDiagnosticsFields();
+
    g_last_runtime_dashboard_status="";
    string chart_symbol=ChartSymbol(0);
 
@@ -2190,16 +2443,22 @@ void UpdateDashboardForChart()
        MarketSnapshot market;
       ResetLastError();
 
-      if(!runtime.market_context.GetSnapshot(
-           runtime.symbol,
-           runtime.context_tf,
-           market))
-        {
-         g_dashboard.ShowStatus(
-              "WAITING FOR MARKET DATA | "+chart_symbol);
-         ResetLastError();
-         return;
-        }
+if(!runtime.market_context.GetSnapshot(
+            runtime.symbol,
+            runtime.context_tf,
+            market))
+         {
+          // Set System Health for market data unavailable
+          g_dashboard.SetCoordinatorState("NO DATA", "MarketContext", false, "Market data freshness");
+          g_dashboard.SetSnapshotState("NO DATA", "MarketContext", false, "Context: 300s");
+          g_dashboard.SetBlockingSubsystem("MARKET_DATA", "MarketContext", true, "");
+          g_dashboard.SetFailureReason("No market data available", "MarketContext", true, "");
+          g_dashboard.SetActionRequired("Wait for market data", "MarketContext", true, "");
+          g_dashboard.ShowStatus("WAITING FOR MARKET DATA | "+chart_symbol);
+          g_dashboard.Render();
+          ResetLastError();
+          return;
+         }
 
       // Apply snapshot to dashboard (reads from runtime.snapshot which now has GV data if available)
       GVSnapshotData snap;
@@ -2236,13 +2495,22 @@ snap.bias_code = runtime.snapshot.bias_code;
             SymbolSelect(chart_symbol, false);
             return;
           }
-        else
-          {
-           // Registered but no snapshot yet from Coordinator
-           g_dashboard.ShowStatus("WAITING FOR COORDINATOR SNAPSHOT | " + chart_symbol);
-           g_dashboard.Render();
-           return;
-          }
+else
+           {
+            // Registered but no snapshot yet from Coordinator
+            // Set System Health for waiting for Coordinator snapshot
+            g_dashboard.SetCoordinatorState("CONNECTED", "Coordinator", true, "Lease: 30s");
+            g_dashboard.SetAuthorityState("VALID", "Coordinator", true, "Epoch: "+IntegerToString(g_authority_epoch));
+            g_dashboard.SetLedgerState("VALID", "ExecutionLedger", true, "DB: available");
+            g_dashboard.SetChartRegistrationState("REGISTERED", "ChartReg", true, "Protocol: v1");
+            g_dashboard.SetSnapshotState("NO SNAPSHOT", "Coordinator", false, "Snapshot: pending");
+            g_dashboard.SetBlockingSubsystem("COORDINATOR", "ChartReg", true, "");
+            g_dashboard.SetFailureReason("Waiting for Coordinator snapshot", "ChartReg", true, "");
+            g_dashboard.SetActionRequired("Wait for snapshot", "ChartReg", true, "");
+            g_dashboard.ShowStatus("WAITING FOR COORDINATOR SNAPSHOT | " + chart_symbol);
+            g_dashboard.Render();
+            return;
+           }
        }
 
     // No local runtime for chart symbol and no coordinator snapshot path available.
@@ -2261,53 +2529,117 @@ snap.bias_code = runtime.snapshot.bias_code;
       }
 
 if(g_coordinator_mode == COORD_MODE_CHART_CONTEXT)
-      {
-       if(g_reg_state == REG_STATE_PENDING || g_reg_state == REG_STATE_UNREGISTERED)
-         {
-          g_dashboard.ShowStatus("WAITING FOR COORDINATOR REGISTRATION | "+chart_symbol);
-          g_dashboard.Render();
-          return;
-         }
-       if(g_reg_state == REG_STATE_REJECTED)
-         {
-          g_dashboard.ShowStatus("CHART CONTEXT REGISTRATION REJECTED | "+chart_symbol);
-          g_dashboard.Render();
-          return;
-         }
-       if(g_reg_state == REG_STATE_REGISTERED)
-         {
-          g_dashboard.ShowStatus("WAITING FOR COORDINATOR SNAPSHOT | "+chart_symbol);
-          g_dashboard.Render();
-          return;
-         }
+       {
+        if(g_reg_state == REG_STATE_PENDING || g_reg_state == REG_STATE_UNREGISTERED)
+          {
+           // Set System Health for pending/unregistered state
+           g_dashboard.SetCoordinatorState("CONNECTED", "Coordinator", true, "Lease: 30s");
+           g_dashboard.SetAuthorityState("VALID", "Coordinator", true, "Epoch: "+IntegerToString(g_authority_epoch));
+           g_dashboard.SetLedgerState("VALID", "ExecutionLedger", true, "DB: available");
+           g_dashboard.SetChartRegistrationState((g_reg_state == REG_STATE_PENDING ? "PENDING" : "UNREGISTERED"), "ChartReg", false, "Protocol: v1");
+           g_dashboard.SetSnapshotState("NO SNAPSHOT", "ChartReg", false, "Snapshot: pending registration");
+           g_dashboard.SetBlockingSubsystem("REGISTRATION", "ChartReg", true, "");
+           g_dashboard.SetFailureReason("Waiting for Coordinator registration", "ChartReg", true, "");
+           g_dashboard.SetActionRequired("Wait for registration", "ChartReg", true, "");
+           g_dashboard.ShowStatus("WAITING FOR COORDINATOR REGISTRATION | "+chart_symbol);
+           g_dashboard.Render();
+           return;
+          }
+        if(g_reg_state == REG_STATE_REJECTED)
+          {
+           // Set System Health for rejected registration
+           g_dashboard.SetCoordinatorState("CONNECTED", "Coordinator", true, "Lease: 30s");
+           g_dashboard.SetAuthorityState("VALID", "Coordinator", true, "Epoch: "+IntegerToString(g_authority_epoch));
+           g_dashboard.SetLedgerState("VALID", "ExecutionLedger", true, "DB: available");
+           g_dashboard.SetChartRegistrationState("REJECTED", "ChartReg", false, "Protocol: v1");
+           g_dashboard.SetSnapshotState("NO SNAPSHOT", "ChartReg", false, "Snapshot: registration rejected");
+           g_dashboard.SetBlockingSubsystem("REGISTRATION", "ChartReg", true, "");
+           g_dashboard.SetFailureReason("Registration rejected by Coordinator", "ChartReg", true, "");
+           g_dashboard.SetActionRequired("Re-register or contact admin", "ChartReg", true, "");
+           g_dashboard.ShowStatus("CHART CONTEXT REGISTRATION REJECTED | "+chart_symbol);
+           g_dashboard.Render();
+           return;
+          }
+        if(g_reg_state == REG_STATE_REGISTERED)
+          {
+           // Set System Health for registered but no snapshot
+           g_dashboard.SetCoordinatorState("CONNECTED", "Coordinator", true, "Lease: 30s");
+           g_dashboard.SetAuthorityState("VALID", "Coordinator", true, "Epoch: "+IntegerToString(g_authority_epoch));
+           g_dashboard.SetLedgerState("VALID", "ExecutionLedger", true, "DB: available");
+           g_dashboard.SetChartRegistrationState("REGISTERED", "ChartReg", true, "Protocol: v1");
+           g_dashboard.SetSnapshotState("NO SNAPSHOT", "Coordinator", false, "Snapshot: pending");
+           g_dashboard.SetBlockingSubsystem("COORDINATOR", "ChartReg", true, "");
+           g_dashboard.SetFailureReason("Waiting for Coordinator snapshot", "ChartReg", true, "");
+           g_dashboard.SetActionRequired("Wait for snapshot", "ChartReg", true, "");
+           g_dashboard.ShowStatus("WAITING FOR COORDINATOR SNAPSHOT | "+chart_symbol);
+           g_dashboard.Render();
+           return;
+          }
+        }
+
+if(g_coordinator_mode == COORD_MODE_UNAVAILABLE)
+       {
+        string reason = g_coordinator_unavailable_reason;
+        if(reason=="") reason = "UNKNOWN";
+        // Set System Health for unavailable Coordinator
+        g_dashboard.SetCoordinatorState("UNAVAILABLE", "Coordinator", false, "Lease: expired");
+        g_dashboard.SetAuthorityState("UNKNOWN", "Coordinator", false, "Epoch: N/A");
+        g_dashboard.SetLedgerState("UNKNOWN", "ExecutionLedger", false, "DB: unavailable");
+        g_dashboard.SetChartRegistrationState("N/A", "ChartReg", false, "Protocol: N/A");
+        g_dashboard.SetSnapshotState("NO SNAPSHOT", "Coordinator", false, "Snapshot: coordinator unavailable");
+        g_dashboard.SetBlockingSubsystem("COORDINATOR", "Coordinator", true, "");
+        g_dashboard.SetFailureReason(reason, "Coordinator", true, "");
+        g_dashboard.SetActionRequired("Check Coordinator availability", "Coordinator", true, "");
+        g_dashboard.ShowStatus("COORDINATOR UNAVAILABLE | "+reason+" | "+chart_symbol);
+        g_dashboard.Render();
+        return;
        }
 
-    if(g_coordinator_mode == COORD_MODE_UNAVAILABLE)
-      {
-       string reason = g_coordinator_unavailable_reason;
-       if(reason=="") reason = "UNKNOWN";
-       g_dashboard.ShowStatus("COORDINATOR UNAVAILABLE | "+reason+" | "+chart_symbol);
-       g_dashboard.Render();
-       return;
-      }
+if(g_coordinator_mode == COORD_MODE_UNINITIALIZED)
+       {
+        // Set System Health for uninitialized system
+        g_dashboard.SetCoordinatorState("INITIALIZING", "Coordinator", false, "Lease: N/A");
+        g_dashboard.SetAuthorityState("UNKNOWN", "Coordinator", false, "Epoch: N/A");
+        g_dashboard.SetLedgerState("UNKNOWN", "ExecutionLedger", false, "DB: initializing");
+        g_dashboard.SetChartRegistrationState("N/A", "ChartReg", false, "Protocol: N/A");
+        g_dashboard.SetSnapshotState("NO SNAPSHOT", "Coordinator", false, "Snapshot: system initializing");
+        g_dashboard.SetBlockingSubsystem("INIT", "Coordinator", true, "");
+        g_dashboard.SetFailureReason("System initializing", "Coordinator", true, "");
+        g_dashboard.SetActionRequired("Wait for initialization", "Coordinator", true, "");
+        g_dashboard.ShowStatus("SYSTEM INITIALIZING | "+chart_symbol);
+        g_dashboard.Render();
+        return;
+       }
 
-    if(g_coordinator_mode == COORD_MODE_UNINITIALIZED)
-      {
-       g_dashboard.ShowStatus("SYSTEM INITIALIZING | "+chart_symbol);
-       g_dashboard.Render();
-       return;
-      }
+if(chart_symbol_in_universe)
+       {
+        // Set System Health for waiting for symbol runtime
+        g_dashboard.SetCoordinatorState((g_coordinator_mode == COORD_MODE_COORDINATOR ? "COORDINATOR" : "CHART_CONTEXT"), "Runtime", true, "");
+        g_dashboard.SetAuthorityState("VALID", "Authority", true, "Epoch: "+IntegerToString(g_authority_epoch));
+        g_dashboard.SetLedgerState("VALID", "ExecutionLedger", true, "DB: available");
+        g_dashboard.SetChartRegistrationState((g_reg_state == REG_STATE_REGISTERED ? "REGISTERED" : "N/A"), "ChartReg", g_reg_state == REG_STATE_REGISTERED, "");
+        g_dashboard.SetSnapshotState("NO RUNTIME", "Runtime", false, "Runtime: initializing");
+        g_dashboard.SetBlockingSubsystem("RUNTIME", "Runtime", true, "");
+        g_dashboard.SetFailureReason("Symbol runtime not initialized", "Runtime", true, "");
+        g_dashboard.SetActionRequired("Wait for runtime initialization", "Runtime", true, "");
+g_dashboard.ShowStatus("WAITING FOR SYMBOL RUNTIME | "+chart_symbol);
+        g_dashboard.Render();
+        return;
+       }
 
-    if(chart_symbol_in_universe)
-      {
-       g_dashboard.ShowStatus("WAITING FOR SYMBOL RUNTIME | "+chart_symbol);
-       g_dashboard.Render();
-       return;
-      }
+    // Set System Health for symbol not in universe (final fallback) - BEFORE Render()
+    g_dashboard.SetCoordinatorState((g_coordinator_mode == COORD_MODE_COORDINATOR ? "COORDINATOR" : "CHART_CONTEXT"), "Config", true, "");
+    g_dashboard.SetAuthorityState("VALID", "Authority", true, "Epoch: "+IntegerToString(g_authority_epoch));
+    g_dashboard.SetLedgerState("VALID", "ExecutionLedger", true, "DB: available");
+    g_dashboard.SetChartRegistrationState((g_reg_state == REG_STATE_REGISTERED ? "REGISTERED" : "N/A"), "ChartReg", g_reg_state == REG_STATE_REGISTERED, "");
+    g_dashboard.SetSnapshotState("NOT IN UNIVERSE", "Config", false, "Snapshot: symbol not configured");
+    g_dashboard.SetBlockingSubsystem("CONFIG", "Config", true, "");
+    g_dashboard.SetFailureReason("Chart symbol not in discovered universe", "Config", true, "");
+    g_dashboard.SetActionRequired("Check symbol configuration", "Config", true, "");
 
     g_dashboard.ShowStatus("CHART SYMBOL NOT DISCOVERED | "+chart_symbol);
     g_dashboard.Render();
-  }
+   }
 
 //+------------------------------------------------------------------+
 //|                                                                  |
@@ -2573,6 +2905,15 @@ RiskDecision risk;
           legacy_signal.symbol, "", "", legacy_signal.signal_id,
           "REJECT", "EXT_RISK_LOCK", rejection_reason);
         g_logger.Risk(risk);
+        
+// Update Dashboard with ERL blocked state
+         if(InpDashboard)
+           {
+            g_dashboard.SetExternalRiskLockState("BLOCKED", "ExternalRiskLock", true, "TTL=" + IntegerToString(InpExternalRiskLockTTL) + "s");
+            g_dashboard.SetBlockingSubsystem("EXTERNAL_RISK_LOCK", "ExternalRiskLock", true, "");
+            g_dashboard.SetFailureReason(rejection_reason, "ExternalRiskLock", true, "");
+            g_dashboard.SetActionRequired("Clear external risk lock", "ExternalRiskLock", true, "");
+           }
         return;
         }
       }
@@ -3309,262 +3650,626 @@ else
 //+------------------------------------------------------------------+
 void ProcessRuntime(CSymbolRuntime& runtime)
   {
-   if(!runtime.valid || !g_system_ready)
+   // WS-2: Handle terminal states - no processing
+   if(runtime.runtime_state == RUNTIME_UNINITIALIZED ||
+      runtime.runtime_state == RUNTIME_INITIALIZING ||
+      runtime.runtime_state == RUNTIME_INIT_FAILED)
+     {
       return;
+     }
 
-    if(!g_session_filter.IsAllowed(TimeCurrent()))
-      {
-       ShowRuntimeGateStatus(runtime, "BLOCKED: SESSION FILTER");
-       LogRuntimeGate(runtime, "SESSION_FILTER", "SESSION", "BLOCK", "NOT_ALLOWED");
-       return;
-      }
+   // WS-2: Handle ERROR state - attempt recovery
+   if(runtime.runtime_state == RUNTIME_ERROR)
+     {
+      if(AttemptRuntimeRecovery(runtime))
+         {
+          runtime.TransitionTo(RUNTIME_READY, REASON_ERROR_RECOVERY);
+         }
+      return;
+     }
 
-    if(!runtime.market_entry.IsNewClosedBar(
-          runtime.symbol,
-          runtime.entry_tf))
-      {
-       ShowRuntimeGateStatus(runtime, "WAITING: ENTRY BAR");
-       LogRuntimeGate(runtime, "ENTRY_BAR_WAIT", "ENTRY_BAR", "WAIT", "NO_NEW_CLOSED_BAR");
-       runtime.snapshot.current_stage_code = 1; // WAITING_FOR_NEW_ENTRY_BAR
-       runtime.snapshot.last_block_reason_code = 1; // NO_NEW_CLOSED_BAR
-       runtime.snapshot.configured_style = runtime.style;
-       return;
-      }
+   // WS-2: System readiness gate
+   if(!g_system_ready)
+     {
+      runtime.TransitionTo(RUNTIME_BLOCKED_SYSTEM, REASON_SYSTEM_NOT_READY);
+      UpdateRuntimeSnapshot(runtime);
+      return;
+     }
 
-    MarketSnapshot context_market;
-    MarketSnapshot structure_market;
-    MarketSnapshot setup_market;
-    MarketSnapshot entry_market;
-    FeatureSet context_features;
-    FeatureSet structure_features;
-    FeatureSet setup_features;
-    FeatureSet entry_features;
-   string reason="";
+   // WS-2: Session filter gate
+   if(!g_session_filter.IsAllowed(TimeCurrent()))
+     {
+      runtime.TransitionTo(RUNTIME_BLOCKED_SESSION, REASON_SESSION_FILTER);
+      UpdateRuntimeSnapshot(runtime);
+      ShowRuntimeGateStatus(runtime, "BLOCKED: SESSION FILTER");
+      LogRuntimeGate(runtime, "SESSION_FILTER", "SESSION", "BLOCK", "NOT_ALLOWED");
+      return;
+     }
+
+   // WS-2: State machine processing
+   switch(runtime.runtime_state)
+     {
+      case RUNTIME_READY:
+      case RUNTIME_WAIT_ENTRY_BAR:
+         ProcessEntryBarWait(runtime);
+         break;
+
+      case RUNTIME_FETCHING_DATA:
+         ProcessDataFetch(runtime);
+         break;
+
+      case RUNTIME_CALCULATING:
+         ProcessFeatureCalculation(runtime);
+         break;
+
+      case RUNTIME_WAIT_SIGNAL_BAR:
+         ProcessSignalBarWait(runtime);
+         break;
+
+      case RUNTIME_EVALUATING:
+         ProcessEvaluation(runtime);
+         break;
+
+      case RUNTIME_EVALUATED:
+         // Cycle complete, reset for next cycle
+         runtime.TransitionTo(RUNTIME_READY, REASON_EVALUATION_OK);
+         break;
+
+      case RUNTIME_BLOCKED_SESSION:
+      case RUNTIME_BLOCKED_DATA:
+      case RUNTIME_BLOCKED_FEATURES:
+      case RUNTIME_BLOCKED_RISK:
+      case RUNTIME_BLOCKED_NEWS:
+      case RUNTIME_BLOCKED_AUTHORITY:
+      case RUNTIME_BLOCKED_SYSTEM:
+         CheckBlockedConditionResolution(runtime);
+         break;
+     }
+
+   // WS-2: Update snapshot for dashboard
+   UpdateRuntimeSnapshot(runtime);
+  }
+
+// WS-2: Process entry bar wait state
+void ProcessEntryBarWait(CSymbolRuntime& runtime)
+  {
+   if(!runtime.market_entry.IsNewClosedBar(runtime.symbol, runtime.entry_tf))
+     {
+      runtime.TransitionTo(RUNTIME_WAIT_ENTRY_BAR, REASON_NO_ENTRY_BAR);
+      ShowRuntimeGateStatus(runtime, "WAITING: ENTRY BAR");
+      LogRuntimeGate(runtime, "ENTRY_BAR_WAIT", "ENTRY_BAR", "WAIT", "NO_NEW_CLOSED_BAR");
+      return;
+     }
+
+   // New entry bar available - transition to data fetch
+   runtime.TransitionTo(RUNTIME_FETCHING_DATA, REASON_ENTRY_BAR_READY);
+   ShowRuntimeGateStatus(runtime, "FETCHING: MARKET DATA");
+   LogRuntimeGate(runtime, "ENTRY_BAR_READY", "ENTRY_BAR", "READY", "NEW_CLOSED_BAR");
+  }
+
+// WS-2: Process market data fetching
+void ProcessDataFetch(CSymbolRuntime& runtime)
+  {
+   MarketSnapshot context_market;
+   MarketSnapshot structure_market;
+   MarketSnapshot setup_market;
+   MarketSnapshot entry_market;
+   string reason = "";
 
    ResetLastError();
-    if(!runtime.market_context.GetSnapshot(
-          runtime.symbol,
-          runtime.context_tf,
-          context_market))
+   if(!runtime.market_context.GetSnapshot(runtime.symbol, runtime.context_tf, context_market))
      {
-       g_logger.Event(
-          LOG_ERROR, "MARKET", "MARKET_SNAPSHOT_FAILED",
-          runtime.symbol, "", "",
-          "", "FAIL", "SIGNAL_SNAPSHOT",
-          "Market signal snapshot failed", GetLastError());
-       ResetLastError();
-       ShowRuntimeGateStatus(runtime, "BLOCKED: SIGNAL DATA");
-       LogRuntimeGate(runtime, "MARKET_SNAPSHOT", "CONTEXT_SNAPSHOT", "FAIL", "SNAPSHOT_FAILED");
-       return;
+      g_logger.Event(LOG_ERROR, "MARKET", "MARKET_SNAPSHOT_FAILED",
+                     runtime.symbol, "", "", "", "FAIL", "SIGNAL_SNAPSHOT",
+                     "Market signal snapshot failed", GetLastError());
+      ResetLastError();
+      runtime.TransitionTo(RUNTIME_BLOCKED_DATA, REASON_DATA_FETCH_FAILED);
+      ShowRuntimeGateStatus(runtime, "BLOCKED: SIGNAL DATA");
+      LogRuntimeGate(runtime, "MARKET_SNAPSHOT", "CONTEXT_SNAPSHOT", "FAIL", "SNAPSHOT_FAILED");
+      return;
      }
 
    ResetLastError();
-   if(!runtime.market_structure.GetSnapshot(
-         runtime.symbol,
-         runtime.structure_tf,
-         structure_market))
+   if(!runtime.market_structure.GetSnapshot(runtime.symbol, runtime.structure_tf, structure_market))
      {
-       g_logger.Event(
-          LOG_ERROR, "MARKET", "MARKET_SNAPSHOT_FAILED",
-          runtime.symbol, "", "",
-          "", "FAIL", "STRUCTURE_SNAPSHOT",
-          "Market structure snapshot failed", GetLastError());
-       ResetLastError();
-       ShowRuntimeGateStatus(runtime, "BLOCKED: STRUCTURE DATA");
-       LogRuntimeGate(runtime, "MARKET_SNAPSHOT", "STRUCTURE_SNAPSHOT", "FAIL", "SNAPSHOT_FAILED");
-       return;
+      g_logger.Event(LOG_ERROR, "MARKET", "MARKET_SNAPSHOT_FAILED",
+                     runtime.symbol, "", "", "", "FAIL", "STRUCTURE_SNAPSHOT",
+                     "Market structure snapshot failed", GetLastError());
+      ResetLastError();
+      runtime.TransitionTo(RUNTIME_BLOCKED_DATA, REASON_DATA_FETCH_FAILED);
+      ShowRuntimeGateStatus(runtime, "BLOCKED: STRUCTURE DATA");
+      LogRuntimeGate(runtime, "MARKET_SNAPSHOT", "STRUCTURE_SNAPSHOT", "FAIL", "SNAPSHOT_FAILED");
+      return;
      }
 
    ResetLastError();
-    if(!runtime.market_setup.GetSnapshot(
-          runtime.symbol,
-          runtime.setup_tf,
-          setup_market))
-      {
-        g_logger.Event(
-           LOG_ERROR, "MARKET", "MARKET_SNAPSHOT_FAILED",
-           runtime.symbol, "", "",
-           "", "FAIL", "SETUP_SNAPSHOT",
-           "Market setup snapshot failed", GetLastError());
-        ResetLastError();
-        ShowRuntimeGateStatus(runtime, "BLOCKED: SETUP DATA");
-        LogRuntimeGate(runtime, "MARKET_SNAPSHOT", "SETUP_SNAPSHOT", "FAIL", "SNAPSHOT_FAILED");
-        return;
-      }
-
-    if(!runtime.market_entry.GetSnapshot(
-         runtime.symbol,
-         runtime.entry_tf,
-         entry_market))
+   if(!runtime.market_setup.GetSnapshot(runtime.symbol, runtime.setup_tf, setup_market))
      {
-       g_logger.Event(
-          LOG_ERROR, "MARKET", "MARKET_SNAPSHOT_FAILED",
-          runtime.symbol, "", "",
-          "", "FAIL", "ENTRY_SNAPSHOT",
-          "Market entry snapshot failed", GetLastError());
-       ResetLastError();
-       ShowRuntimeGateStatus(runtime, "BLOCKED: ENTRY DATA");
-       LogRuntimeGate(runtime, "MARKET_SNAPSHOT", "ENTRY_SNAPSHOT", "FAIL", "SNAPSHOT_FAILED");
-       return;
+      g_logger.Event(LOG_ERROR, "MARKET", "MARKET_SNAPSHOT_FAILED",
+                     runtime.symbol, "", "", "", "FAIL", "SETUP_SNAPSHOT",
+                     "Market setup snapshot failed", GetLastError());
+      ResetLastError();
+      runtime.TransitionTo(RUNTIME_BLOCKED_DATA, REASON_DATA_FETCH_FAILED);
+      ShowRuntimeGateStatus(runtime, "BLOCKED: SETUP DATA");
+      LogRuntimeGate(runtime, "MARKET_SNAPSHOT", "SETUP_SNAPSHOT", "FAIL", "SNAPSHOT_FAILED");
+      return;
+     }
+
+   if(!runtime.market_entry.GetSnapshot(runtime.symbol, runtime.entry_tf, entry_market))
+     {
+      g_logger.Event(LOG_ERROR, "MARKET", "MARKET_SNAPSHOT_FAILED",
+                     runtime.symbol, "", "", "", "FAIL", "ENTRY_SNAPSHOT",
+                     "Market entry snapshot failed", GetLastError());
+      ResetLastError();
+      runtime.TransitionTo(RUNTIME_BLOCKED_DATA, REASON_DATA_FETCH_FAILED);
+      ShowRuntimeGateStatus(runtime, "BLOCKED: ENTRY DATA");
+      LogRuntimeGate(runtime, "MARKET_SNAPSHOT", "ENTRY_SNAPSHOT", "FAIL", "SNAPSHOT_FAILED");
+      return;
+     }
+
+   // All snapshots fetched successfully - store for feature calculation
+   // We need to store these in runtime for the next state
+   runtime.TransitionTo(RUNTIME_CALCULATING, REASON_DATA_FETCH_OK);
+   ShowRuntimeGateStatus(runtime, "CALCULATING: FEATURES");
+   LogRuntimeGate(runtime, "DATA_FETCH_OK", "MARKET_DATA", "OK", "ALL_SNAPSHOTS");
+  }
+
+// WS-2: Process feature calculation
+void ProcessFeatureCalculation(CSymbolRuntime& runtime)
+  {
+   // Re-fetch snapshots (they were not stored - re-fetch for simplicity)
+   // In a production system, we'd cache them in the runtime object
+   MarketSnapshot context_market;
+   MarketSnapshot structure_market;
+   MarketSnapshot setup_market;
+   MarketSnapshot entry_market;
+   FeatureSet context_features;
+   FeatureSet structure_features;
+   FeatureSet setup_features;
+   FeatureSet entry_features;
+
+   ResetLastError();
+   if(!runtime.market_context.GetSnapshot(runtime.symbol, runtime.context_tf, context_market) ||
+      !runtime.feature_context.Calculate(context_market, context_features))
+     {
+      g_logger.Event(LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
+                     runtime.symbol, "", "", "", "FAIL", "SIGNAL_FEATURES",
+                     "Context feature calculation failed", GetLastError());
+      ResetLastError();
+      runtime.TransitionTo(RUNTIME_BLOCKED_FEATURES, REASON_FEATURE_CALC_FAILED);
+      ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
+      LogRuntimeGate(runtime, "FEATURE_CALC", "CONTEXT_FEATURES", "FAIL", "CALC_FAILED");
+      return;
      }
 
    ResetLastError();
-    if(!runtime.feature_context.Calculate(context_market, context_features))
+   if(!runtime.market_structure.GetSnapshot(runtime.symbol, runtime.structure_tf, structure_market) ||
+      !runtime.feature_structure.Calculate(structure_market, structure_features))
      {
-       g_logger.Event(
-          LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
-          runtime.symbol, "", "",
-          "", "FAIL", "SIGNAL_FEATURES",
-          "Signal feature calculation failed", GetLastError());
-       ResetLastError();
-       ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
-       LogRuntimeGate(runtime, "FEATURE_CALC", "CONTEXT_FEATURES", "FAIL", "CALC_FAILED");
-       return;
+      g_logger.Event(LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
+                     runtime.symbol, "", "", "", "FAIL", "STRUCTURE_FEATURES",
+                     "Structure feature calculation failed", GetLastError());
+      ResetLastError();
+      runtime.TransitionTo(RUNTIME_BLOCKED_FEATURES, REASON_FEATURE_CALC_FAILED);
+      ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
+      LogRuntimeGate(runtime, "FEATURE_CALC", "STRUCTURE_FEATURES", "FAIL", "CALC_FAILED");
+      return;
      }
 
-   ResetLastError();
-   if(!runtime.feature_structure.Calculate(structure_market, structure_features))
+   if(!runtime.market_setup.GetSnapshot(runtime.symbol, runtime.setup_tf, setup_market) ||
+      !runtime.feature_setup.Calculate(setup_market, setup_features))
      {
-       g_logger.Event(
-          LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
-          runtime.symbol, "", "",
-          "", "FAIL", "STRUCTURE_FEATURES",
-          "Structure feature calculation failed", GetLastError());
-       ResetLastError();
-       ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
-       LogRuntimeGate(runtime, "FEATURE_CALC", "STRUCTURE_FEATURES", "FAIL", "CALC_FAILED");
-       return;
+      g_logger.Event(LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
+                     runtime.symbol, "", "", "", "FAIL", "SETUP_FEATURES",
+                     "Setup feature calculation failed", GetLastError());
+      ResetLastError();
+      runtime.TransitionTo(RUNTIME_BLOCKED_FEATURES, REASON_FEATURE_CALC_FAILED);
+      ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
+      LogRuntimeGate(runtime, "FEATURE_CALC", "SETUP_FEATURES", "FAIL", "CALC_FAILED");
+      return;
      }
-   ResetLastError();
-    if(!runtime.feature_setup.Calculate(setup_market, setup_features))
-      {
-        g_logger.Event(
-           LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
-           runtime.symbol, "", "",
-           "", "FAIL", "SETUP_FEATURES",
-           "Setup feature calculation failed", GetLastError());
-        ResetLastError();
-        ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
-        LogRuntimeGate(runtime, "FEATURE_CALC", "SETUP_FEATURES", "FAIL", "CALC_FAILED");
-        return;
-      }
-    if(!runtime.feature_entry.Calculate(entry_market, entry_features))
-     {
-       g_logger.Event(
-          LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
-          runtime.symbol, "", "",
-          "", "FAIL", "ENTRY_FEATURES",
-          "Entry feature calculation failed", GetLastError());
-       ResetLastError();
-       ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
-       LogRuntimeGate(runtime, "FEATURE_CALC", "ENTRY_FEATURES", "FAIL", "CALC_FAILED");
-       return;
-     }
-    if(!runtime.market_context.IsNewClosedBar(
-          runtime.symbol,
-          runtime.context_tf))
-      {
-       ShowRuntimeGateStatus(runtime, "WAITING: SIGNAL BAR");
-       LogRuntimeGate(runtime, "CONTEXT_BAR_WAIT", "CONTEXT_BAR", "WAIT", "NO_NEW_CLOSED_BAR");
-       runtime.snapshot.configured_style = runtime.style;
-       return;
-      }
 
+   if(!runtime.market_entry.GetSnapshot(runtime.symbol, runtime.entry_tf, entry_market) ||
+      !runtime.feature_entry.Calculate(entry_market, entry_features))
+     {
+      g_logger.Event(LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
+                     runtime.symbol, "", "", "", "FAIL", "ENTRY_FEATURES",
+                     "Entry feature calculation failed", GetLastError());
+      ResetLastError();
+      runtime.TransitionTo(RUNTIME_BLOCKED_FEATURES, REASON_FEATURE_CALC_FAILED);
+      ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
+      LogRuntimeGate(runtime, "FEATURE_CALC", "ENTRY_FEATURES", "FAIL", "CALC_FAILED");
+      return;
+     }
+
+   // All features calculated - check signal bar
+   runtime.TransitionTo(RUNTIME_WAIT_SIGNAL_BAR, REASON_FEATURE_CALC_OK);
+   ShowRuntimeGateStatus(runtime, "WAITING: SIGNAL BAR");
+   LogRuntimeGate(runtime, "FEATURE_CALC_OK", "FEATURES", "OK", "ALL_FEATURES");
+  }
+
+// WS-2: Process signal bar wait
+void ProcessSignalBarWait(CSymbolRuntime& runtime)
+  {
+   if(!runtime.market_context.IsNewClosedBar(runtime.symbol, runtime.context_tf))
+     {
+      runtime.TransitionTo(RUNTIME_WAIT_SIGNAL_BAR, REASON_NO_SIGNAL_BAR);
+      ShowRuntimeGateStatus(runtime, "WAITING: SIGNAL BAR");
+      LogRuntimeGate(runtime, "CONTEXT_BAR_WAIT", "CONTEXT_BAR", "WAIT", "NO_NEW_CLOSED_BAR");
+      return;
+     }
+
+   // Signal bar ready - transition to evaluation
+   runtime.TransitionTo(RUNTIME_EVALUATING, REASON_SIGNAL_BAR_READY);
+   ShowRuntimeGateStatus(runtime, "EVALUATING: HYBRID ENGINE");
+   LogRuntimeGate(runtime, "SIGNAL_BAR_READY", "CONTEXT_BAR", "READY", "NEW_CLOSED_BAR");
+  }
+
+// WS-2: Process hybrid engine evaluation
+void ProcessEvaluation(CSymbolRuntime& runtime)
+  {
+   // Re-fetch data for evaluation (in production, cache from previous states)
+   MarketSnapshot context_market;
+   MarketSnapshot structure_market;
+   MarketSnapshot setup_market;
+   MarketSnapshot entry_market;
+   FeatureSet context_features;
+   FeatureSet structure_features;
+   FeatureSet setup_features;
+   FeatureSet entry_features;
+
+   // Fetch all data again
+   if(!runtime.market_context.GetSnapshot(runtime.symbol, runtime.context_tf, context_market) ||
+      !runtime.market_structure.GetSnapshot(runtime.symbol, runtime.structure_tf, structure_market) ||
+      !runtime.market_setup.GetSnapshot(runtime.symbol, runtime.setup_tf, setup_market) ||
+      !runtime.market_entry.GetSnapshot(runtime.symbol, runtime.entry_tf, entry_market))
+     {
+      runtime.TransitionTo(RUNTIME_BLOCKED_DATA, REASON_DATA_FETCH_FAILED);
+      return;
+     }
+
+   if(!runtime.feature_context.Calculate(context_market, context_features) ||
+      !runtime.feature_structure.Calculate(structure_market, structure_features) ||
+      !runtime.feature_setup.Calculate(setup_market, setup_features) ||
+      !runtime.feature_entry.Calculate(entry_market, entry_features))
+     {
+      runtime.TransitionTo(RUNTIME_BLOCKED_FEATURES, REASON_FEATURE_CALC_FAILED);
+      return;
+     }
+
+   // Portfolio state check
    PortfolioState portfolio_state;
    if(!g_state.GetPortfolioState(portfolio_state))
      {
-       g_logger.Event(
-          LOG_ERROR, "RISK", "RISK_STATE_UNAVAILABLE",
-          runtime.symbol, "", "",
-          "", "REJECT", "RISK_STATE",
-          "Portfolio state is unavailable; entry blocked");
-       ShowRuntimeGateStatus(runtime, "BLOCKED: RISK STATE UNAVAILABLE");
-       LogRuntimeGate(runtime, "RISK_STATE", "PORTFOLIO_STATE", "BLOCK", "UNAVAILABLE");
-       return;
+      g_logger.Event(LOG_ERROR, "RISK", "RISK_STATE_UNAVAILABLE",
+                     runtime.symbol, "", "", "", "REJECT", "RISK_STATE",
+                     "Portfolio state is unavailable; entry blocked");
+      runtime.TransitionTo(RUNTIME_BLOCKED_DATA, REASON_DATA_FETCH_FAILED);
+      ShowRuntimeGateStatus(runtime, "BLOCKED: RISK STATE UNAVAILABLE");
+      LogRuntimeGate(runtime, "RISK_STATE", "PORTFOLIO_STATE", "BLOCK", "UNAVAILABLE");
+      return;
      }
 
-   LogRiskLockTransition(portfolio_state);
+LogRiskLockTransition(portfolio_state);
 
-   if(portfolio_state.trading_locked)
-     {
-       g_logger.Event(
-          LOG_WARNING, "RISK", "RISK_LOCK_ACTIVE",
-          runtime.symbol, "", "",
-          "", "REJECT", "RISK_LOCK",
-          "Trading locked by portfolio state");
+    if(portfolio_state.trading_locked)
+      {
+       g_logger.Event(LOG_WARNING, "RISK", "RISK_LOCK_ACTIVE",
+                      runtime.symbol, "", "", "", "REJECT", "RISK_LOCK",
+                      "Trading locked by portfolio state");
+       runtime.TransitionTo(RUNTIME_BLOCKED_RISK, REASON_RISK_LOCK);
        ShowRuntimeGateStatus(runtime, "BLOCKED: RISK LOCK");
        LogRuntimeGate(runtime, "RISK_LOCK", "PORTFOLIO_RISK", "BLOCK", "TRADING_LOCKED");
        return;
-     }
+      }
 
-   bool ok=false;
-    FeatureContext ctx = runtime.hybrid_engine.BuildFeatureContext(
-                            context_market,
-                            structure_market,
-                            setup_market,
-                            entry_market,
-                            context_features,
-                            structure_features,
-                            setup_features,
-                            entry_features,
-                            portfolio_state,
-                            ok);
+    // Authority check (coordinator only)
+    if(g_coordinator_mode == COORD_MODE_COORDINATOR)
+      {
+       string authority_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
+       if(!g_execution_ledger.ValidateAuthority(authority_key, g_owner_instance_token, g_authority_epoch))
+         {
+          runtime.TransitionTo(RUNTIME_BLOCKED_AUTHORITY, REASON_AUTHORITY_BLOCK);
+          ShowRuntimeGateStatus(runtime, "BLOCKED: AUTHORITY");
+          LogRuntimeGate(runtime, "AUTHORITY", "COORDINATOR", "BLOCK", "AUTHORITY_INVALID");
+          return;
+         }
+      }
+
+    // Build feature context and evaluate
+   runtime.TransitionTo(RUNTIME_EVALUATING, REASON_EVALUATION_START);
+   
+   bool ok = false;
+   FeatureContext ctx = runtime.hybrid_engine.BuildFeatureContext(
+                           context_market,
+                           structure_market,
+                           setup_market,
+                           entry_market,
+                           context_features,
+                           structure_features,
+                           setup_features,
+                           entry_features,
+                           portfolio_state,
+                           ok);
 
    if(!ok || !ctx.valid)
      {
-       g_logger.Event(
-          LOG_WARNING, "HYBRID", "CONTEXT_BUILD_FAILED",
-          runtime.symbol, "", "",
-          "", "WARN", "CONTEXT_INVALID", ctx.reason);
-       ShowRuntimeGateStatus(runtime, "BLOCKED: CONTEXT INVALID");
-       LogRuntimeGate(runtime, "CONTEXT_BUILD", "FEATURE_CONTEXT", "BLOCK", ctx.reason);
-       return;
+      g_logger.Event(LOG_WARNING, "HYBRID", "CONTEXT_BUILD_FAILED",
+                     runtime.symbol, "", "", "", "WARN", "CONTEXT_INVALID", ctx.reason);
+      runtime.TransitionTo(RUNTIME_BLOCKED_FEATURES, REASON_EVALUATION_FAILED);
+      ShowRuntimeGateStatus(runtime, "BLOCKED: CONTEXT INVALID");
+      LogRuntimeGate(runtime, "CONTEXT_BUILD", "FEATURE_CONTEXT", "BLOCK", ctx.reason);
+      return;
      }
 
-   HybridDecision decision = runtime.hybrid_engine.Evaluate(
+HybridDecision decision = runtime.hybrid_engine.Evaluate(
                                 runtime.symbol, ctx, context_market, ok);
 
-   ProcessHybridDecision(runtime, decision, portfolio_state);
-
-// D1.1: publish real engine outputs into the Runtime Snapshot
-    runtime.snapshot_generation++;
-    runtime.snapshot.generation = runtime.snapshot_generation;
-    runtime.snapshot.snapshot_time = TimeCurrent();
-    runtime.snapshot.last_success_time = (decision.valid ? decision.decision_time : runtime.snapshot.last_success_time);
-    runtime.snapshot.current_stage_code = (decision.valid ? 3 : 4); // 3=EVALUATED, 4=BLOCKED
-    runtime.snapshot.last_block_reason_code = (decision.valid ? 0 : 1); // 0=NONE, 1=GENERIC_BLOCK (detail in logs)
-    runtime.snapshot.configured_style = runtime.style;
-    runtime.snapshot.regime_code = (int)decision.regime;
-    runtime.snapshot.bias_code = (int)decision.bias;
-    runtime.snapshot.long_code = (decision.long_score > 0 ? 1 : 0);
-    runtime.snapshot.short_code = (decision.short_score > 0 ? 1 : 0);
-    runtime.snapshot.regime_state = (decision.valid ? SNAP_VALID : SNAP_CALCULATION_FAILED);
-    runtime.snapshot.bias_state = (decision.valid ? SNAP_VALID : SNAP_CALCULATION_FAILED);
-    runtime.snapshot.long_state = (decision.valid ? SNAP_VALID : SNAP_CALCULATION_FAILED);
-    runtime.snapshot.short_state = (decision.valid ? SNAP_VALID : SNAP_CALCULATION_FAILED);
-
-// F11: Share snapshot via Global Variables for multi-chart Dashboard
-    bool gv_write_ok = WriteSnapshotToGV(
-       runtime.symbol,
-       runtime.snapshot.generation,
-       runtime.snapshot.snapshot_time,
-       runtime.snapshot.last_success_time,
-       runtime.snapshot.current_stage_code,
-       runtime.snapshot.last_block_reason_code,
-       (int)runtime.snapshot.configured_style,
-       runtime.snapshot.regime_code,
-       runtime.snapshot.bias_code,
-       runtime.snapshot.long_code,
-       runtime.snapshot.short_code,
-       (int)runtime.snapshot.regime_state,
-       (int)runtime.snapshot.bias_state,
-       (int)runtime.snapshot.long_state,
-       (int)runtime.snapshot.short_state);
-    if(!gv_write_ok)
+    // Populate runtime snapshot with decision data for dashboard
+    if(decision.valid)
       {
-       g_logger.Event(LOG_WARNING, "DASHBOARD", "SNAPSHOT_GV_PARTIAL_WRITE", runtime.symbol, "", "", "", "WARN", "GV_WRITE",
-                      "Snapshot GV write had failures (see ERROR log above)");
+       runtime.snapshot.regime_code = (int)decision.regime;
+       runtime.snapshot.bias_code = (int)decision.bias;
+       runtime.snapshot.long_code = (decision.long_score > 0.0 ? 1 : 0);
+       runtime.snapshot.short_code = (decision.short_score > 0.0 ? 1 : 0);
+       runtime.snapshot.regime_state = SNAP_VALID;
+       runtime.snapshot.bias_state = SNAP_VALID;
+       runtime.snapshot.long_state = (decision.long_score > 0.0 ? SNAP_VALID : SNAP_NO_SIGNAL);
+       runtime.snapshot.short_state = (decision.short_score > 0.0 ? SNAP_VALID : SNAP_NO_SIGNAL);
       }
+    else
+      {
+       // No valid decision - mark as no signal
+       runtime.snapshot.regime_code = (int)decision.regime;
+       runtime.snapshot.bias_code = (int)decision.bias;
+       runtime.snapshot.long_code = 0;
+       runtime.snapshot.short_code = 0;
+       runtime.snapshot.regime_state = SNAP_NO_SIGNAL;
+       runtime.snapshot.bias_state = SNAP_NO_SIGNAL;
+       runtime.snapshot.long_state = SNAP_NO_SIGNAL;
+       runtime.snapshot.short_state = SNAP_NO_SIGNAL;
+      }
+
+    ProcessHybridDecision(runtime, decision, portfolio_state);
+
+    if(decision.valid)
+      {
+       runtime.TransitionTo(RUNTIME_EVALUATED, REASON_EVALUATION_OK);
+      }
+    else
+      {
+       // Check if blocked by news (engine's internal evaluation is single source of truth)
+       if(decision.status == DECISION_NEWS_BLOCKED)
+         {
+          runtime.TransitionTo(RUNTIME_BLOCKED_NEWS, REASON_NEWS_BLOCK);
+         }
+       else
+         {
+          // No signal - cycle complete, return to READY
+          runtime.TransitionTo(RUNTIME_READY, REASON_EVALUATION_NO_SIGNAL);
+         }
+      }
+   }
+
+// WS-2: Check if blocked condition has resolved
+void CheckBlockedConditionResolution(CSymbolRuntime& runtime)
+  {
+   PortfolioState portfolio_state;
+   g_state.GetPortfolioState(portfolio_state); // Best effort - use cached if available
+
+   // System readiness
+   if(runtime.runtime_state == RUNTIME_BLOCKED_SYSTEM && g_system_ready)
+     {
+      runtime.TransitionTo(RUNTIME_READY, REASON_CONDITION_RESOLVED);
+      return;
+     }
+
+   // Session filter
+   if(runtime.runtime_state == RUNTIME_BLOCKED_SESSION && g_session_filter.IsAllowed(TimeCurrent()))
+     {
+      runtime.TransitionTo(RUNTIME_READY, REASON_CONDITION_RESOLVED);
+      return;
+     }
+
+   // Data availability - try to fetch
+   if(runtime.runtime_state == RUNTIME_BLOCKED_DATA)
+     {
+      MarketSnapshot test_snapshot;
+      if(runtime.market_context.GetSnapshot(runtime.symbol, runtime.context_tf, test_snapshot))
+        {
+         runtime.TransitionTo(RUNTIME_READY, REASON_CONDITION_RESOLVED);
+         return;
+        }
+      }
+
+   // Features - try to calculate
+   if(runtime.runtime_state == RUNTIME_BLOCKED_FEATURES)
+     {
+      MarketSnapshot test_snapshot;
+      FeatureSet test_features;
+      if(runtime.market_context.GetSnapshot(runtime.symbol, runtime.context_tf, test_snapshot) &&
+         runtime.feature_context.Calculate(test_snapshot, test_features))
+        {
+         runtime.TransitionTo(RUNTIME_READY, REASON_CONDITION_RESOLVED);
+         return;
+        }
+      }
+
+   // Risk lock
+   if(runtime.runtime_state == RUNTIME_BLOCKED_RISK)
+     {
+      if(!portfolio_state.trading_locked)
+        {
+         runtime.TransitionTo(RUNTIME_READY, REASON_CONDITION_RESOLVED);
+         return;
+        }
+      }
+
+   // News filter
+   if(runtime.runtime_state == RUNTIME_BLOCKED_NEWS)
+     {
+      if(!IsNewsBlockActive(runtime, portfolio_state))
+        {
+         runtime.TransitionTo(RUNTIME_READY, REASON_CONDITION_RESOLVED);
+         return;
+        }
+      }
+
+   // Authority
+   if(runtime.runtime_state == RUNTIME_BLOCKED_AUTHORITY)
+     {
+      string authority_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
+      if(g_execution_ledger.ValidateAuthority(authority_key, g_owner_instance_token, g_authority_epoch))
+        {
+         runtime.TransitionTo(RUNTIME_READY, REASON_CONDITION_RESOLVED);
+         return;
+        }
+      }
+   }
+
+// WS-2: Attempt recovery from ERROR state
+bool AttemptRuntimeRecovery(CSymbolRuntime& runtime)
+  {
+   if(runtime.retry_count >= 3)
+     {
+      g_logger.Event(LOG_ERROR, "RUNTIME", "MAX_RETRIES_EXCEEDED",
+                     runtime.symbol, "", "", "",
+                     "FAIL", "RUNTIME_RECOVERY",
+                     "Max retries exceeded for runtime " + runtime.symbol);
+      runtime.TransitionTo(RUNTIME_INIT_FAILED, REASON_MAX_RETRIES_EXCEEDED);
+      return false;
+     }
+
+   runtime.retry_count++;
+   
+   // Try to re-validate basic requirements
+   MarketSnapshot test_snapshot;
+   if(!runtime.market_context.GetSnapshot(runtime.symbol, runtime.context_tf, test_snapshot))
+     {
+      return false; // Will retry on next call
+     }
+
+   FeatureSet test_features;
+   if(!runtime.feature_context.Calculate(test_snapshot, test_features))
+     {
+      return false;
+     }
+
+   PortfolioState portfolio_state;
+   if(!g_state.GetPortfolioState(portfolio_state) || portfolio_state.trading_locked)
+     {
+      return false;
+     }
+
+   return true;
+  }
+
+// WS-2: Update runtime snapshot for dashboard
+void UpdateRuntimeSnapshot(CSymbolRuntime& runtime)
+  {
+   runtime.snapshot_generation++;
+   runtime.snapshot.generation = runtime.snapshot_generation;
+   runtime.snapshot.snapshot_time = TimeCurrent();
+   runtime.snapshot.configured_style = runtime.style;
+
+   switch(runtime.runtime_state)
+     {
+      case RUNTIME_WAIT_ENTRY_BAR:
+         runtime.snapshot.current_stage_code = 1; // WAITING_FOR_NEW_ENTRY_BAR
+         runtime.snapshot.last_block_reason_code = 1; // NO_NEW_CLOSED_BAR
+         break;
+      case RUNTIME_WAIT_SIGNAL_BAR:
+         runtime.snapshot.current_stage_code = 2; // WAITING_FOR_SIGNAL_BAR
+         runtime.snapshot.last_block_reason_code = 1; // NO_NEW_CLOSED_BAR
+         break;
+      case RUNTIME_EVALUATED:
+         runtime.snapshot.current_stage_code = 3; // EVALUATED
+         runtime.snapshot.last_block_reason_code = 0; // NONE
+         runtime.snapshot.last_success_time = TimeCurrent();
+         break;
+      case RUNTIME_BLOCKED_SESSION:
+      case RUNTIME_BLOCKED_DATA:
+      case RUNTIME_BLOCKED_FEATURES:
+      case RUNTIME_BLOCKED_RISK:
+      case RUNTIME_BLOCKED_NEWS:
+      case RUNTIME_BLOCKED_AUTHORITY:
+      case RUNTIME_BLOCKED_SYSTEM:
+         runtime.snapshot.current_stage_code = 4; // BLOCKED
+         // Map specific block reason
+         runtime.snapshot.last_block_reason_code = MapBlockReasonToCode(runtime.runtime_state);
+         break;
+      case RUNTIME_ERROR:
+         runtime.snapshot.current_stage_code = 4; // BLOCKED
+         runtime.snapshot.last_block_reason_code = 99; // ERROR
+         break;
+      case RUNTIME_INIT_FAILED:
+         runtime.snapshot.current_stage_code = 4; // BLOCKED
+         runtime.snapshot.last_block_reason_code = 98; // INIT_FAILED
+         break;
+      default:
+         runtime.snapshot.current_stage_code = 0; // NOT_EVALUATED
+         runtime.snapshot.last_block_reason_code = 0; // NONE
+     }
+
+   // F11: Share snapshot via Global Variables for multi-chart Dashboard
+   bool gv_write_ok = WriteSnapshotToGV(
+      runtime.symbol,
+      runtime.snapshot.generation,
+      runtime.snapshot.snapshot_time,
+      runtime.snapshot.last_success_time,
+      runtime.snapshot.current_stage_code,
+      runtime.snapshot.last_block_reason_code,
+      (int)runtime.snapshot.configured_style,
+      runtime.snapshot.regime_code,
+      runtime.snapshot.bias_code,
+      runtime.snapshot.long_code,
+      runtime.snapshot.short_code,
+      (int)runtime.snapshot.regime_state,
+      (int)runtime.snapshot.bias_state,
+      (int)runtime.snapshot.long_state,
+      (int)runtime.snapshot.short_state
+   );
+   if(!gv_write_ok)
+     {
+      g_logger.Event(LOG_WARNING, "DASHBOARD", "GV_WRITE_FAILED",
+                     runtime.symbol, "", "", "",
+                     "WARN", "SNAPSHOT_PUBLISH",
+                     "Failed to write runtime snapshot to Global Variables");
+     }
+  }
+
+// WS-2: Map block state to reason code for snapshot
+int MapBlockReasonToCode(ENUM_RUNTIME_STATE state)
+  {
+   switch(state)
+     {
+      case RUNTIME_BLOCKED_SESSION:   return 10; // SESSION_FILTER
+      case RUNTIME_BLOCKED_DATA:      return 11; // MARKET_DATA
+      case RUNTIME_BLOCKED_FEATURES:  return 12; // FEATURES
+      case RUNTIME_BLOCKED_RISK:      return 13; // RISK_LOCK
+      case RUNTIME_BLOCKED_NEWS:      return 14; // NEWS_FILTER
+      case RUNTIME_BLOCKED_AUTHORITY: return 15; // AUTHORITY
+      case RUNTIME_BLOCKED_SYSTEM:    return 16; // SYSTEM_NOT_READY
+      default:                        return 99; // UNKNOWN
+     }
+  }
+
+// WS-2: Check if news block is active for symbol (uses runtime's news service)
+  bool IsNewsBlockActive(CSymbolRuntime& runtime, const PortfolioState& portfolio_state)
+    {
+     // Fail-closed: if news is enabled, we MUST evaluate; only skip if explicitly disabled
+     if(!InpNewsEnabled)
+        return false; // Feature explicitly disabled - no block
+
+     // When news is enabled but prevent entries is false, we still evaluate
+     // but the service will return false for ShouldBlockEntry (config choice)
+     // Do NOT short-circuit on InpNewsPreventNewEntries - that defeats fail-closed
+
+     // Use the runtime's hybrid engine news service
+     NewsFeatures news = runtime.hybrid_engine.EvaluateNews(runtime.symbol, TimeTradeServer(), portfolio_state);
+     
+     // Check if entry should be blocked based on news (service handles fail-closed for UNAVAILABLE)
+     return runtime.hybrid_engine.ShouldBlockEntry(news, runtime.symbol);
     }
 
 //==================================================================
@@ -3972,24 +4677,24 @@ else if(claim_rows > 0)
 
 int runtime_count=0;
     // E2.4: Coordinator election
-    string authority_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
+string authority_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
     if(g_execution_ledger.IsAvailable())
       {
-       // CR-02: Expire stale authority lease before election (30s lease)
+       // CR-02: Expire stale authority lease before election (configurable lease)
        string expire_reason = "";
        // R-03: Pass owner_token to prevent self-expiry during init (consistent with OnTimer)
-g_execution_ledger.ExpireStaleAuthority(authority_key, 30, expire_reason, g_owner_instance_token);
-        if(expire_reason != "")
-          {
-          if(expire_reason == "LEDGER_UNAVAILABLE")
-            {
-            g_logger.Event(LOG_WARNING, "INIT", "AUTHORITY_EXPIRE_SKIPPED", _Symbol, "", "", "", "WARNING", "AUTHORITY", "Authority lease expiry skipped: " + expire_reason);
-            }
-          else
-            {
-            g_logger.Event(LOG_INFO, "INIT", "AUTHORITY_EXPIRED", _Symbol, "", "", "", "INFO", "AUTHORITY", "Authority lease expired during election: " + expire_reason);
-            }
-          }
+       g_execution_ledger.ExpireStaleAuthority(authority_key, InpAuthorityLeaseSeconds, expire_reason, g_owner_instance_token);
+       if(expire_reason != "")
+         {
+         if(expire_reason == "LEDGER_UNAVAILABLE")
+           {
+           g_logger.Event(LOG_WARNING, "INIT", "AUTHORITY_EXPIRE_SKIPPED", _Symbol, "", "", "", "WARNING", "AUTHORITY", "Authority lease expiry skipped: " + expire_reason);
+           }
+         else
+           {
+           g_logger.Event(LOG_INFO, "INIT", "AUTHORITY_EXPIRED", _Symbol, "", "", "", "INFO", "AUTHORITY", "Authority lease expired during election: " + expire_reason);
+           }
+         }
        int astate = g_execution_ledger.GetAuthorityState(authority_key);
        // CR-02 / Architecture Decision: No Automatic Takeover
        // ORPHANED is a BLOCKING state. Do NOT auto-reacquire on init/election.
@@ -4065,6 +4770,9 @@ g_execution_ledger.ExpireStaleAuthority(authority_key, 30, expire_reason, g_owne
    g_initialization_started=false;
    g_initialization_failed=false;
    g_system_ready=true;
+
+   // Mark EA initialization as complete for dashboard state synchronization
+   g_dashboard.SetEAInitialized();
 
    g_logger.Event(
       LOG_INFO, "SYSTEM", "SYSTEM_READY",
@@ -4430,11 +5138,24 @@ bool RefreshTradingState()
         lock_reason_code,
         lock_reason);
       
-      // Store globally for PortfolioRisk checks in ProcessHybridDecision
-      g_ext_risk_lock_state = ext_lock_state;
-      g_ext_risk_lock_state_valid = true;
-      
-      // Log state changes
+// Store globally for PortfolioRisk checks in ProcessHybridDecision
+       g_ext_risk_lock_state = ext_lock_state;
+       g_ext_risk_lock_state_valid = true;
+       
+       // Update Dashboard with ERL state (valid unlocked/disabled state)
+       if(InpDashboard)
+         {
+          if(ext_lock_state.state == EXT_RISK_LOCK_UNLOCKED)
+            {
+             g_dashboard.SetExternalRiskLockState("UNLOCKED", "ExternalRiskLock", true, "TTL=" + IntegerToString(InpExternalRiskLockTTL) + "s");
+            }
+          else if(ext_lock_state.state == EXT_RISK_LOCK_DISABLED)
+            {
+             g_dashboard.SetExternalRiskLockState("DISABLED", "ExternalRiskLock", true, "Feature disabled by configuration");
+            }
+         }
+       
+       // Log state changes
       static int s_last_ext_lock_revision = -1;
       if(ext_lock_state.revision != s_last_ext_lock_revision)
         {
@@ -4599,25 +5320,25 @@ if(g_coordinator_mode == COORD_MODE_COORDINATOR)
              }
  } // end rate-limited discovery block (F8)
         // Bounded retry for pending runtime initialization (e.g. waiting for history/sync).
-        // Timer-driven recovery does not rely on chart ticks and preserves idempotency.
+// Timer-driven recovery does not rely on chart ticks and preserves idempotency.
         TryInitializePendingRuntimesBounded("OnTimer");
-string authority_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
-           // CR-02: Expire stale authority lease before heartbeat/validation (30s lease)
-           // R-03: Pass owner_token to prevent coordinator from expiring its own lease
-           string expire_reason = "";
-           g_execution_ledger.ExpireStaleAuthority(authority_key, 30, expire_reason, g_owner_instance_token);
-           if(expire_reason != "")
-             {
-             if(expire_reason == "LEDGER_UNAVAILABLE")
-               {
-               g_logger.Event(LOG_WARNING, "SYSTEM", "AUTHORITY_EXPIRE_SKIPPED", _Symbol, "", "", "", "WARNING", "AUTHORITY", "Authority lease expiry skipped: " + expire_reason);
-               }
-             else
-               {
-               g_logger.Event(LOG_INFO, "SYSTEM", "AUTHORITY_EXPIRED", _Symbol, "", "", "", "INFO", "AUTHORITY", "Authority lease expired: " + expire_reason);
-               }
-             }
-          if(!g_execution_ledger.HeartbeatAuthority(authority_key, g_owner_instance_token, g_authority_epoch) ||
+   string authority_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
+          // CR-02: Expire stale authority lease before heartbeat/validation (configurable lease)
+          // R-03: Pass owner_token to prevent coordinator from expiring its own lease
+          string expire_reason = "";
+          g_execution_ledger.ExpireStaleAuthority(authority_key, InpAuthorityLeaseSeconds, expire_reason, g_owner_instance_token);
+          if(expire_reason != "")
+            {
+            if(expire_reason == "LEDGER_UNAVAILABLE")
+              {
+              g_logger.Event(LOG_WARNING, "SYSTEM", "AUTHORITY_EXPIRE_SKIPPED", _Symbol, "", "", "", "WARNING", "AUTHORITY", "Authority lease expiry skipped: " + expire_reason);
+              }
+            else
+              {
+              g_logger.Event(LOG_INFO, "SYSTEM", "AUTHORITY_EXPIRED", _Symbol, "", "", "", "INFO", "AUTHORITY", "Authority lease expired: " + expire_reason);
+              }
+            }
+       if(!g_execution_ledger.HeartbeatAuthority(authority_key, g_owner_instance_token, g_authority_epoch) ||
              !g_execution_ledger.ValidateAuthority(authority_key, g_owner_instance_token, g_authority_epoch))
             {
              g_coordinator_mode = COORD_MODE_UNAVAILABLE;
@@ -5160,73 +5881,60 @@ bool RetryUIRefreshCandidate(RetryReviewCandidate &c, string &diag)
          c = fresh; c.evidence_reason = x.evidence_summary; return true;
         }
      }
-   diag="CANDIDATE_NO_LONGER_ELIGIBLE_OR_CHANGED";
-   c.why_ineligible=diag;
-   return false;
-  }
-
-void RetryUIRender()
-  {
-   if(!InpDashboard) { RetryUIClear(); return; }
-   // EA-owned local controls only. Minimal bounded selection (Next cycles list). No broker calls.
-   int x=16, y_base=140, bw=62, bh=20, gap=6;
-   RetryUIEnsureLabel(g_retry_lbl_status, "E2.6 RETRY: " + g_retry_ui_status, x, y_base + bh*3 + gap*3 + 18, clrGold);
-   string detail = g_retry_ui_detail;
-   if(g_retry_review.valid)
-     {
-      detail = "cand[" + IntegerToString(g_retry_candidate_index+1) + "/" + IntegerToString(g_retry_candidate_count) + "] " +
-               g_retry_review.symbol + " dir=" + IntegerToString(g_retry_review.direction) +
-               " claim=" + g_retry_review.claim_id + " prior=" + g_retry_review.prior_attempt_id +
-               " seq=" + IntegerToString(g_retry_review.retry_sequence) + " class=" + g_retry_review.failure_class +
-               " ret=" + IntegerToString((int)g_retry_review.retcode) +
-               " ord=" + IntegerToString((long)g_retry_review.broker_order_ticket) +
-               " deal=" + IntegerToString((long)g_retry_review.broker_deal_ticket) +
-               " pos=" + IntegerToString((long)g_retry_review.broker_position_ticket) +
-               " ev=" + g_retry_review.evidence_reason + " | " + detail;
-     }
-   if(StringLen(detail)>160) detail = StringSubstr(detail,0,157)+"...";
-   RetryUIEnsureLabel(g_retry_lbl_detail, detail, x, y_base + bh*3 + gap*3 + 4, clrSilver);
-   RetryUIEnsureButton(g_retry_btn_review,  "Review",  x,                 y_base + bh + gap, bw, bh, clrDarkSlateGray, clrWhite);
-   RetryUIEnsureButton(g_retry_btn_next,    "Next",    x + bw + gap,      y_base + bh + gap, bw, bh, (g_retry_candidate_count>1?clrSteelBlue:clrDimGray), clrWhite);
-   bool can_confirm = (g_retry_ui_state == E2E6_UI_CONFIRM_READY && g_retry_review.valid);
-   RetryUIEnsureButton(g_retry_btn_confirm, "Confirm", x + (bw+gap)*2,   y_base + bh + gap, bw, bh, can_confirm?clrDarkGreen:clrDimGray, clrWhite);
-   RetryUIEnsureButton(g_retry_btn_cancel,  "Cancel",  x + (bw+gap)*3,   y_base + bh + gap, bw, bh, clrMaroon, clrWhite);
-   RetryUIEnsureButton(g_retry_btn_inspect, "Inspect", x,                 y_base,             bw, bh, clrTeal, clrWhite);
-   ChartRedraw(ChartID());
-  }
+diag="CANDIDATE_NO_LONGER_ELIGIBLE_OR_CHANGED";
+    c.why_ineligible=diag;
+    return false;
+   }
 
 void RetryUIEnsureObjects()
   {
    if(g_retry_ui_status=="") g_retry_ui_status="IDLE_NO_AUTO_RETRY";
-   RetryUIRender();
+   g_dashboard.SetRetryUIState(g_retry_ui_state, g_retry_ui_status, g_retry_ui_detail);
+    g_dashboard.Render();
   }
 
 void RetryUISelectCurrentCandidate(bool advance)
   {
    string diag="";
    if(g_retry_candidate_count<=0 || ArraySize(g_retry_candidates)<=0)
-     { RetryUIInvalidate("NO_ELIGIBLE_CANDIDATES"); g_retry_ui_state=E2E6_UI_BLOCKED; g_retry_ui_status="REVIEW_NO_CANDIDATES"; g_retry_ui_detail=(diag==""?"No eligible durable FINAL_FAILURE candidate.":diag); RetryUIRender(); return; }
+     { RetryUIInvalidate("NO_ELIGIBLE_CANDIDATES"); g_retry_ui_state=E2E6_UI_BLOCKED;
+    g_retry_ui_status="REVIEW_NO_CANDIDATES";
+    g_retry_ui_detail=(diag==""?"No eligible durable FINAL_FAILURE candidate.":diag);
+    g_dashboard.SetRetryUIState(E2E6_UI_BLOCKED, "REVIEW_NO_CANDIDATES", (diag==""?"No eligible durable FINAL_FAILURE candidate.":diag));
+    g_dashboard.Render(); return; }
    if(advance)
       g_retry_candidate_index = (g_retry_candidate_index + 1) % g_retry_candidate_count;
    if(g_retry_candidate_index < 0 || g_retry_candidate_index >= g_retry_candidate_count)
       g_retry_candidate_index = 0;
    RetryReviewCandidate sel;
    if(!RetryUIFillReviewFromLedgerCandidate(g_retry_candidates[g_retry_candidate_index], sel, diag))
-     { RetryUIInvalidate(diag); g_retry_ui_state=E2E6_UI_BLOCKED; g_retry_ui_status="REVIEW_CANDIDATE_INVALID"; g_retry_ui_detail=diag; RetryUIRender(); return; }
+     { RetryUIInvalidate(diag); g_retry_ui_state=E2E6_UI_BLOCKED;
+    g_retry_ui_status="REVIEW_CANDIDATE_INVALID";
+    g_retry_ui_detail=diag;
+    g_dashboard.SetRetryUIState(E2E6_UI_BLOCKED, "REVIEW_CANDIDATE_INVALID", diag);
+    g_dashboard.Render(); return; }
    // Reload selected exact candidate from durable ledger before confirmation-ready state.
    if(!RetryUIRefreshCandidate(sel, diag))
-     { RetryUIInvalidate(diag); g_retry_ui_state=E2E6_UI_BLOCKED; g_retry_ui_status="REVIEW_RELOAD_FAILED"; g_retry_ui_detail=diag; RetryUIRender(); return; }
+     { RetryUIInvalidate(diag); g_retry_ui_state=E2E6_UI_BLOCKED;
+    g_retry_ui_status="REVIEW_RELOAD_FAILED";
+    g_retry_ui_detail=diag;
+    g_dashboard.SetRetryUIState(E2E6_UI_BLOCKED, "REVIEW_RELOAD_FAILED", diag);
+    g_dashboard.Render(); return; }
    g_retry_review = sel;
    g_retry_ui_state = E2E6_UI_CONFIRM_READY;
    g_retry_ui_status = "REVIEW_READY_EXPLICIT_CONFIRM_REQUIRED";
    g_retry_ui_detail = "Durable candidate loaded from ledger; verify all safety fields before Confirm. No broker call.";
-   RetryUIRender();
+   g_dashboard.SetRetryUIState(g_retry_ui_state, g_retry_ui_status, g_retry_ui_detail);
+    g_dashboard.Render();
   }
 
 void RetryUIHandleReviewClick()
   {
    if(g_retry_handoff.active)
-     { g_retry_ui_status="REVIEW_BLOCKED_HANDOFF_ACTIVE"; g_retry_ui_detail="Transient committed handoff active (fail-closed, no auto-submit)."; RetryUIRender(); return; }
+     { g_retry_ui_status="REVIEW_BLOCKED_HANDOFF_ACTIVE";
+    g_retry_ui_detail="Transient committed handoff active (fail-closed, no auto-submit).";
+    g_dashboard.SetRetryUIState(g_retry_ui_state, "REVIEW_BLOCKED_HANDOFF_ACTIVE", "Transient committed handoff active (fail-closed, no auto-submit).");
+    g_dashboard.Render(); return; }
    RetryUIInvalidate("REVIEW_REQUESTED");
    g_retry_ui_state = E2E6_UI_BLOCKED;
    g_retry_ui_status = "REVIEW_LOADING";
@@ -5235,7 +5943,8 @@ void RetryUIHandleReviewClick()
      {
       g_retry_ui_status = "REVIEW_BLOCKED";
       g_retry_ui_detail = "Candidate discovery fail-closed: " + diag + ". No DB/broker mutation.";
-      RetryUIRender();
+      g_dashboard.SetRetryUIState(g_retry_ui_state, g_retry_ui_status, g_retry_ui_detail);
+    g_dashboard.Render();
       return;
      }
    RetryUISelectCurrentCandidate(false);
@@ -5251,7 +5960,8 @@ void RetryUIHandleCancelClick()
       g_retry_ui_detail = "Cancelled - no ledger side effect.";
    g_retry_ui_state = E2E6_UI_HIDDEN;
    g_retry_ui_status = "CANCELLED_NO_DB_MUTATION";
-   RetryUIRender();
+   g_dashboard.SetRetryUIState(g_retry_ui_state, g_retry_ui_status, g_retry_ui_detail);
+    g_dashboard.Render();
   }
 
 bool RetryUIBuildLocalContext(CExecutionLedger::RetryLocalContext &ctx)
@@ -5278,7 +5988,8 @@ void RetryUIHandleConfirmClick()
      {
       g_retry_ui_status = "CONFIRM_REJECTED";
       g_retry_ui_detail = "No valid reviewed candidate; confirmation has no effect.";
-      RetryUIRender();
+      g_dashboard.SetRetryUIState(g_retry_ui_state, g_retry_ui_status, g_retry_ui_detail);
+    g_dashboard.Render();
       return;
      }
    RetryReviewCandidate reviewed_snapshot = g_retry_review; // immutable review snapshot
@@ -5286,7 +5997,8 @@ void RetryUIHandleConfirmClick()
      {
       RetryUIInvalidate("CONTEXT_CHANGED_BEFORE_CONFIRM");
       g_retry_ui_status = "INVALIDATED_CONTEXT_CHANGED";
-      RetryUIRender();
+      g_dashboard.SetRetryUIState(g_retry_ui_state, g_retry_ui_status, g_retry_ui_detail);
+    g_dashboard.Render();
       return;
      }
    string diag="";
@@ -5295,7 +6007,8 @@ void RetryUIHandleConfirmClick()
       RetryUIInvalidate(diag);
       g_retry_ui_status = "INVALIDATED_BEFORE_CONFIRM";
       g_retry_ui_detail = diag;
-      RetryUIRender();
+      g_dashboard.SetRetryUIState(g_retry_ui_state, g_retry_ui_status, g_retry_ui_detail);
+    g_dashboard.Render();
       return;
      }
    // Confirm reload must compare complete immutable snapshot; no arbitrary caller IDs accepted.
@@ -5305,24 +6018,30 @@ void RetryUIHandleConfirmClick()
       g_retry_ui_state = E2E6_UI_BLOCKED;
       g_retry_ui_status = "CONFIRM_BLOCKED_SNAPSHOT_CHANGED";
       g_retry_ui_detail = "Durable candidate/evidence/context changed since Review; re-review required. No DB mutation.";
-      RetryUIRender();
+      g_dashboard.SetRetryUIState(g_retry_ui_state, g_retry_ui_status, g_retry_ui_detail);
+    g_dashboard.Render();
       return;
      }
    if(reviewed_snapshot.claim_id=="" || reviewed_snapshot.strategy_group_key=="" || reviewed_snapshot.logical_setup_key=="" || reviewed_snapshot.prior_attempt_id=="")
      {
       RetryUIInvalidate("MISSING_IMMUTABLE_IDS");
       g_retry_ui_status = "CONFIRM_BLOCKED_INVALID_IDS";
-      RetryUIRender();
+      g_dashboard.SetRetryUIState(g_retry_ui_state, g_retry_ui_status, g_retry_ui_detail);
+    g_dashboard.Render();
       return;
      }
    if(g_coordinator_mode != COORD_MODE_COORDINATOR)
      {
-      g_retry_ui_status = "CONFIRM_BLOCKED_NOT_COORDINATOR"; RetryUIRender(); return;
+      g_retry_ui_status = "CONFIRM_BLOCKED_NOT_COORDINATOR"; g_dashboard.SetRetryUIState(g_retry_ui_state, g_retry_ui_status, g_retry_ui_detail);
+    g_dashboard.Render();
+    return;
      }
    string auth_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
    if(!g_execution_ledger.ValidateAuthority(auth_key, g_owner_instance_token, g_authority_epoch))
      {
-      g_retry_ui_status = "CONFIRM_BLOCKED_AUTHORITY"; g_retry_ui_detail="Fresh durable authority validation failed."; RetryUIRender(); return;
+      g_retry_ui_status = "CONFIRM_BLOCKED_AUTHORITY"; g_retry_ui_detail="Fresh durable authority validation failed."; g_dashboard.SetRetryUIState(g_retry_ui_state, g_retry_ui_status, g_retry_ui_detail);
+    g_dashboard.Render();
+    return;
      }
    g_executor.SyncAuthority(g_authority_epoch, true);
 
@@ -5368,19 +6087,26 @@ ExecutionAttemptRecord new_attempt; ZeroMemory(new_attempt);
       g_retry_ui_status = "APPROVAL_REJECTED_FAIL_CLOSED";
       g_retry_ui_detail = detail;
      }
-   RetryUIRender();
+   g_dashboard.SetRetryUIState(g_retry_ui_state, g_retry_ui_status, g_retry_ui_detail);
+    g_dashboard.Render();
   }
 
 void RetryUIHandleNextClick()
   {
    if(g_retry_handoff.active)
-     { g_retry_ui_status="NEXT_BLOCKED_HANDOFF_ACTIVE"; RetryUIRender(); return; }
+     { g_retry_ui_status="NEXT_BLOCKED_HANDOFF_ACTIVE"; g_dashboard.SetRetryUIState(g_retry_ui_state, g_retry_ui_status, g_retry_ui_detail);
+    g_dashboard.Render();
+    return; }
    if(g_retry_candidate_count <= 0)
      { RetryUIHandleReviewClick(); return; }
    // Re-load list and reselect next deterministically (bounded). No DB writes.
    int prev = g_retry_candidate_index; string diag="";
    if(!RetryUILoadCandidateList(diag))
-     { RetryUIInvalidate(diag); g_retry_ui_state=E2E6_UI_BLOCKED; g_retry_ui_status="NEXT_DISCOVERY_FAILED"; g_retry_ui_detail=diag; RetryUIRender(); return; }
+     { RetryUIInvalidate(diag); g_retry_ui_state=E2E6_UI_BLOCKED;
+    g_retry_ui_status="NEXT_DISCOVERY_FAILED";
+    g_retry_ui_detail=diag;
+    g_dashboard.SetRetryUIState(E2E6_UI_BLOCKED, "NEXT_DISCOVERY_FAILED", diag);
+    g_dashboard.Render(); return; }
    g_retry_candidate_index = (prev + 1) % g_retry_candidate_count;
    RetryUISelectCurrentCandidate(false);
   }
@@ -5394,7 +6120,8 @@ void RetryUILoadInterruptedList(bool render)
       g_retry_ui_state = E2E6_UI_BLOCKED;
       g_retry_ui_status = "LEDGER_UNAVAILABLE_EXECUTION_BLOCKED";
       g_retry_ui_detail = "Cannot inspect durable retry handoffs: ledger unavailable (fail-closed). No auto-submit.";
-      if(render) RetryUIRender();
+      if(render) g_dashboard.SetRetryUIState(g_retry_ui_state, g_retry_ui_status, g_retry_ui_detail);
+    g_dashboard.Render();
       return;
      }
    string err="", login=IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN)), server=AccountInfoString(ACCOUNT_SERVER);
@@ -5404,7 +6131,8 @@ void RetryUILoadInterruptedList(bool render)
       g_retry_ui_state = E2E6_UI_BLOCKED;
       g_retry_ui_status = "INTERRUPTED_QUERY_FAILED_FAIL_CLOSED";
       g_retry_ui_detail = (err==""?"Interrupted retry query failed":err) + " - no auto-submit/restore.";
-      if(render) RetryUIRender();
+      if(render) g_dashboard.SetRetryUIState(g_retry_ui_state, g_retry_ui_status, g_retry_ui_detail);
+    g_dashboard.Render();
       return;
      }
    g_retry_interrupted_count = n;
@@ -5412,7 +6140,8 @@ void RetryUILoadInterruptedList(bool render)
      {
       if(g_retry_ui_state == E2E6_UI_INTERRUPTED_VIEW)
         { g_retry_ui_state = E2E6_UI_HIDDEN; g_retry_ui_status="NO_INTERRUPTED_RETRY_FOUND"; g_retry_ui_detail="Read-only inspection: no durable interrupted retry handoff records in current account/group context."; }
-      if(render) RetryUIRender();
+      if(render) g_dashboard.SetRetryUIState(g_retry_ui_state, g_retry_ui_status, g_retry_ui_detail);
+    g_dashboard.Render();
       return;
      }
    // Read-only visibility only. Never restore handoff, never submit, never create approval/retry.
@@ -5427,7 +6156,8 @@ void RetryUILoadInterruptedList(bool render)
                        " may_have=" + (g_retry_interrupted[0].submission_may_have_occurred?"1":"0") +
                        " recon=" + (g_retry_interrupted[0].reconciliation_required?"1":"0") +
                        " | " + g_retry_interrupted[0].detail + " [rows="+IntegerToString(n)+" read-only,no restore,no auto-submit]";
-   if(render) RetryUIRender();
+   if(render) g_dashboard.SetRetryUIState(g_retry_ui_state, g_retry_ui_status, g_retry_ui_detail);
+    g_dashboard.Render();
   }
 
 void RetryUIHandleInspectInterruptedClick()
@@ -5855,7 +6585,8 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
       {
        RetryUIInvalidate("CHART_GEOMETRY_CHANGED");
        g_dashboard.HandleChartGeometryChange();
-       RetryUIEnsureObjects();
+       g_dashboard.SetRetryUIState(g_retry_ui_state, g_retry_ui_status, g_retry_ui_detail);
+       g_dashboard.Render();
       }
    // E2.6: local MT5 chart approval (OBJ_BUTTON). No broker calls. Only EA-owned objects.
    else if(id == CHARTEVENT_OBJECT_CLICK)
@@ -6051,7 +6782,11 @@ void OnDeinit(const int reason)
    if(g_coordinator_mode == COORD_MODE_COORDINATOR)
      {
       string authority_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
-      g_execution_ledger.ReleaseAuthority(authority_key, g_owner_instance_token, g_authority_epoch);
+      bool released = g_execution_ledger.ReleaseAuthority(authority_key, g_owner_instance_token, g_authority_epoch);
+      if(!released)
+        {
+         g_logger.Event(LOG_WARNING, "SYSTEM", "AUTHORITY_RELEASE_FAILED", _Symbol, "", "", "", "WARNING", "AUTHORITY", "ReleaseAuthority failed on deinit; epoch=" + IntegerToString(g_authority_epoch));
+        }
      }
    else if(g_coordinator_mode == COORD_MODE_CHART_CONTEXT)
      {

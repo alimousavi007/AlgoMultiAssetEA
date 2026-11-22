@@ -467,9 +467,19 @@ bool               ValidateAuthority(const string authority_key,
      // CR-02: Expire stale authority lease (heartbeat timeout -> ORPHANED)
      // Called periodically from OnTimer; safe to call concurrently with HeartbeatAuthority.
      bool               ExpireStaleAuthority(const string authority_key, int lease_seconds, string &reason, const string owner_token="");
-     int                GetAuthorityState(const string authority_key);
+int                GetAuthorityState(const string authority_key);
 
-    // State history
+     // E2.4 CR-02: Explicit operator recovery from ORPHANED state.
+     // Normal AcquireAuthority() rejects ORPHANED. This method is for auditable,
+     // epoch-fenced operator action only (invoked via dedicated MQL5 Script).
+     // Requires: current_epoch from operator confirmation, new owner_token, returns new_epoch.
+     bool               RecoverAuthorityFromOrphaned(const string authority_key,
+                                                     const string operator_token,
+                                                     long current_epoch,
+                                                     const string new_owner_token,
+                                                     long &out_new_epoch);
+
+     // State history
     bool               LogStateTransition(const string attempt_id, ENUM_EXEC_ATTEMPT_STATE old_state,
                                           ENUM_EXEC_ATTEMPT_STATE new_state, const string reason,
                                           uint retcode=0);
@@ -3908,15 +3918,12 @@ bool CExecutionLedger::AcquireAuthority(const string authority_key, const string
       // MQL5 DatabaseColumnLong exists
      }
    DatabaseFinalize(handle);
-if(state == (int)GATEWAY_AUTHORITY_ORPHANED)
-       {
-       // CR-02: ORPHANED is a valid state for re-acquisition (expired lease)
-       // Fall through to acquisition logic
-       }
-    else if(state != (int)GATEWAY_AUTHORITY_UNCLAIMED && state != (int)GATEWAY_AUTHORITY_RELEASED)
-       {
-       return false; // already owned by another instance
-       }
+   // Normal acquisition path: ONLY UNCLAIMED or RELEASED are valid.
+   // ORPHANED is a BLOCKING state requiring explicit operator recovery via RecoverAuthorityFromOrphaned().
+   if(state != (int)GATEWAY_AUTHORITY_UNCLAIMED && state != (int)GATEWAY_AUTHORITY_RELEASED)
+      {
+      return false; // already owned by another instance, ORPHANED, or invalid state
+      }
 // Conditional acquisition
     if(!DatabaseTransactionBegin(m_db_handle))
        return false;
@@ -3929,8 +3936,7 @@ if(state == (int)GATEWAY_AUTHORITY_ORPHANED)
                  " last_reason='ACQUIRED' " +
                  "WHERE GatewayAuthorityKey='" + EscapeSQL(authority_key) + "' " +
                  "AND (claim_state=" + IntegerToString((int)GATEWAY_AUTHORITY_UNCLAIMED) +
-                 " OR claim_state=" + IntegerToString((int)GATEWAY_AUTHORITY_RELEASED) +
-                 " OR claim_state=" + IntegerToString((int)GATEWAY_AUTHORITY_ORPHANED) + ");";
+                 " OR claim_state=" + IntegerToString((int)GATEWAY_AUTHORITY_RELEASED) + ");";
    if(!ExecuteSQL(sql))
      {
       DatabaseTransactionRollback(m_db_handle);
@@ -4112,6 +4118,7 @@ return true;
     string sql = "UPDATE account_authority SET "
                  "claim_state = " + IntegerToString((int)GATEWAY_AUTHORITY_ORPHANED) + ", "
                  "released_at = " + IntegerToString((long)now) + ", "
+                 "owner_instance_token = '', "
                  "last_reason = 'HEARTBEAT_EXPIRED' "
                  "WHERE GatewayAuthorityKey = '" + EscapeSQL(authority_key) + "' "
                  "AND claim_state = " + IntegerToString((int)GATEWAY_AUTHORITY_CLAIMED) + " "
@@ -4156,7 +4163,7 @@ return true;
     return expired;
     }
 
- int CExecutionLedger::GetAuthorityState(const string authority_key)
+int CExecutionLedger::GetAuthorityState(const string authority_key)
   {
    if(!m_db_available || m_db_handle == INVALID_HANDLE || authority_key == "")
       return -1;
@@ -4170,6 +4177,137 @@ return true;
    DatabaseFinalize(handle);
    return state;
    }
+
+//+------------------------------------------------------------------+
+  //| E2.4 CR-02: Explicit operator recovery from ORPHANED state       |
+  //| Normal AcquireAuthority() rejects ORPHANED. This method is for   |
+  //| auditable, epoch-fenced operator action only (invoked via        |
+  //| dedicated MQL5 Script). Requires current_epoch from operator     |
+  //| confirmation, new owner_token, returns new_epoch.                |
+  //| Authorization recorded as UNVERIFIED (OPEN/P1 trust model gap).  |
+  //| PKI signed, one-time authorization is the preferred architecture |
+  //| candidate. External verification component required for MQL5     |
+  //| cryptographic capabilities.                                      |
+  //+------------------------------------------------------------------+
+  bool CExecutionLedger::RecoverAuthorityFromOrphaned(const string authority_key,
+                                                      const string operator_token,
+                                                      long current_epoch,
+                                                      const string new_owner_token,
+                                                      long &out_new_epoch)
+    {
+    out_new_epoch = 0;
+    if(!m_db_available || m_db_handle == INVALID_HANDLE)
+       return false;
+    if(authority_key == "" || operator_token == "" || new_owner_token == "" || current_epoch <= 0)
+       return false;
+
+    // Verify current state is ORPHANED and epoch matches operator confirmation
+    string check_sql = "SELECT claim_state, authority_epoch, owner_instance_token FROM account_authority WHERE GatewayAuthorityKey='" + EscapeSQL(authority_key) + "';";
+    int handle = DatabasePrepare(m_db_handle, check_sql);
+    if(handle == INVALID_HANDLE)
+       return false;
+    int state = -1;
+    long epoch = 0;
+    string owner = "";
+    if(DatabaseRead(handle))
+      {
+       DatabaseColumnInteger(handle, 0, state);
+       DatabaseColumnLong(handle, 1, epoch);
+       DatabaseColumnText(handle, 2, owner);
+      }
+    DatabaseFinalize(handle);
+
+    // Must be ORPHANED and epoch must match operator's confirmed value (fencing)
+    if(state != (int)GATEWAY_AUTHORITY_ORPHANED || epoch != current_epoch)
+       return false;
+
+    // Fail-closed: reject recovery when no trusted operator-authentication provider exists.
+    // HashOperatorToken() returns "UNVERIFIED" when no PKI/HMAC/IdP validation is implemented.
+    // This check MUST occur before any state/epoch mutation.
+    string operator_token_hash = HashOperatorToken(operator_token);
+    if(operator_token_hash == "UNVERIFIED")
+       {
+       // Explicit diagnostics: authorization provider unavailable.
+       // No state change, no epoch increment, no owner token mutation.
+       return false;
+       }
+
+    // Conditional recovery: only if still ORPHANED with matching epoch
+    if(!DatabaseTransactionBegin(m_db_handle))
+       return false;
+
+    datetime now = TimeCurrent();
+    // Authorization recorded as UNVERIFIED (OPEN/P1 trust model gap).
+    // No token-derived data persisted in audit trail.
+    string sql = "UPDATE account_authority SET claim_state=" + IntegerToString((int)GATEWAY_AUTHORITY_CLAIMED) +
+                 ", owner_instance_token='" + EscapeSQL(new_owner_token) + "'," +
+                 " authority_epoch=authority_epoch+1," +
+                 " claimed_at=" + IntegerToString((long)now) + "," +
+                 " heartbeat_at=" + IntegerToString((long)now) + "," +
+                 " last_reason='OPERATOR_RECOVERY_FROM_ORPHANED operator_token_hash=" + operator_token_hash + "' " +
+                 "WHERE GatewayAuthorityKey='" + EscapeSQL(authority_key) + "' " +
+                 "AND claim_state=" + IntegerToString((int)GATEWAY_AUTHORITY_ORPHANED) +
+                 " AND authority_epoch=" + IntegerToString(current_epoch) + ";";
+
+    if(!ExecuteSQL(sql))
+      {
+       DatabaseTransactionRollback(m_db_handle);
+       return false;
+      }
+
+    // Verify exactly one row was affected
+    int changes_handle = DatabasePrepare(m_db_handle, "SELECT changes();");
+    if(changes_handle == INVALID_HANDLE)
+      {
+       DatabaseTransactionRollback(m_db_handle);
+       return false;
+      }
+    int affected = 0;
+    if(DatabaseRead(changes_handle))
+       DatabaseColumnInteger(changes_handle, 0, affected);
+    DatabaseFinalize(changes_handle);
+    if(affected != 1)
+      {
+       DatabaseTransactionRollback(m_db_handle);
+       return false;
+      }
+
+    // Read back new epoch
+    string read_sql = "SELECT authority_epoch FROM account_authority WHERE GatewayAuthorityKey='" + EscapeSQL(authority_key) + "' AND owner_instance_token='" + EscapeSQL(new_owner_token) + "';";
+    int rhandle = DatabasePrepare(m_db_handle, read_sql);
+    if(rhandle != INVALID_HANDLE && DatabaseRead(rhandle))
+      {
+       DatabaseColumnLong(rhandle, 0, out_new_epoch);
+      }
+    if(rhandle != INVALID_HANDLE)
+       DatabaseFinalize(rhandle);
+
+    if(out_new_epoch <= 0)
+      {
+       DatabaseTransactionRollback(m_db_handle);
+       return false;
+      }
+
+    if(!DatabaseTransactionCommit(m_db_handle))
+      {
+       DatabaseTransactionRollback(m_db_handle);
+       return false;
+      }
+
+    return true;
+    }
+
+// Authorization marker for audit trail (no token-derived data).
+  // Until a trusted authorization source (PKI, HMAC, external IdP) is implemented,
+  // operator identity cannot be cryptographically verified.
+  // Returns "UNVERIFIED" to explicitly indicate authorization gap (OPEN/P1).
+  // Do not replace with unkeyed SHA-256 or any token-derived hash.
+  string HashOperatorToken(const string token)
+    {
+    // Intentionally ignore token parameter - no token data in audit trail.
+    // Authorization remains UNVERIFIED until trust model implemented.
+    return "UNVERIFIED";
+    }
 
 CExecutionLedger::ENUM_ATTEMPT_IDENTITY_RESOLUTION CExecutionLedger::GetSetupIdentityForAttempt(
    const string attempt_id,
