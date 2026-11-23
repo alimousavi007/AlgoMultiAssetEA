@@ -4326,46 +4326,21 @@ void ProcessEvaluation(CSymbolRuntime& runtime)
        return;
       }
 
-    // Portfolio state check
+    // Portfolio state check (SP-01: signal calc proceeds regardless; risk admission at boundary)
     PortfolioState portfolio_state;
-    if(!g_state.GetPortfolioState(portfolio_state))
+    bool portfolio_available = g_state.GetPortfolioState(portfolio_state);
+    if(!portfolio_available)
       {
-       g_logger.Event(LOG_ERROR, "RISK", "RISK_STATE_UNAVAILABLE",
-                      runtime.symbol, "", "", "", "REJECT", "RISK_STATE",
-                      "Portfolio state is unavailable; entry blocked");
-       runtime.TransitionTo(RUNTIME_BLOCKED_DATA, REASON_DATA_FETCH_FAILED);
-       ShowRuntimeGateStatus(runtime, "BLOCKED: RISK STATE UNAVAILABLE");
-       LogRuntimeGate(runtime, "RISK_STATE", "PORTFOLIO_STATE", "BLOCK", "UNAVAILABLE");
-       return;
+       g_logger.Event(LOG_WARNING, "RISK", "RISK_STATE_UNAVAILABLE",
+                      runtime.symbol, "", "", "", "INFO", "RISK_STATE",
+                      "Portfolio state unavailable; signal still calculated, execution blocked");
       }
 
- LogRiskLockTransition(portfolio_state);
+    if(portfolio_available)
+      LogRiskLockTransition(portfolio_state);
 
-    if(portfolio_state.trading_locked)
-      {
-       g_logger.Event(LOG_WARNING, "RISK", "RISK_LOCK_ACTIVE",
-                      runtime.symbol, "", "", "", "REJECT", "RISK_LOCK",
-                      "Trading locked by portfolio state");
-       runtime.TransitionTo(RUNTIME_BLOCKED_RISK, REASON_RISK_LOCK);
-       ShowRuntimeGateStatus(runtime, "BLOCKED: RISK LOCK");
-       LogRuntimeGate(runtime, "RISK_LOCK", "PORTFOLIO_RISK", "BLOCK", "TRADING_LOCKED");
-       return;
-      }
-
-    // Authority check (coordinator only)
-    if(g_coordinator_mode == COORD_MODE_COORDINATOR)
-      {
-       string authority_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
-       if(!g_execution_ledger.ValidateAuthority(authority_key, g_owner_instance_token, g_authority_epoch))
-         {
-          runtime.TransitionTo(RUNTIME_BLOCKED_AUTHORITY, REASON_AUTHORITY_BLOCK);
-          ShowRuntimeGateStatus(runtime, "BLOCKED: AUTHORITY");
-          LogRuntimeGate(runtime, "AUTHORITY", "COORDINATOR", "BLOCK", "AUTHORITY_INVALID");
-          return;
-         }
-      }
-
-    // Build feature context and evaluate
+    // Authority check (coordinator only) - moved to signal-to-execution boundary
+    // (signal calculation proceeds; authority enforced before durable intent)
    runtime.TransitionTo(RUNTIME_EVALUATING, REASON_EVALUATION_START);
 
    bool ok = false;
@@ -4393,6 +4368,26 @@ void ProcessEvaluation(CSymbolRuntime& runtime)
 
 HybridDecision decision = runtime.hybrid_engine.Evaluate(
                                 runtime.symbol, ctx, context_market, ok);
+
+    // SP-01: Handle Evaluate failure explicitly
+    if(!ok)
+      {
+       g_logger.Event(LOG_WARNING, "HYBRID", "EVALUATE_FAILED",
+                      runtime.symbol, "", "", "", "WARN", "EVALUATE_FAIL",
+                      "HybridEngine.Evaluate returned false; reason=" + ctx.reason);
+       runtime.TransitionTo(RUNTIME_BLOCKED_FEATURES, REASON_EVALUATION_FAILED);
+       ShowRuntimeGateStatus(runtime, "BLOCKED: EVALUATE FAILED");
+       LogRuntimeGate(runtime, "HYBRID_EVAL", "EVALUATE", "FAIL", ctx.reason);
+       return;
+      }
+
+    // SP-01: Handle invalid decision explicitly
+    if(!decision.valid)
+      {
+       g_logger.Event(LOG_INFO, "HYBRID", "DECISION_INVALID",
+                      runtime.symbol, "", "", "", "INFO", "NO_VALID_DECISION",
+                      "Hybrid decision invalid: " + decision.main_reason);
+      }
 
     // Populate runtime snapshot with decision data for dashboard
     if(decision.valid)
@@ -5658,7 +5653,10 @@ g_logger.MaybeWriteSummary(false);
       }
 
     if(!risk_state_ready)
-      return;
+      {
+       // SP-01: Signal scheduling continues even when risk state is unavailable.
+       // Risk admission is enforced at the signal-to-execution boundary.
+      }
 
 if(g_coordinator_mode == COORD_MODE_COORDINATOR)
       {
@@ -5922,7 +5920,10 @@ g_metrics_exporter.SetEngineMetrics(
       }
 
     if(!risk_state_ready)
-      return;
+      {
+       // SP-01: Signal scheduling continues even when risk state is unavailable.
+       // Risk admission is enforced at the signal-to-execution boundary.
+      }
 
 if(g_coordinator_mode == COORD_MODE_COORDINATOR)
       {
