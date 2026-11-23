@@ -1658,6 +1658,135 @@ Run-TestSuite 'Compile-MT5 gate guards' {
     }
 }
 # ----------------------------------------------------------------------------
+Run-TestSuite 'P2.2 S01-S15 Scheduler Invariants' {
+    Run-Test 'P2.2-S01: OnTick invokes central scheduler only' {
+        $eaPath = Join-Path $script:ProjectRoot 'Experts\AlgoMultiAssetEA.mq5'
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'RunMultiAssetScheduler\("OnTick"\)'
+    }
+
+    Run-Test 'P2.2-S02: OnTimer uses same central scheduler' {
+        $eaPath = Join-Path $script:ProjectRoot 'Experts\AlgoMultiAssetEA.mq5'
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'RunMultiAssetScheduler\("OnTimer"\)'
+    }
+
+    Run-Test 'P2.2-S07: Unsigned monotonic timing' {
+        $eaPath = Join-Path $script:ProjectRoot 'Experts\AlgoMultiAssetEA.mq5'
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'ulong start_us = GetMicrosecondCount\(\)'
+        Assert-Match $ea 'ulong elapsed = now_us - start_us'
+    }
+
+    Run-Test 'P2.2-S05: No duplicate runtime processing per pass' {
+        $eaPath = Join-Path $script:ProjectRoot 'Experts\AlgoMultiAssetEA.mq5'
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'int scanned = 0'
+        Assert-Match $ea 'scanned\+\+'
+    }
+
+    Run-Test 'P2.2-S15: Scheduler preserves WS-2 boundaries' {
+        $eaPath = Join-Path $script:ProjectRoot 'Experts\AlgoMultiAssetEA.mq5'
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        $schedStart = $ea.IndexOf('void RunMultiAssetScheduler')
+        $schedEnd = $ea.IndexOf('void OnTick()')
+        $schedBody = $ea.Substring($schedStart, $schedEnd - $schedStart)
+        Assert-True (-not ($schedBody -match 'OrderSend'))
+    }
+}
+Run-TestSuite 'P2.2 S03-S14 Scheduler Acceptance' {
+    Run-Test 'P2.2-S03: Invalid registry slots handled' {
+        $eaPath = Join-Path $script:ProjectRoot 'Experts\AlgoMultiAssetEA.mq5'
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        $schedStart = $ea.IndexOf('void RunMultiAssetScheduler')
+        $schedEnd = $ea.IndexOf('void OnTick()')
+        $schedBody = $ea.Substring($schedStart, $schedEnd - $schedStart)
+        Assert-Match $schedBody 'CSymbolRuntime \*runtime = g_runtime\.At\(idx\)'
+        Assert-Match $schedBody 'if\(runtime && runtime\.valid\)'
+    }
+
+    Run-Test 'P2.2-S04: Mixed valid and invalid slots' {
+        $eaPath = Join-Path $script:ProjectRoot 'Experts\AlgoMultiAssetEA.mq5'
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        $schedStart = $ea.IndexOf('void RunMultiAssetScheduler')
+        $schedEnd = $ea.IndexOf('void OnTick()')
+        $schedBody = $ea.Substring($schedStart, $schedEnd - $schedStart)
+        Assert-Match $schedBody 'scanned\+\+'
+        Assert-Match $schedBody 'if\(runtime && runtime\.valid\)'
+    }
+
+    Run-Test 'P2.2-S06: Time-budget exhaustion' {
+        $eaPath = Join-Path $script:ProjectRoot 'Experts\AlgoMultiAssetEA.mq5'
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        $schedStart = $ea.IndexOf('void RunMultiAssetScheduler')
+        $schedEnd = $ea.IndexOf('void OnTick()')
+        $schedBody = $ea.Substring($schedStart, $schedEnd - $schedStart)
+        Assert-Match $schedBody 'ulong elapsed = now_us - start_us'
+        Assert-Match $schedBody 'g_sched_time_exhausted\+\+'
+    }
+
+    Run-Test 'P2.2-S08: No duplicate execution within one pass' {
+        $eaPath = Join-Path $script:ProjectRoot 'Experts\AlgoMultiAssetEA.mq5'
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        $schedStart = $ea.IndexOf('void RunMultiAssetScheduler')
+        $schedEnd = $ea.IndexOf('void OnTick()')
+        $schedBody = $ea.Substring($schedStart, $schedEnd - $schedStart)
+        Assert-Match $schedBody 'steps < g_sched_step_budget'
+        Assert-Match $schedBody 'scanned < total'
+    }
+
+    Run-Test 'P2.2-S09: Fair service across repeated invocations' {
+        $eaPath = Join-Path $script:ProjectRoot 'Experts\AlgoMultiAssetEA.mq5'
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'g_sched_cursor = idx'
+        Assert-Match $ea 'g_sched_rotation_count'
+    }
+
+    Run-Test 'P2.2-S10: Registry growth and cursor recovery' {
+        $eaPath = Join-Path $script:ProjectRoot 'Experts\AlgoMultiAssetEA.mq5'
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        $schedStart = $ea.IndexOf('void RunMultiAssetScheduler')
+        $schedEnd = $ea.IndexOf('void OnTick()')
+        $schedBody = $ea.Substring($schedStart, $schedEnd - $schedStart)
+        Assert-Match $schedBody 'if\(g_sched_cursor < 0 \|\| g_sched_cursor >= total\)'
+        Assert-Match $schedBody 'g_sched_cursor = 0'
+    }
+
+    Run-Test 'P2.2-S11: Empty and all-invalid registry' {
+        $eaPath = Join-Path $script:ProjectRoot 'Experts\AlgoMultiAssetEA.mq5'
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        $schedStart = $ea.IndexOf('void RunMultiAssetScheduler')
+        $schedEnd = $ea.IndexOf('void OnTick()')
+        $schedBody = $ea.Substring($schedStart, $schedEnd - $schedStart)
+        Assert-Match $schedBody 'if\(total <= 0\)'
+        Assert-Match $schedBody 'return;'
+    }
+
+    Run-Test 'P2.2-S12: Deferred due work preserved' {
+        $eaPath = Join-Path $script:ProjectRoot 'Experts\AlgoMultiAssetEA.mq5'
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'g_sched_deferred'
+        Assert-Match $ea 'g_sched_deferred\+\+'
+    }
+
+    Run-Test 'P2.2-S13: Independent role due-work' {
+        $eaPath = Join-Path $script:ProjectRoot 'Experts\AlgoMultiAssetEA.mq5'
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'IsNewClosedBar'
+        Assert-Match $ea 'SERIES_SYNCHRONIZED'
+    }
+
+    Run-Test 'P2.2-S14: Mandatory global services before scheduler' {
+        $eaPath = Join-Path $script:ProjectRoot 'Experts\AlgoMultiAssetEA.mq5'
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        $onTickStart = $ea.IndexOf('void OnTick()')
+        $onTickEnd = $ea.IndexOf('void OnTimer()')
+        $onTickBody = $ea.Substring($onTickStart, $onTickEnd - $onTickStart)
+        $posIdx = $onTickBody.IndexOf('g_position_manager.Update()')
+        $schedIdx = $onTickBody.IndexOf('RunMultiAssetScheduler')
+        Assert-True ($posIdx -ge 0 -and $schedIdx -gt $posIdx)
+    }
+}
 # Summary
 # ----------------------------------------------------------------------------
 

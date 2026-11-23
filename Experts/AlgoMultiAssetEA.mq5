@@ -5579,8 +5579,10 @@ bool RefreshTradingState()
 void RunMultiAssetScheduler(string trigger_reason)
   {
    g_sched_invocations++;
-   int start_us = (int)GetMicrosecondCount();
+   ulong start_us = GetMicrosecondCount();
+   ulong time_budget_us = (ulong)g_sched_time_budget_us;
    int steps = 0;
+   int scanned = 0;
    int total = g_runtime.Total();
    if(total <= 0)
       return;
@@ -5589,13 +5591,13 @@ void RunMultiAssetScheduler(string trigger_reason)
    if(g_sched_cursor < 0 || g_sched_cursor >= total)
       g_sched_cursor = 0;
 
-   int processed_this_pass = 0;
    int idx = g_sched_cursor;
-   while(steps < g_sched_step_budget && processed_this_pass < total)
+   while(steps < g_sched_step_budget && scanned < total)
      {
-      // Time budget check between atomic steps
-      int elapsed = (int)GetMicrosecondCount() - start_us;
-      if(elapsed > g_sched_time_budget_us)
+      // Time budget check between atomic slots (unsigned, monotonic)
+      ulong now_us = GetMicrosecondCount();
+      ulong elapsed = now_us - start_us;
+      if(elapsed > time_budget_us)
         {
          g_sched_time_exhausted++;
          g_sched_deferred++;
@@ -5611,9 +5613,9 @@ void RunMultiAssetScheduler(string trigger_reason)
          // One atomic runtime step per pass (no duplicate within same pass)
          ProcessRuntime(runtime);
          steps++;
-         processed_this_pass++;
         }
 
+      scanned++;
       idx++;
       if(idx >= total)
         {
@@ -5622,8 +5624,8 @@ void RunMultiAssetScheduler(string trigger_reason)
         }
      }
 
-   // Step budget exhausted
-   if(steps >= g_sched_step_budget && processed_this_pass < total)
+   // Step budget exhausted (only if work remains)
+   if(steps >= g_sched_step_budget && scanned < total)
       g_sched_step_exhausted++;
 
    // Retain cursor for fair continuation on next invocation
