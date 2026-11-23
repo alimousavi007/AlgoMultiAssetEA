@@ -3323,6 +3323,33 @@ RiskDecision risk;
         }
       }
 
+    // SP-01R.1: Fail-closed risk admission gate - before any risk calculation
+    if(!portfolio_state_available)
+      {
+       g_logger.Event(LOG_WARNING, "RISK", "RISK_STATE_UNAVAILABLE_ADMISSION",
+                      legacy_signal.symbol, "", "", legacy_signal.signal_id,
+                      "REJECT", "RISK_UNAVAILABLE",
+                      "Portfolio state unavailable; admission blocked before RiskEngine");
+       risk.decision = RISK_REJECTED;
+       risk.rejection_reason = REJECT_PORTFOLIO_RISK;
+       g_logger.Risk(risk);
+       runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+       return;
+      }
+
+    if(portfolio_state.trading_locked)
+      {
+       g_logger.Event(LOG_WARNING, "RISK", "RISK_LOCK_ADMISSION",
+                      legacy_signal.symbol, "", "", legacy_signal.signal_id,
+                      "REJECT", "RISK_LOCKED",
+                      "Trading locked; admission blocked before RiskEngine");
+       risk.decision = RISK_REJECTED;
+       risk.rejection_reason = REJECT_PORTFOLIO_RISK;
+       g_logger.Risk(risk);
+       runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+       return;
+      }
+
     if(!g_risk_engine.Evaluate(legacy_signal, risk))
       {
       g_logger.Risk(risk);
@@ -3514,6 +3541,16 @@ attempt_rec.serialization_version = 2;
         g_logger.Event(LOG_WARNING, "RISK", "RISK_LOCK_ADMISSION", runtime.symbol, "", "",
                        decision.plan.setup_id, "REJECT", "RISK_LOCKED",
                        "Trading locked; admission blocked");
+        runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+        return;
+       }
+
+     // SP-01R.1: Defensive pre-intent boundary - non-Coordinator cannot create intent
+     if(g_coordinator_mode != COORD_MODE_COORDINATOR)
+       {
+        g_logger.Event(LOG_WARNING, "AUTHORITY", "NON_COORDINATOR_BLOCK", runtime.symbol, "", "",
+                       decision.plan.setup_id, "REJECT", "NON_COORDINATOR",
+                       "Non-coordinator instance cannot create durable intent");
         runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
         return;
        }
