@@ -44,9 +44,6 @@ InpSweepConfirmBars=3
 
 ; === 06. Divergence & Momentum ===
 InpRSIPeriod=14
-InpMACD_Fast=12
-InpMACD_Slow=26
-InpMACD_Signal=9
 InpPivotTolerancePercent=0.02
 InpMaxDivergenceAgeBars=30
 InpMomentumLookback=50
