@@ -3105,7 +3105,8 @@ void LogRuntimeGate(CSymbolRuntime &runtime,
 //+------------------------------------------------------------------+
 void ProcessHybridDecision(CSymbolRuntime& runtime,
                            HybridDecision& decision,
-                           const PortfolioState& portfolio_state)
+                           const PortfolioState& portfolio_state,
+                           bool portfolio_state_available)
   {
    g_logger.Signal(decision);
 
@@ -3498,6 +3499,39 @@ attempt_rec.serialization_version = 2;
           (int)normalized_plan.direction, normalized_plan.signal_time, (int)runtime.setup_tf, 2);
       // F-005.2.2: Account scope for ownership resolution (schema v5).
       attempt_rec.account_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
+     // SP-01R: Risk admission gate - must be before durable claim/intent
+     if(!portfolio_state_available)
+       {
+        g_logger.Event(LOG_WARNING, "RISK", "RISK_STATE_UNAVAILABLE_ADMISSION", runtime.symbol, "", "",
+                       decision.plan.setup_id, "REJECT", "RISK_UNAVAILABLE",
+                       "Portfolio state unavailable; admission blocked");
+        runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+        return;
+       }
+
+     if(portfolio_state.trading_locked)
+       {
+        g_logger.Event(LOG_WARNING, "RISK", "RISK_LOCK_ADMISSION", runtime.symbol, "", "",
+                       decision.plan.setup_id, "REJECT", "RISK_LOCKED",
+                       "Trading locked; admission blocked");
+        runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+        return;
+       }
+
+     // SP-01R: Authority must be validated BEFORE durable claim/intent creation
+     if(g_coordinator_mode == COORD_MODE_COORDINATOR)
+       {
+        string authority_key = AccountInfoString(ACCOUNT_SERVER) + "_" + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN));
+        if(!g_execution_ledger.ValidateAuthority(authority_key, g_owner_instance_token, g_authority_epoch))
+          {
+           g_logger.Event(LOG_WARNING, "AUTHORITY", "AUTHORITY_BLOCK_BEFORE_CLAIM", runtime.symbol, "", "",
+                          decision.plan.setup_id, "REJECT", "AUTHORITY_INVALID",
+                          "Authority invalid before durable claim; no intent created");
+           runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+           return;
+          }
+       }
+
      {
      // RS01-CANON-01: stable canonical identity (v2). Legacy v1 claims recognized by ledger compatibility.
      string claim_intent_err = "";
@@ -4414,7 +4448,7 @@ HybridDecision decision = runtime.hybrid_engine.Evaluate(
        runtime.snapshot.short_state = SNAP_NO_SIGNAL;
       }
 
-    ProcessHybridDecision(runtime, decision, portfolio_state);
+    ProcessHybridDecision(runtime, decision, portfolio_state, portfolio_available);
 
     if(decision.valid)
       {
