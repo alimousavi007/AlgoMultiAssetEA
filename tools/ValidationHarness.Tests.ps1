@@ -1236,6 +1236,112 @@ Run-TestSuite 'EA source regression guards' {
         Assert-True (-not ($md -match 'm_caching_enabled'))
     }
 
+    # P1.1: Signal Pipeline Cache Hardening
+    Run-Test 'P1.1: cached_*_features fields removed from CSymbolRuntime' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-True (-not ($ea -match 'cached_context_features'))
+        Assert-True (-not ($ea -match 'cached_structure_features'))
+        Assert-True (-not ($ea -match 'cached_setup_features'))
+        Assert-True (-not ($ea -match 'cached_entry_features'))
+    }
+
+    Run-Test 'P1.1: cache_bar_time field removed from CSymbolRuntime' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-True (-not ($ea -match 'cache_bar_time'))
+    }
+
+    Run-Test 'P1.1: MarketSnapshot cache validation checks symbol, timeframe, validity' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'CACHE_VALIDATION'
+        Assert-Match $ea 'SYMBOL_TF_MISMATCH'
+        Assert-Match $ea 'context_market\.symbol != runtime\.symbol'
+        Assert-Match $ea 'context_market\.timeframe != runtime\.context_tf'
+        Assert-Match $ea '!context_market\.valid'
+    }
+
+    Run-Test 'P1.1: Partial four-role dataset cannot produce valid cache' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        # The validation checks all four roles; early return on any failure
+        Assert-Match $ea 'structure_market\.symbol != runtime\.symbol'
+        Assert-Match $ea 'setup_market\.symbol != runtime\.symbol'
+        Assert-Match $ea 'entry_market\.symbol != runtime\.symbol'
+    }
+
+    Run-Test 'P1.1: Cache invalidated at start of new ProcessDataFetch cycle' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'runtime\.cache_valid = false'
+    }
+
+    Run-Test 'P1.1: ProcessFeatureCalculation no longer calculates FeatureSets (deferred to evaluation)' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        # Should not contain the old FeatureSet calculation blocks
+        Assert-True (-not ($ea -match 'runtime\.feature_context\.Calculate\(runtime\.cached_context_market'))
+        Assert-True (-not ($ea -match 'runtime\.cached_context_features = context_features'))
+        # Should just validate cache and transition
+        Assert-Match $ea 'FEATURE_CALC_OK.*CACHE_VALIDATED'
+        Assert-Match $ea 'READY_FOR_SIGNAL'
+    }
+
+    Run-Test 'P1.1: MACD input parameters removed from EA inputs' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-True (-not ($ea -match 'InpMACD_Fast'))
+        Assert-True (-not ($ea -match 'InpMACD_Slow'))
+        Assert-True (-not ($ea -match 'InpMACD_Signal'))
+    }
+
+    Run-Test 'P1.1: MACD parameters absent from DASH_A preset' {
+        $dashA = Get-Content -LiteralPath (Join-Path $script:ProjectRoot 'Experts\AlgoMultiAssetEA_DASH_A.set') -Raw
+        Assert-True (-not ($dashA -match 'InpMACD_Fast'))
+        Assert-True (-not ($dashA -match 'InpMACD_Slow'))
+        Assert-True (-not ($dashA -match 'InpMACD_Signal'))
+    }
+
+    Run-Test 'P1.1: MACD parameters absent from DASH_B preset' {
+        $dashB = Get-Content -LiteralPath (Join-Path $script:ProjectRoot 'Experts\AlgoMultiAssetEA_DASH_B.set') -Raw
+        Assert-True (-not ($dashB -match 'InpMACD_Fast'))
+        Assert-True (-not ($dashB -match 'InpMACD_Slow'))
+        Assert-True (-not ($dashB -match 'InpMACD_Signal'))
+    }
+
+    Run-Test 'P1.1: SetDivergenceParams signature simplified (RSI-only)' {
+        $he = Get-Content -LiteralPath (Join-Path $script:ProjectRoot 'Include\AlgoSystem\HybridEngine.mqh') -Raw
+        Assert-Match $he 'SetDivergenceParams\(int rsi_period,\s*double pivot_tolerance_percent,\s*int max_age_bars\)'
+        Assert-True (-not ($he -match 'macd_fast'))
+        Assert-True (-not ($he -match 'macd_slow'))
+        Assert-True (-not ($he -match 'macd_signal'))
+    }
+
+    Run-Test 'P1.1: DivergenceEngine MACD handles and buffers removed' {
+        $de = Get-Content -LiteralPath (Join-Path $script:ProjectRoot 'Include\AlgoSystem\DivergenceEngine.mqh') -Raw
+        Assert-True (-not ($de -match 'm_macd_main_handle'))
+        Assert-True (-not ($de -match 'm_macd_signal_handle'))
+        Assert-True (-not ($de -match 'm_macd_main\['))
+        Assert-True (-not ($de -match 'm_macd_signal\['))
+        Assert-True (-not ($de -match 'iMACD'))
+    }
+
+    Run-Test 'P1.1: WFO_REPORT.md marks MACD params as legacy' {
+        $wfo = Get-Content -LiteralPath (Join-Path $script:ProjectRoot 'docs\testing\WFO_REPORT.md') -Raw
+        Assert-Match $wfo 'Legacy \(removed in P1\.1 - RSI-only divergence\)'
+    }
+
+    Run-Test 'P1.1: Operation count reduction - GetSnapshot calls per cycle' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        # Before P1: ProcessDataFetch(4) + ProcessFeatureCalculation(4) + ProcessEvaluation(4) = 12
+        # After P1.1: ProcessDataFetch(4) + ProcessEvaluation(4) = 8
+        # The test verifies ProcessFeatureCalculation no longer calls GetSnapshot
+        $pfc = [regex]::Match($ea, '(?s)void ProcessFeatureCalculation\(CSymbolRuntime& runtime\).*?^   \}').Value
+        Assert-True (-not ($pfc -match 'GetSnapshot'))
+    }
+
+    Run-Test 'P1.1: Operation count reduction - Feature calculations per cycle' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        # Before P1: ProcessFeatureCalculation(4) + ProcessEvaluation(4) = 8
+        # After P1.1: ProcessEvaluation(4) = 4
+        $pfc = [regex]::Match($ea, '(?s)void ProcessFeatureCalculation\(CSymbolRuntime& runtime\).*?^   \}').Value
+        Assert-True (-not ($pfc -match 'Calculate\('))
+    }
+
     $newsPath = Join-Path $script:ProjectRoot 'Include\AlgoSystem\NewsRiskService.mqh'
 
     Run-Test 'F4: owned news provider released before the NoOp fallback (no leak)' {

@@ -77,7 +77,7 @@ Fitness = Profit_Score × Risk_Control × Consistency × Trade_Sufficiency × 10
 |-------|------------|---------------|
 | **OPT_GROUP_TREND** | ADX period, trend threshold, EMA periods | 3-5 |
 | **OPT_GROUP_BREAKOUT** | Swing lookback, equal tolerance, sweep confirm | 3-4 |
-| **OPT_GROUP_MOMENTUM** | RSI period, MACD periods, pivot tolerance | 4-5 |
+| **OPT_GROUP_MOMENTUM** | RSI period, pivot tolerance | 3-4 |
 | **OPT_GROUP_RISK** | Min RR, min score, conflict threshold | 3 |
 | **OPT_GROUP_EXITS** | Trailing mode, distances, scale in/out | 4-5 |
 | **OPT_GROUP_REGIME** | ADX period, vol ratios, range lookback | 4-5 |
@@ -276,9 +276,9 @@ RSI_Period -0.02   0.14    -0.05       0.07      -0.23       1.0
 | `InpADXTrendThreshold` | 25 | Mode |
 | `InpSwingLookback` | 5 | Median |
 | `InpRSIPeriod` | 14 | Mode |
-| `InpMACD_Fast` | 12 | Fixed (not optimized) |
-| `InpMACD_Slow` | 26 | Fixed |
-| `InpMACD_Signal` | 9 | Fixed |
+| `InpMACD_Fast` | 12 | **Legacy (removed in P1.1 - RSI-only divergence)** |
+| `InpMACD_Slow` | 26 | **Legacy (removed in P1.1 - RSI-only divergence)** |
+| `InpMACD_Signal` | 9 | **Legacy (removed in P1.1 - RSI-only divergence)** |
 
 ### 9.2 Expected Performance (Based on Aggregate OOS)
 | Metric | Expected Value | Confidence |
