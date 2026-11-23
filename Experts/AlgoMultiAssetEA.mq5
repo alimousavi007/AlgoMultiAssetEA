@@ -54,7 +54,10 @@ input(name="Flush Log on Each Write")      bool               InpLogFlushEachWri
 input(name="Log Summary Interval (Seconds)") int              InpLogSummarySeconds=60;
 
 input group "02. Trading Symbols"
-// Broker-discovered symbol universe is automatic (asset-agnostic). No user toggle or fixed symbol list required.
+input(name="Symbol Universe (comma-separated)") string  InpSymbolUniverse="EURUSD,GBPUSD,XAUUSD";
+input(name="Symbol Suffix Map (JSON)")             string  InpSymbolSuffixMap="{}";
+// Format: {"EURUSD":["EURUSD.pro","EURUSD.ecn"],"GBPUSD":["GBPUSD.pro"]}
+// When empty "{}", exact broker match is required for each configured symbol.
 
 input group "03. Hybrid Decision"
 input(name="Minimum Reward/Risk Ratio")    double             InpMinRR=1.50;
@@ -277,8 +280,241 @@ bool ResolveFreshnessForSymbol(const string symbol,
      }
    if(!has_ctx || !has_struct || !has_setup || !has_entry)
       return false; // incomplete
-   return true;
-  }
+return true;
+   }
+
+//+------------------------------------------------------------------+
+//| Parse comma-separated symbol universe string                     |
+//| Format: "SYM1,SYM2,SYM3"                                         |
+//| Returns true if valid (no empty, no duplicates after normalization)|
+//+------------------------------------------------------------------+
+bool ParseSymbolUniverse(const string universe_str,
+                         string &symbols_out[])
+{
+    ArrayResize(symbols_out, 0);
+    if(universe_str == "")
+        return false;
+
+    string parts[];
+    int n = StringSplit(universe_str, ',', parts);
+    if(n == 0)
+        return false;
+
+    // Track normalized names for duplicate detection
+    string normalized[];
+    for(int i = 0; i < n; i++)
+    {
+        string s = parts[i];
+        StringTrimLeft(s);
+        StringTrimRight(s);
+        if(s == "")
+            return false; // empty entry -> malformed
+
+        string s_norm = NormalizeSymbolForComparison(s);
+        // Check for duplicates in normalized form
+        for(int j = 0; j < ArraySize(normalized); j++)
+        {
+            if(normalized[j] == s_norm)
+                return false; // duplicate after normalization
+        }
+
+        int sz = ArraySize(symbols_out);
+        ArrayResize(symbols_out, sz + 1);
+        symbols_out[sz] = s; // store original configured form
+        ArrayResize(normalized, sz + 1);
+        normalized[sz] = s_norm;
+    }
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Parse symbol suffix mapping JSON                                 |
+//| Format: {"SYM":["broker1","broker2"],"SYM2":["broker3"]}       |
+//| Returns true if valid JSON structure                             |
+//+------------------------------------------------------------------+
+bool ParseSymbolSuffixMap(const string json_str,
+                          string &configured_symbols[],
+                          string &broker_symbols_out[])
+{
+    ArrayResize(configured_symbols, 0);
+    ArrayResize(broker_symbols_out, 0);
+
+    if(json_str == "" || json_str == "{}")
+        return true; // no mapping - exact match only
+
+    // Simple JSON parser for our specific format
+    // Expected: {"SYM":["b1","b2"],"SYM2":["b3"]}
+    string content = json_str;
+    StringTrimLeft(content);
+    StringTrimRight(content);
+    if(StringLen(content) < 2 || StringGetCharacter(content, 0) != '{' || StringGetCharacter(content, StringLen(content) - 1) != '}')
+        return false;
+
+    // Remove outer braces
+    content = StringSubstr(content, 1, StringLen(content) - 2);
+    StringTrimLeft(content);
+    StringTrimRight(content);
+    if(content == "")
+        return true;
+
+    // Split by '},' to get each symbol entry
+    // This is a simplified parser - handles our specific format
+    int pos = 0;
+    while(pos < StringLen(content))
+    {
+        StringTrimLeft(content);
+        StringTrimRight(content);
+        if(content == "")
+            break;
+
+        // Find the key (before ':')
+        int colon = StringFind(content, ":");
+        if(colon < 0)
+            return false;
+
+        string key = StringSubstr(content, 0, colon);
+        StringTrimLeft(key);
+        StringTrimRight(key);
+        // Remove quotes
+        if(StringLen(key) >= 2 && StringGetCharacter(key, 0) == '"' && StringGetCharacter(key, StringLen(key) - 1) == '"')
+            key = StringSubstr(key, 1, StringLen(key) - 2);
+        else
+            return false;
+
+        // Find the array [...]
+        int array_start = StringFind(content, "[");
+        int array_end = StringFind(content, "]");
+        if(array_start < 0 || array_end < 0 || array_end <= array_start)
+            return false;
+
+        string array_content = StringSubstr(content, array_start + 1, array_end - array_start - 1);
+        // Split by ','
+        string broker_symbols[];
+        int bs_count = 0;
+        if(array_content != "")
+        {
+            bs_count = StringSplit(array_content, ',', broker_symbols);
+            for(int i = 0; i < bs_count; i++)
+            {
+                string bs = broker_symbols[i];
+                StringTrimLeft(bs);
+                StringTrimRight(bs);
+                // Remove quotes
+                if(StringLen(bs) >= 2 && StringGetCharacter(bs, 0) == '"' && StringGetCharacter(bs, StringLen(bs) - 1) == '"')
+                    bs = StringSubstr(bs, 1, StringLen(bs) - 2);
+                else
+                    return false;
+
+                int sz = ArraySize(configured_symbols);
+                ArrayResize(configured_symbols, sz + 1);
+                configured_symbols[sz] = key;
+                ArrayResize(broker_symbols_out, sz + 1);
+                broker_symbols_out[sz] = bs;
+            }
+        }
+
+        // Move past this entry
+        int next_comma = StringFind(content, ",", array_end);
+        if(next_comma < 0)
+            break;
+        content = StringSubstr(content, next_comma + 1);
+    }
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Resolve configured symbol to actual broker symbol                |
+//| Priority: 1) Exact broker match, 2) Explicit suffix map,        |
+//| 3) Fail-closed on ambiguous/unresolved                           |
+//+------------------------------------------------------------------+
+bool ResolveBrokerSymbol(const string configured_symbol,
+                         const string &broker_symbols[],
+                         const string &mapped_configured[],
+                         const string &mapped_broker[],
+                         string &resolved_broker_symbol)
+{
+    // 1. Check if configured symbol exists exactly in broker symbols
+    for(int i = 0; i < ArraySize(broker_symbols); i++)
+    {
+        if(broker_symbols[i] == configured_symbol)
+        {
+            resolved_broker_symbol = configured_symbol;
+            return true;
+        }
+    }
+
+    // 2. Check explicit suffix map
+    string candidates[];
+    for(int i = 0; i < ArraySize(mapped_configured); i++)
+    {
+        if(mapped_configured[i] == configured_symbol)
+        {
+            int sz = ArraySize(candidates);
+            ArrayResize(candidates, sz + 1);
+            candidates[sz] = mapped_broker[i];
+        }
+    }
+
+    if(ArraySize(candidates) == 0)
+    {
+        // No explicit mapping and no exact match
+        resolved_broker_symbol = "";
+        return false;
+    }
+
+    // 3. Verify candidates exist on broker
+    string valid_candidates[];
+    for(int i = 0; i < ArraySize(candidates); i++)
+    {
+        bool custom = false;
+        if(SymbolExist(candidates[i], custom))
+        {
+            // Deduplicate: skip if already in valid_candidates
+            bool already = false;
+            for(int k = 0; k < ArraySize(valid_candidates); k++)
+            {
+                if(valid_candidates[k] == candidates[i])
+                {
+                    already = true;
+                    break;
+                }
+            }
+            if(!already)
+            {
+                int sz = ArraySize(valid_candidates);
+                ArrayResize(valid_candidates, sz + 1);
+                valid_candidates[sz] = candidates[i];
+            }
+        }
+    }
+
+    if(ArraySize(valid_candidates) == 0)
+    {
+        // None of the mapped symbols exist
+        resolved_broker_symbol = "";
+        return false;
+    }
+
+    if(ArraySize(valid_candidates) > 1)
+    {
+        // Ambiguous - multiple mapped symbols exist
+        string diag = "";
+        for(int i = 0; i < ArraySize(valid_candidates); i++)
+        {
+            if(diag != "") diag += ", ";
+            diag += valid_candidates[i];
+        }
+        g_logger.Event(LOG_ERROR, "INIT", "SYMBOL_AMBIGUOUS",
+                       configured_symbol, "", "", "",
+                       "FAIL", "AMBIGUOUS_MAPPING",
+                       "Multiple broker symbols match configured symbol: " + diag);
+        resolved_broker_symbol = "";
+        return false;
+    }
+
+    resolved_broker_symbol = valid_candidates[0];
+    return true;
+}
 
 bool ValidInputSet()
   {
@@ -591,19 +827,14 @@ public:
     datetime           state_entered_time;
     int                retry_count;
 
-    // Signal pipeline caching - avoids redundant data fetching and feature calculation
+// Signal pipeline caching - avoids redundant data fetching
     MarketSnapshot     cached_context_market;
     MarketSnapshot     cached_structure_market;
     MarketSnapshot     cached_setup_market;
     MarketSnapshot     cached_entry_market;
-    FeatureSet         cached_context_features;
-    FeatureSet         cached_structure_features;
-    FeatureSet         cached_setup_features;
-    FeatureSet         cached_entry_features;
     bool               cache_valid;
-    datetime           cache_bar_time;
 
-                        CSymbolRuntime()
+                    CSymbolRuntime()
     {
      symbol="";
      style=STYLE_DAY_TRADING;
@@ -643,7 +874,6 @@ snapshot_generation=0;
 
       // Initialize signal pipeline cache
       cache_valid = false;
-      cache_bar_time = 0;
      }
 
 // CObject interface
@@ -717,6 +947,161 @@ snapshot_generation=0;
         case RUNTIME_ERROR:             return "ERROR";
         default:                        return "UNKNOWN(" + IntegerToString((int)runtime_state) + ")";
        }
+    }
+
+    //+------------------------------------------------------------------+
+    //| Check per-timeframe series synchronization                       |
+    //| Returns true if all four role timeframes are synchronized        |
+    //+------------------------------------------------------------------+
+    bool CheckSeriesSynchronized()
+    {
+     // Check Context timeframe
+     long synchronized = 0;
+     ResetLastError();
+     if(!SeriesInfoInteger(symbol, context_tf, SERIES_SYNCHRONIZED, synchronized) || synchronized == 0)
+       {
+        last_failure = "Context timeframe series not synchronized: " + EnumToString(context_tf);
+        return false;
+       }
+
+     // Check Structure timeframe
+     ResetLastError();
+     if(!SeriesInfoInteger(symbol, structure_tf, SERIES_SYNCHRONIZED, synchronized) || synchronized == 0)
+       {
+        last_failure = "Structure timeframe series not synchronized: " + EnumToString(structure_tf);
+        return false;
+       }
+
+     // Check Setup timeframe
+     ResetLastError();
+     if(!SeriesInfoInteger(symbol, setup_tf, SERIES_SYNCHRONIZED, synchronized) || synchronized == 0)
+       {
+        last_failure = "Setup timeframe series not synchronized: " + EnumToString(setup_tf);
+        return false;
+       }
+
+     // Check Entry timeframe
+     ResetLastError();
+     if(!SeriesInfoInteger(symbol, entry_tf, SERIES_SYNCHRONIZED, synchronized) || synchronized == 0)
+       {
+        last_failure = "Entry timeframe series not synchronized: " + EnumToString(entry_tf);
+        return false;
+       }
+
+     return true;
+    }
+
+    //+------------------------------------------------------------------+
+    //| Check history depth for all four roles using FeatureEngine       |
+    //| Returns true if each timeframe has sufficient bars               |
+    //+------------------------------------------------------------------+
+    bool CheckHistoryDepth()
+    {
+     // Context timeframe
+     int required = feature_context.MinimumBarsRequired();
+     if(Bars(symbol, context_tf) < required)
+       {
+        last_failure = "Insufficient history for Context timeframe: " + EnumToString(context_tf) +
+                       " (have=" + IntegerToString(Bars(symbol, context_tf)) +
+                       " need=" + IntegerToString(required) + ")";
+        return false;
+       }
+
+     // Structure timeframe
+     required = feature_structure.MinimumBarsRequired();
+     if(Bars(symbol, structure_tf) < required)
+       {
+        last_failure = "Insufficient history for Structure timeframe: " + EnumToString(structure_tf) +
+                       " (have=" + IntegerToString(Bars(symbol, structure_tf)) +
+                       " need=" + IntegerToString(required) + ")";
+        return false;
+       }
+
+     // Setup timeframe
+     required = feature_setup.MinimumBarsRequired();
+     if(Bars(symbol, setup_tf) < required)
+       {
+        last_failure = "Insufficient history for Setup timeframe: " + EnumToString(setup_tf) +
+                       " (have=" + IntegerToString(Bars(symbol, setup_tf)) +
+                       " need=" + IntegerToString(required) + ")";
+        return false;
+       }
+
+     // Entry timeframe
+     required = feature_entry.MinimumBarsRequired();
+     if(Bars(symbol, entry_tf) < required)
+       {
+        last_failure = "Insufficient history for Entry timeframe: " + EnumToString(entry_tf) +
+                       " (have=" + IntegerToString(Bars(symbol, entry_tf)) +
+                       " need=" + IntegerToString(required) + ")";
+        return false;
+       }
+
+     return true;
+    }
+
+    //+------------------------------------------------------------------+
+    //| Check quote readiness using resolved broker symbol               |
+    //| Returns true if valid bid/ask tick is available                  |
+    //+------------------------------------------------------------------+
+    bool CheckQuoteReadiness()
+    {
+     MqlTick tick;
+     ResetLastError();
+     if(!SymbolInfoTick(symbol, tick))
+       {
+        last_failure = "SymbolInfoTick failed for " + symbol + " error=" + IntegerToString(GetLastError());
+        return false;
+       }
+
+     if(tick.bid <= 0 || tick.ask <= 0)
+       {
+        last_failure = "Invalid bid/ask for " + symbol + " bid=" + DoubleToString(tick.bid) + " ask=" + DoubleToString(tick.ask);
+        return false;
+       }
+
+     // Check tick freshness using freshness policy
+     datetime now = TimeCurrent();
+     if(now - tick.time > InpFreshnessEntrySeconds)
+       {
+        last_failure = "Stale tick for " + symbol + " age=" + IntegerToString(now - tick.time) + "s";
+        return false;
+       }
+
+     return true;
+    }
+
+    //+------------------------------------------------------------------+
+    //| Combined readiness check for all layers                          |
+    //| Returns true if symbol is fully ready for data fetching          |
+    //+------------------------------------------------------------------+
+    bool CheckReadiness()
+    {
+     if(!CheckSeriesSynchronized())
+       {
+        TransitionTo(RUNTIME_BLOCKED_DATA, REASON_DATA_FETCH_FAILED);
+        ShowRuntimeGateStatus(*this, "BLOCKED: SERIES NOT SYNC");
+        LogRuntimeGate(*this, "READINESS_CHECK", "SERIES_SYNC", "FAIL", last_failure);
+        return false;
+       }
+
+     if(!CheckHistoryDepth())
+       {
+        TransitionTo(RUNTIME_BLOCKED_DATA, REASON_DATA_FETCH_FAILED);
+        ShowRuntimeGateStatus(*this, "BLOCKED: INSUFFICIENT HISTORY");
+        LogRuntimeGate(*this, "READINESS_CHECK", "HISTORY_DEPTH", "FAIL", last_failure);
+        return false;
+       }
+
+     if(!CheckQuoteReadiness())
+       {
+        TransitionTo(RUNTIME_BLOCKED_DATA, REASON_DATA_FETCH_FAILED);
+        ShowRuntimeGateStatus(*this, "BLOCKED: QUOTE NOT READY");
+        LogRuntimeGate(*this, "READINESS_CHECK", "QUOTE", "FAIL", last_failure);
+        return false;
+       }
+
+     return true;
     }
 
 bool              Initialize(const string in_symbol,
@@ -853,6 +1238,15 @@ hybrid_engine.SetNewsParams(
 // Globals
 //==================================================================
 CArrayObj g_runtime;
+// P2.2: Central multi-asset scheduler state (cooperative, single-threaded)
+int    g_sched_cursor = 0;              // round-robin cursor across g_runtime
+int    g_sched_step_budget = 8;         // max runtime steps per invocation
+int    g_sched_time_budget_us = 5000;   // max microseconds per invocation
+int    g_sched_invocations = 0;
+int    g_sched_time_exhausted = 0;
+int    g_sched_step_exhausted = 0;
+int    g_sched_deferred = 0;
+int    g_sched_rotation_count = 0;
 // E2.3-RD: Chart Context Registration events (custom event base)
 #define CHARTREG_DISCOVERY  1001
 #define CHARTREG_REGISTER   1002
@@ -3760,9 +4154,15 @@ void ProcessEntryBarWait(CSymbolRuntime& runtime)
 // WS-2: Process market data fetching
 void ProcessDataFetch(CSymbolRuntime& runtime)
    {
+    // Per-symbol readiness check (series sync, history depth, quote)
+    if(!runtime.CheckReadiness())
+      {
+       // CheckReadiness already logs and transitions state
+       return;
+      }
+
     // Invalidate cache at start of new data fetch cycle
     runtime.cache_valid = false;
-    runtime.cache_bar_time = 0;
 
     MarketSnapshot context_market;
     MarketSnapshot structure_market;
@@ -3821,13 +4221,29 @@ void ProcessDataFetch(CSymbolRuntime& runtime)
       return;
      }
 
-// All snapshots fetched successfully - store for feature calculation
+// All snapshots fetched successfully - validate and store for feature calculation
+    // Validate each cached snapshot against expected symbol, timeframe, validity, and freshness
+    if(context_market.symbol != runtime.symbol || context_market.timeframe != runtime.context_tf || !context_market.valid ||
+       structure_market.symbol != runtime.symbol || structure_market.timeframe != runtime.structure_tf || !structure_market.valid ||
+       setup_market.symbol != runtime.symbol || setup_market.timeframe != runtime.setup_tf || !setup_market.valid ||
+       entry_market.symbol != runtime.symbol || entry_market.timeframe != runtime.entry_tf || !entry_market.valid)
+      {
+       g_logger.Event(LOG_ERROR, "MARKET", "CACHE_VALIDATION_FAILED",
+                      runtime.symbol, "", "", "", "FAIL", "SNAPSHOT_VALIDATION",
+                      "Cached snapshot symbol/timeframe/validity mismatch");
+       ResetLastError();
+       runtime.TransitionTo(RUNTIME_BLOCKED_DATA, REASON_DATA_FETCH_FAILED);
+       ShowRuntimeGateStatus(runtime, "BLOCKED: SNAPSHOT MISMATCH");
+       LogRuntimeGate(runtime, "CACHE_VALIDATION", "SNAPSHOTS", "FAIL", "SYMBOL_TF_MISMATCH");
+       return;
+      }
+
+    // All four roles must be successfully fetched - partial dataset is never valid
     // Cache snapshots in runtime for reuse in feature calculation and evaluation
     runtime.cached_context_market = context_market;
     runtime.cached_structure_market = structure_market;
     runtime.cached_setup_market = setup_market;
     runtime.cached_entry_market = entry_market;
-    runtime.cache_bar_time = context_market.closed_bar_time;
     runtime.cache_valid = true;
 
     runtime.TransitionTo(RUNTIME_CALCULATING, REASON_DATA_FETCH_OK);
@@ -3835,10 +4251,10 @@ void ProcessDataFetch(CSymbolRuntime& runtime)
     LogRuntimeGate(runtime, "DATA_FETCH_OK", "MARKET_DATA", "OK", "ALL_SNAPSHOTS");
    }
 
-// WS-2: Process feature calculation
+// WS-2: Process feature calculation (cache validation only - authoritative calculation at evaluation)
 void ProcessFeatureCalculation(CSymbolRuntime& runtime)
    {
-    // Use cached market snapshots from ProcessDataFetch
+    // Validate cached market snapshots from ProcessDataFetch
     if(!runtime.cache_valid)
       {
        g_logger.Event(LOG_ERROR, "FEATURE", "CACHE_INVALID",
@@ -3851,71 +4267,13 @@ void ProcessFeatureCalculation(CSymbolRuntime& runtime)
        return;
       }
 
-    FeatureSet context_features;
-    FeatureSet structure_features;
-    FeatureSet setup_features;
-    FeatureSet entry_features;
+    // Feature calculation is deferred to ProcessEvaluation where it uses
+    // fresh snapshots for the new signal bar. This state validates cache
+    // readiness and transitions to signal bar wait.
 
-    ResetLastError();
-    if(!runtime.feature_context.Calculate(runtime.cached_context_market, context_features))
-      {
-       g_logger.Event(LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
-                      runtime.symbol, "", "", "", "FAIL", "SIGNAL_FEATURES",
-                      "Context feature calculation failed", GetLastError());
-       ResetLastError();
-       runtime.TransitionTo(RUNTIME_BLOCKED_FEATURES, REASON_FEATURE_CALC_FAILED);
-       ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
-       LogRuntimeGate(runtime, "FEATURE_CALC", "CONTEXT_FEATURES", "FAIL", "CALC_FAILED");
-       return;
-      }
-
-    ResetLastError();
-    if(!runtime.feature_structure.Calculate(runtime.cached_structure_market, structure_features))
-      {
-       g_logger.Event(LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
-                      runtime.symbol, "", "", "", "FAIL", "STRUCTURE_FEATURES",
-                      "Structure feature calculation failed", GetLastError());
-       ResetLastError();
-       runtime.TransitionTo(RUNTIME_BLOCKED_FEATURES, REASON_FEATURE_CALC_FAILED);
-       ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
-       LogRuntimeGate(runtime, "FEATURE_CALC", "STRUCTURE_FEATURES", "FAIL", "CALC_FAILED");
-       return;
-      }
-
-    if(!runtime.feature_setup.Calculate(runtime.cached_setup_market, setup_features))
-      {
-       g_logger.Event(LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
-                      runtime.symbol, "", "", "", "FAIL", "SETUP_FEATURES",
-                      "Setup feature calculation failed", GetLastError());
-       ResetLastError();
-       runtime.TransitionTo(RUNTIME_BLOCKED_FEATURES, REASON_FEATURE_CALC_FAILED);
-       ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
-       LogRuntimeGate(runtime, "FEATURE_CALC", "SETUP_FEATURES", "FAIL", "CALC_FAILED");
-       return;
-      }
-
-    if(!runtime.feature_entry.Calculate(runtime.cached_entry_market, entry_features))
-      {
-       g_logger.Event(LOG_ERROR, "FEATURE", "FEATURE_CALC_FAILED",
-                      runtime.symbol, "", "", "", "FAIL", "ENTRY_FEATURES",
-                      "Entry feature calculation failed", GetLastError());
-       ResetLastError();
-       runtime.TransitionTo(RUNTIME_BLOCKED_FEATURES, REASON_FEATURE_CALC_FAILED);
-       ShowRuntimeGateStatus(runtime, "BLOCKED: FEATURES");
-       LogRuntimeGate(runtime, "FEATURE_CALC", "ENTRY_FEATURES", "FAIL", "CALC_FAILED");
-       return;
-      }
-
-    // Cache calculated features for evaluation phase
-    runtime.cached_context_features = context_features;
-    runtime.cached_structure_features = structure_features;
-    runtime.cached_setup_features = setup_features;
-    runtime.cached_entry_features = entry_features;
-
-    // All features calculated - check signal bar
     runtime.TransitionTo(RUNTIME_WAIT_SIGNAL_BAR, REASON_FEATURE_CALC_OK);
-    ShowRuntimeGateStatus(runtime, "WAITING: SIGNAL BAR");
-    LogRuntimeGate(runtime, "FEATURE_CALC_OK", "FEATURES", "OK", "ALL_FEATURES");
+    ShowRuntimeGateStatus(runtime, "WAITING FOR SIGNAL BAR");
+    LogRuntimeGate(runtime, "FEATURE_CALC_OK", "CACHE_VALIDATED", "OK", "READY_FOR_SIGNAL");
    }
 
 // WS-2: Process signal bar wait
@@ -5215,6 +5573,65 @@ bool RefreshTradingState()
 //+------------------------------------------------------------------+
 //|                                                                  |
 //+------------------------------------------------------------------+
+// P2.2: Central cooperative multi-asset scheduler.
+// Both OnTick and OnTimer funnel through this entry point.
+// Critical global services are handled by callers BEFORE invoking this.
+void RunMultiAssetScheduler(string trigger_reason)
+  {
+   g_sched_invocations++;
+   int start_us = (int)GetMicrosecondCount();
+   int steps = 0;
+   int total = g_runtime.Total();
+   if(total <= 0)
+      return;
+
+   // Ensure cursor is in range (handles registry changes)
+   if(g_sched_cursor < 0 || g_sched_cursor >= total)
+      g_sched_cursor = 0;
+
+   int processed_this_pass = 0;
+   int idx = g_sched_cursor;
+   while(steps < g_sched_step_budget && processed_this_pass < total)
+     {
+      // Time budget check between atomic steps
+      int elapsed = (int)GetMicrosecondCount() - start_us;
+      if(elapsed > g_sched_time_budget_us)
+        {
+         g_sched_time_exhausted++;
+         g_sched_deferred++;
+         break;
+        }
+
+      if(idx >= total)
+         idx = 0;
+
+      CSymbolRuntime *runtime = g_runtime.At(idx);
+      if(runtime && runtime.valid)
+        {
+         // One atomic runtime step per pass (no duplicate within same pass)
+         ProcessRuntime(runtime);
+         steps++;
+         processed_this_pass++;
+        }
+
+      idx++;
+      if(idx >= total)
+        {
+         idx = 0;
+         g_sched_rotation_count++;
+        }
+     }
+
+   // Step budget exhausted
+   if(steps >= g_sched_step_budget && processed_this_pass < total)
+      g_sched_step_exhausted++;
+
+   // Retain cursor for fair continuation on next invocation
+   g_sched_cursor = idx;
+   if(g_sched_cursor >= total)
+      g_sched_cursor = 0;
+  }
+
 void OnTick()
   {
    if(!g_system_ready)
@@ -5246,12 +5663,8 @@ if(g_coordinator_mode == COORD_MODE_COORDINATOR)
         // Periodically retry initialization of pending symbols (e.g., waiting for SymbolIsSynchronized)
         TryInitializePendingRuntimesBounded("OnTick");
 
-        for(int i=0;i<g_runtime.Total();i++)
-          {
-           CSymbolRuntime *runtime = g_runtime.At(i);
-           if(runtime && runtime.valid)
-              ProcessRuntime(runtime);
-          }
+        // P2.2: central scheduler replaces direct host-symbol loop
+        RunMultiAssetScheduler("OnTick");
       }
   }
 
@@ -5511,12 +5924,8 @@ g_metrics_exporter.SetEngineMetrics(
 
 if(g_coordinator_mode == COORD_MODE_COORDINATOR)
       {
-       for(int i=0;i<g_runtime.Total();i++)
-         {
-          CSymbolRuntime *runtime = g_runtime.At(i);
-          if(runtime && runtime.valid)
-             ProcessRuntime(runtime);
-         }
+       // P2.2: central scheduler replaces direct host-symbol loop
+       RunMultiAssetScheduler("OnTimer");
       }
   }
 
@@ -6926,47 +7335,108 @@ bool IsSymbolTradableCandidate(const string symbol)
   }
 
 //+------------------------------------------------------------------+
-//| Discover broker-provided symbols (server-wide, asset-agnostic)   |
+//| Discover and resolve configured symbol universe                  |
+//| Uses explicit InpSymbolUniverse and optional InpSymbolSuffixMap  |
 //+------------------------------------------------------------------+
 int DiscoverTradableSymbols(string &symbols_out[])
-  {
-   ArrayResize(symbols_out,0);
-   string chart_sym = ChartSymbol(0);
-   int total=SymbolsTotal(false);
-   for(int i=0;i<total;i++)
-     {
-      string sn=SymbolName(i,false);
-      if(sn=="") continue;
-      if(!IsSymbolTradableCandidate(sn)) continue;
-      bool exists=false;
-      string sn_norm = NormalizeSymbolForComparison(sn);
-      for(int j=0;j<ArraySize(symbols_out);j++)
-         if(NormalizeSymbolForComparison(symbols_out[j])==sn_norm) { exists=true; break; }
-      if(exists) continue;
-      int sz2=ArraySize(symbols_out);
-      ArrayResize(symbols_out,sz2+1);
-      symbols_out[sz2]=sn;
-     }
-   if(chart_sym!="")
-     {
-      bool exists=false;
-      string chart_norm = NormalizeSymbolForComparison(chart_sym);
-      for(int j=0;j<ArraySize(symbols_out);j++)
-         if(NormalizeSymbolForComparison(symbols_out[j])==chart_norm) { exists=true; break; }
-      if(!exists)
+{
+    ArrayResize(symbols_out, 0);
+
+    // 1. Parse configured symbol universe
+    string configured_symbols[];
+    if(!ParseSymbolUniverse(InpSymbolUniverse, configured_symbols))
+    {
+        g_logger.Event(LOG_ERROR, "INIT", "SYMBOL_UNIVERSE_INVALID",
+                       "", "", "", "",
+                       "FAIL", "CONFIG",
+                       "InpSymbolUniverse is empty or malformed (empty entries or duplicates after normalization)");
+        return 0;
+    }
+
+    // 2. Parse suffix map
+    string mapped_configured[];
+    string mapped_broker[];
+    if(!ParseSymbolSuffixMap(InpSymbolSuffixMap, mapped_configured, mapped_broker))
+    {
+        g_logger.Event(LOG_ERROR, "INIT", "SYMBOL_SUFFIX_MAP_INVALID",
+                       "", "", "", "",
+                       "FAIL", "CONFIG",
+                       "InpSymbolSuffixMap is malformed JSON");
+        return 0;
+    }
+
+    // 3. Get all broker symbols for exact match checking
+    string all_broker_symbols[];
+    int total = SymbolsTotal(false);
+    for(int i = 0; i < total; i++)
+    {
+        string sn = SymbolName(i, false);
+        if(sn != "")
         {
-         int sz2=ArraySize(symbols_out);
-         ArrayResize(symbols_out,sz2+1);
-         symbols_out[sz2]=chart_sym;
+            ArrayResize(all_broker_symbols, ArraySize(all_broker_symbols) + 1);
+            all_broker_symbols[ArraySize(all_broker_symbols) - 1] = sn;
         }
-     }
-   if(ArraySize(symbols_out)==0 && chart_sym!="")
-     {
-      ArrayResize(symbols_out,1);
-      symbols_out[0]=chart_sym;
-     }
-   return ArraySize(symbols_out);
-  }
+    }
+
+    // 4. Resolve each configured symbol to a broker symbol
+    int resolved_count = 0;
+    for(int i = 0; i < ArraySize(configured_symbols); i++)
+    {
+        string resolved_broker;
+        if(!ResolveBrokerSymbol(configured_symbols[i], all_broker_symbols, mapped_configured, mapped_broker, resolved_broker))
+        {
+            // ResolveBrokerSymbol logs the specific failure
+            g_logger.Event(LOG_ERROR, "INIT", "SYMBOL_UNRESOLVED",
+                           configured_symbols[i], "", "", "",
+                           "SKIP", "UNRESOLVED",
+                           "Configured symbol cannot be resolved to a broker symbol; other symbols continue");
+            continue;
+        }
+
+        // Check for duplicate resolved broker symbols
+        bool duplicate = false;
+        for(int j = 0; j < resolved_count; j++)
+        {
+            if(symbols_out[j] == resolved_broker)
+            {
+                duplicate = true;
+                break;
+            }
+        }
+
+        if(duplicate)
+        {
+            g_logger.Event(LOG_ERROR, "INIT", "SYMBOL_DUPLICATE_RESOLVED",
+                           configured_symbols[i], "", "", "",
+                           "SKIP", "DUPLICATE",
+                           "Multiple configured symbols resolve to the same broker symbol: " + resolved_broker);
+            continue;
+        }
+
+        int sz = ArraySize(symbols_out);
+        ArrayResize(symbols_out, sz + 1);
+        symbols_out[sz] = resolved_broker;
+        resolved_count++;
+
+        g_logger.Event(LOG_INFO, "INIT", "SYMBOL_RESOLVED",
+                       configured_symbols[i], "", "", "",
+                       "OK", "RESOLVED",
+                       "Configured symbol resolved to broker symbol: " + resolved_broker);
+    }
+
+    // 5. NO automatic chart symbol inclusion - chart symbol is for display only
+    // 6. NO fallback to chart symbol when empty - empty universe is explicit failure
+
+    if(resolved_count == 0)
+    {
+        g_logger.Event(LOG_ERROR, "INIT", "SYMBOL_UNIVERSE_EMPTY",
+                       "", "", "", "",
+                       "FAIL", "EMPTY_UNIVERSE",
+                       "No configured symbols could be resolved; strategy will not run");
+    }
+
+    return resolved_count;
+}
 
 int OnTesterInit()
   {

@@ -1165,7 +1165,7 @@ Run-TestSuite 'EA source regression guards' {
         $ea = Get-Content -LiteralPath $eaPath -Raw
         Assert-Match $ea 'int\s+DiscoverTradableSymbols\s*\('
         Assert-Match $ea 'SymbolsTotal\(false\)'
-        Assert-Match $ea 'SymbolName\(i,false\)'
+        Assert-Match $ea 'SymbolName\(i,\s*false\)'
         Assert-True (-not ($ea -match 'bool\s+IsForexSymbol\s*\('))
     }
 
@@ -1340,6 +1340,281 @@ Run-TestSuite 'EA source regression guards' {
         # After P1.1: ProcessEvaluation(4) = 4
         $pfc = [regex]::Match($ea, '(?s)void ProcessFeatureCalculation\(CSymbolRuntime& runtime\).*?^   \}').Value
         Assert-True (-not ($pfc -match 'Calculate\('))
+    }
+
+    # ----------------------------------------------------------------------------
+    # P2.1: Symbol Universe & Host Chart Independence regression tests
+    # ----------------------------------------------------------------------------
+    Run-Test 'P2.1: InpSymbolUniverse input parameter declared' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'input\(name="Symbol Universe \(comma-separated\)"\)\s*string\s+InpSymbolUniverse'
+        Assert-Match $ea 'comma-separated'
+    }
+
+    Run-Test 'P2.1: InpSymbolSuffixMap input parameter declared' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'input\(name="Symbol Suffix Map \(JSON\)"\)\s*string\s+InpSymbolSuffixMap'
+        Assert-Match $ea 'Format: \{"EURUSD"'
+    }
+
+    Run-Test 'P2.1: ParseSymbolUniverse function implemented' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'bool ParseSymbolUniverse\s*\(const string universe_str'
+        Assert-Match $ea 'string &symbols_out\[\]\s*\)'
+    }
+
+    Run-Test 'P2.1: ParseSymbolSuffixMap function implemented' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'bool ParseSymbolSuffixMap\s*\(const string json_str'
+        Assert-Match $ea 'string &configured_symbols\[\]'
+        Assert-Match $ea 'string &broker_symbols_out\[\]\s*\)'
+    }
+
+    Run-Test 'P2.1: ResolveBrokerSymbol function implemented' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'bool ResolveBrokerSymbol\s*\(const string configured_symbol'
+        Assert-Match $ea 'const string &broker_symbols\[\]'
+        Assert-Match $ea 'const string &mapped_configured\[\]'
+        Assert-Match $ea 'const string &mapped_broker\[\]'
+        Assert-Match $ea 'string &resolved_broker_symbol\s*\)'
+    }
+
+    Run-Test 'P2.1: DiscoverTradableSymbols uses explicit configured universe' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'ParseSymbolUniverse\(InpSymbolUniverse, configured_symbols\)'
+        Assert-Match $ea 'ParseSymbolSuffixMap\(InpSymbolSuffixMap'
+        Assert-Match $ea 'ResolveBrokerSymbol\(configured_symbols\[i\]'
+        # NO automatic chart symbol inclusion
+        Assert-True (-not ($ea -match 'SymbolsTotal\(true\).*SymbolName\(0,true\)'))
+        Assert-True (-not ($ea -match 'SymbolName\(0,true\).*SymbolsTotal'))
+        # NO fallback to chart symbol when empty
+        Assert-True (-not ($ea -match 'if\(resolved_count == 0\).*SymbolName\(0,true\)'))
+    }
+
+    Run-Test 'P2.1: Exact broker match priority over suffix map' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        # Exact match checked first (simple string equality)
+        Assert-Match $ea 'if\(broker_symbols\[i\] == configured_symbol\)'
+        # Then suffix map
+        Assert-Match $ea 'for\(int i = 0; i < ArraySize\(mapped_configured\); i\+\+\)'
+    }
+
+    Run-Test 'P2.1: Ambiguous suffix map mapping rejected' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        # Multiple matches for same configured symbol -> ambiguous
+        Assert-Match $ea 'SYMBOL_AMBIGUOUS'
+        Assert-Match $ea 'AMBIGUOUS_MAPPING'
+    }
+
+    Run-Test 'P2.1: Duplicate resolved broker symbols prevented' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'SYMBOL_DUPLICATE_RESOLVED'
+        Assert-Match $ea 'Multiple configured symbols resolve to the same broker symbol'
+    }
+
+    Run-Test 'P2.1: Per-symbol readiness isolation - no cross-symbol state' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        # Each symbol has its own CSymbolRuntime instance
+        Assert-Match $ea 'CSymbolRuntime \*runtime = g_runtime.At\(i\)'
+        # No shared cache fields across symbols (already verified by P1.1 tests)
+        Assert-True (-not ($ea -match 'cached_context_features'))
+        Assert-True (-not ($ea -match 'cached_structure_features'))
+        Assert-True (-not ($ea -match 'cached_setup_features'))
+        Assert-True (-not ($ea -match 'cached_entry_features'))
+    }
+
+    Run-Test 'P2.1: Empty universe fails closed' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'SYMBOL_UNIVERSE_EMPTY'
+        Assert-Match $ea 'No configured symbols could be resolved'
+        Assert-Match $ea 'strategy will not run'
+    }
+
+    Run-Test 'P2.1: Malformed universe input rejected' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'SYMBOL_UNIVERSE_INVALID'
+        Assert-Match $ea 'empty or malformed \(empty entries or duplicates after normalization\)'
+    }
+
+    Run-Test 'P2.1: Malformed suffix map JSON rejected' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'SYMBOL_SUFFIX_MAP_INVALID'
+        Assert-Match $ea 'malformed JSON'
+    }
+
+    Run-Test 'P2.1: Unresolved symbols logged and skipped' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'SYMBOL_UNRESOLVED'
+        Assert-Match $ea 'Configured symbol cannot be resolved to a broker symbol'
+    }
+
+    Run-Test 'P2.1: Suffix map explicit override for configured symbols' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'mapped_configured\[i\]'
+        Assert-Match $ea 'mapped_broker\[i\]'
+        # Normalized comparison used
+        Assert-Match $ea 'NormalizeSymbolForComparison'
+    }
+
+    Run-Test 'P2.1: Chart host symbol never auto-included in universe' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        # Verify no automatic inclusion of _Symbol or chart symbol in DiscoverTradableSymbols
+        # Look specifically in DiscoverTradableSymbols function (brace-counting extraction)
+        $fnStart = $ea.IndexOf('int DiscoverTradableSymbols')
+        $dts = $ea
+        if($fnStart -ge 0) {
+            $braceStart = $ea.IndexOf('{', $fnStart)
+            if($braceStart -ge 0) {
+                $braceCount = 1
+                $fnEnd = $braceStart + 1
+                while($fnEnd -lt $ea.Length -and $braceCount -gt 0) {
+                    if($ea[$fnEnd] -eq '{') { $braceCount++ }
+                    elseif($ea[$fnEnd] -eq '}') { $braceCount-- }
+                    $fnEnd++
+                }
+                $dts = $ea.Substring($fnStart, $fnEnd - $fnStart)
+            }
+        }
+        Assert-True (-not ($dts -match '\b_Symbol\b'))
+        Assert-True (-not ($dts -match '\bChartID\b'))
+        Assert-True (-not ($dts -match 'SymbolName\(0,true\)'))
+    }
+
+    Run-Test 'P2.1: SERIES_SYNCHRONIZED checked per timeframe role' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        # CheckReadiness should call SeriesInfoInteger with SERIES_SYNCHRONIZED for all 4 roles
+        Assert-Match $ea 'SERIES_SYNCHRONIZED'
+        Assert-Match $ea 'SeriesInfoInteger\(symbol, context_tf, SERIES_SYNCHRONIZED'
+        Assert-Match $ea 'SeriesInfoInteger\(symbol, structure_tf, SERIES_SYNCHRONIZED'
+        Assert-Match $ea 'SeriesInfoInteger\(symbol, setup_tf, SERIES_SYNCHRONIZED'
+        Assert-Match $ea 'SeriesInfoInteger\(symbol, entry_tf, SERIES_SYNCHRONIZED'
+        # Should check the returned value
+        Assert-Match $ea 'synchronized == 0'
+    }
+
+    Run-Test 'P2.1: History depth from FeatureEngine MinimumBarsRequired' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        # CheckHistoryDepth should use feature_*.MinimumBarsRequired() for each role
+        Assert-Match $ea 'MinimumBarsRequired\(\)'
+        Assert-Match $ea 'feature_context\.MinimumBarsRequired\(\)'
+        Assert-Match $ea 'feature_structure\.MinimumBarsRequired\(\)'
+        Assert-Match $ea 'feature_setup\.MinimumBarsRequired\(\)'
+        Assert-Match $ea 'feature_entry\.MinimumBarsRequired\(\)'
+        # Should compare with Bars()
+        Assert-Match $ea 'Bars\(symbol, context_tf\) < required'
+        Assert-Match $ea 'Bars\(symbol, structure_tf\) < required'
+        Assert-Match $ea 'Bars\(symbol, setup_tf\) < required'
+        Assert-Match $ea 'Bars\(symbol, entry_tf\) < required'
+    }
+
+    Run-Test 'P2.1: Quote readiness uses resolved broker symbol' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        # CheckQuoteReadiness should use SymbolInfoTick on runtime.symbol (resolved broker symbol)
+        Assert-Match $ea 'SymbolInfoTick\(symbol, tick\)'
+        Assert-Match $ea 'tick\.bid <= 0 \|\| tick\.ask <= 0'
+        # Should check freshness against InpFreshnessEntrySeconds
+        Assert-Match $ea 'InpFreshnessEntrySeconds'
+    }
+
+    Run-Test 'P2.1: Runtime identity not overwritten by chart identity' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        # Use word boundary to avoid matching chart_symbol
+        $match1 = $ea -match 'runtime\.symbol\s*=\s*_Symbol'
+        $match2 = $ea -match '\bsymbol\s*=\s*_Symbol\b'
+        $match3 = $ea -match 'runtime\.symbol\s*=\s*ChartSymbol'
+        $match4 = $ea -match '\bsymbol\s*=\s*ChartSymbol\b'
+        # runtime.symbol should only be set from resolved broker symbol in Initialize
+        # Verify symbol=in_symbol assignment exists in Initialize
+        Assert-Match $ea 'symbol=in_symbol;'
+        # Should NOT set from _Symbol or ChartSymbol anywhere in Initialize context
+        Assert-True (-not $match1)
+        Assert-True (-not $match2)
+        Assert-True (-not $match3)
+        Assert-True (-not $match4)
+    }
+
+    Run-Test 'P2.1: Snapshot cache isolation between runtimes and roles' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        # Each CSymbolRuntime has its own cached_*_market snapshots
+        Assert-Match $ea 'cached_context_market'
+        Assert-Match $ea 'cached_structure_market'
+        Assert-Match $ea 'cached_setup_market'
+        Assert-Match $ea 'cached_entry_market'
+        # No shared static/global cache fields for feature/market snapshots
+        Assert-True (-not ($ea -match 'static.*cached_(context|structure|setup|entry)_(market|features)'))
+        # Feature caches were removed in P1.1 - verify they're not present
+        Assert-True (-not ($ea -match 'cached_context_features'))
+        Assert-True (-not ($ea -match 'cached_structure_features'))
+        Assert-True (-not ($ea -match 'cached_setup_features'))
+        Assert-True (-not ($ea -match 'cached_entry_features'))
+    }
+
+    Run-Test 'P2.1: Partial initialization failure releases resources' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        # TryInitializePendingRuntimesBounded calls InitializePendingRuntimes which should delete new_runtime on each failure path
+        Assert-Match $ea 'TryInitializePendingRuntimesBounded'
+        Assert-Match $ea 'InitializePendingRuntimes'
+        Assert-Match $ea 'new CSymbolRuntime\(\)'
+        Assert-Match $ea 'if\(new_runtime == NULL\)'
+        Assert-Match $ea 'ResolveFreshnessForSymbol'
+        # Count delete new_runtime calls in InitializePendingRuntimes function
+        $fnStart = $ea.IndexOf('int InitializePendingRuntimes')
+        $fnEnd = -1
+        if($fnStart -ge 0) {
+            $braceStart = $ea.IndexOf('{', $fnStart)
+            if($braceStart -ge 0) {
+                $braceCount = 1
+                $fnEnd = $braceStart + 1
+                while($fnEnd -lt $ea.Length -and $braceCount -gt 0) {
+                    if($ea[$fnEnd] -eq '{') { $braceCount++ }
+                    elseif($ea[$fnEnd] -eq '}') { $braceCount-- }
+                    $fnEnd++
+                }
+            }
+        }
+        if($fnStart -ge 0 -and $fnEnd -gt $fnStart) {
+            $fnBody = $ea.Substring($fnStart, $fnEnd - $fnStart)
+            $deleteCount = ([regex]::Matches($fnBody, 'delete new_runtime;')).Count
+            Assert-True ($deleteCount -ge 2)
+        } else {
+            # Fallback: count in whole file
+            $deleteCount = ([regex]::Matches($ea, 'delete new_runtime;')).Count
+            Assert-True ($deleteCount -ge 2)
+        }
+    }
+
+    Run-Test 'P2.1: OnDeinit releases each runtime exactly once' {
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        # Extract OnDeinit function body - find opening brace after void OnDeinit
+        $fnStart = $ea.IndexOf('void OnDeinit')
+        if($fnStart -ge 0) {
+            # Find the opening brace
+            $braceStart = $ea.IndexOf('{', $fnStart)
+            if($braceStart -ge 0) {
+                # Count braces to find matching closing brace
+                $braceCount = 1
+                $fnEnd = $braceStart + 1
+                while($fnEnd -lt $ea.Length -and $braceCount -gt 0) {
+                    if($ea[$fnEnd] -eq '{') { $braceCount++ }
+                    elseif($ea[$fnEnd] -eq '}') { $braceCount-- }
+                    $fnEnd++
+                }
+            }
+        }
+        $onDeinitBody = ""
+        if($fnStart -ge 0 -and $fnEnd -gt $fnStart) {
+            $onDeinitBody = $ea.Substring($fnStart, $fnEnd - $fnStart)
+        } else {
+            $onDeinitBody = $ea
+        }
+        # Should iterate backwards and delete each runtime
+        Assert-Match $onDeinitBody 'for\(int i = g_runtime\.Total\(\) - 1; i >= 0; i--\)'
+        Assert-Match $onDeinitBody 'CSymbolRuntime \*runtime = g_runtime\.At\(i\);'
+        Assert-Match $onDeinitBody 'if\(runtime != NULL\)'
+        Assert-Match $onDeinitBody 'delete runtime;'
+        Assert-Match $onDeinitBody 'g_runtime\.Clear\(\);'
+        # Should NOT have SymbolSelect(false) cleanup in OnDeinit
+        Assert-True (-not ($onDeinitBody -match 'SymbolSelect\(.*false'))
     }
 
     $newsPath = Join-Path $script:ProjectRoot 'Include\AlgoSystem\NewsRiskService.mqh'
