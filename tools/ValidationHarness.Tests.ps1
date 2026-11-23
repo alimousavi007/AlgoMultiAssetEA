@@ -1658,6 +1658,42 @@ Run-TestSuite 'Compile-MT5 gate guards' {
     }
 }
 # ----------------------------------------------------------------------------
+Run-TestSuite 'P2.2 S01-S15 Scheduler Invariants' {
+    Run-Test 'P2.2-S01: OnTick invokes central scheduler only' {
+        $eaPath = Join-Path $script:ProjectRoot 'Experts\AlgoMultiAssetEA.mq5'
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'RunMultiAssetScheduler\("OnTick"\)'
+    }
+
+    Run-Test 'P2.2-S02: OnTimer uses same central scheduler' {
+        $eaPath = Join-Path $script:ProjectRoot 'Experts\AlgoMultiAssetEA.mq5'
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'RunMultiAssetScheduler\("OnTimer"\)'
+    }
+
+    Run-Test 'P2.2-S07: Unsigned monotonic timing' {
+        $eaPath = Join-Path $script:ProjectRoot 'Experts\AlgoMultiAssetEA.mq5'
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'ulong start_us = GetMicrosecondCount\(\)'
+        Assert-Match $ea 'ulong elapsed = now_us - start_us'
+    }
+
+    Run-Test 'P2.2-S05: No duplicate runtime processing per pass' {
+        $eaPath = Join-Path $script:ProjectRoot 'Experts\AlgoMultiAssetEA.mq5'
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'int scanned = 0'
+        Assert-Match $ea 'scanned\+\+'
+    }
+
+    Run-Test 'P2.2-S15: Scheduler preserves WS-2 boundaries' {
+        $eaPath = Join-Path $script:ProjectRoot 'Experts\AlgoMultiAssetEA.mq5'
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        $schedStart = $ea.IndexOf('void RunMultiAssetScheduler')
+        $schedEnd = $ea.IndexOf('void OnTick()')
+        $schedBody = $ea.Substring($schedStart, $schedEnd - $schedStart)
+        Assert-True (-not ($schedBody -match 'OrderSend'))
+    }
+}
 # Summary
 # ----------------------------------------------------------------------------
 
