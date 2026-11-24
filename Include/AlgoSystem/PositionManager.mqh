@@ -139,6 +139,55 @@ bool IsManagedMagic(const long magic) const
      }
 
    //+----------------------------------------------------------------+
+   //| Pure tick-usability decision (testable without broker/position)|
+   //| Public so the standalone test can exercise it; no side effects.  |
+   //| Requires a provable quote timestamp (time_msc preferred, else  |
+   //| time) and a usable price on the side we act on. An unprovenable |
+   //| timestamp is treated as stale/unverified (fail safe: no SL      |
+   //| mutation), matching the entry-path convention in HybridEngine.  |
+   //| Note: an old-but-provable timestamp still passes; no approved  |
+   //| tick-age threshold exists, so age is intentionally not gated.  |
+   //+----------------------------------------------------------------+
+public:
+   static bool TickUsable(
+      const long time_msc,
+      const long time,
+      const double bid,
+      const double ask,
+      const ENUM_POSITION_TYPE type)
+     {
+      datetime src=0;
+      if(time_msc>0)
+         src=(datetime)(time_msc/1000);
+      else if(time>0)
+         src=(datetime)time;
+
+      if(src<=0)
+         return false;
+
+      if(type==POSITION_TYPE_BUY)
+         return bid>0.0;
+
+      return ask>0.0;
+     }
+
+   //+----------------------------------------------------------------+
+   //| Fetch a tick and validate provenance/price side for management|
+   //+----------------------------------------------------------------+
+   bool GetManagedTick(
+      const string symbol,
+      const ENUM_POSITION_TYPE type,
+      MqlTick &tick) const
+     {
+      if(!SymbolInfoTick(symbol,tick))
+         return false;
+
+      return TickUsable(tick.time_msc,tick.time,tick.bid,tick.ask,type);
+     }
+
+private:
+
+   //+----------------------------------------------------------------+
    //| Calculate current R                                            |
    //+----------------------------------------------------------------+
    double CurrentR(
@@ -295,7 +344,7 @@ bool IsManagedMagic(const long magic) const
 
       MqlTick tick;
 
-      if(!SymbolInfoTick(symbol,tick))
+      if(!GetManagedTick(symbol,type,tick))
          return false;
 
       double current_price;
@@ -304,6 +353,9 @@ bool IsManagedMagic(const long magic) const
          current_price=tick.bid;
       else
          current_price=tick.ask;
+
+      if(current_price<=0.0)
+         return false;
 
       double r=
          CurrentR(
@@ -394,7 +446,7 @@ bool IsManagedMagic(const long magic) const
 
       MqlTick tick;
 
-      if(!SymbolInfoTick(symbol,tick))
+      if(!GetManagedTick(symbol,type,tick))
          return false;
 
       double current_price;

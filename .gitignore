@@ -52,6 +52,10 @@
 !tools/test-fixtures/
 !tools/test-fixtures/**
 
+# Standalone MQL5 unit/logic tests (run manually in MetaEditor/tester)
+!Tests/
+!Tests/**
+
 # Ignore all .log files
 *.log
 **/*.log
