@@ -4,6 +4,7 @@
 #include "Interfaces.mqh"
 #include "HybridTypes.mqh"
 #include "Logger.mqh"
+#include "Indicators.mqh"
 
 class CMetricsExporter
 {
@@ -17,9 +18,9 @@ private:
    int                 m_write_interval_seconds;
    
 // F19: File rotation parameters
-    long                m_max_file_size_bytes;
-    
-    // Metrics counters
+   long                m_max_file_size_bytes;
+   
+   // Metrics counters
    ulong               m_total_ticks_processed;
    ulong               m_total_signals_generated;
    ulong               m_total_signals_approved;
@@ -59,165 +60,213 @@ private:
    // News metrics
    int                 m_news_events_pending;
    int                 m_news_blackout_active;
-   
+
+   // Indicator performance metrics (from CFeatureEngine/CIndicatorHandleCache)
+   ulong               m_indicator_handles_created;
+   ulong               m_indicator_handles_released;
+   ulong               m_indicator_handles_reused;
+   ulong               m_indicator_copybuffer_calls;
+   ulong               m_indicator_copybuffer_failures;
+   ulong               m_indicator_copyrates_calls;
+   ulong               m_indicator_copyrates_failures;
+   int                 m_indicator_active_handles;
+
 bool InitializeFile()
+{
+   if(m_file_handle != INVALID_HANDLE)
+      return true;
+   
+   // F19: Check file size before opening (warn only, no rotation needed as file is rewritten)
+   if(FileIsExist(m_metrics_file))
    {
-      if(m_file_handle != INVALID_HANDLE)
-         return true;
-      
-      // F19: Check file size before opening (warn only, no rotation needed as file is rewritten)
-      if(FileIsExist(m_metrics_file))
+      ResetLastError();
+      int temp_handle = FileOpen(m_metrics_file, FILE_READ|FILE_TXT|FILE_ANSI, '\t');
+      if(temp_handle != INVALID_HANDLE)
       {
-         ResetLastError();
-         int temp_handle = FileOpen(m_metrics_file, FILE_READ|FILE_TXT|FILE_ANSI, '\t');
-         if(temp_handle != INVALID_HANDLE)
+         ulong file_size = FileSize(temp_handle);
+         FileClose(temp_handle);
+         
+         if(file_size >= (ulong)m_max_file_size_bytes)
          {
-            ulong file_size = FileSize(temp_handle);
-            FileClose(temp_handle);
-            
-            if(file_size >= (ulong)m_max_file_size_bytes)
-            {
-               if(m_logger)
-                  m_logger.Warning("Metrics file size (" + IntegerToString((long)file_size) + " bytes) exceeds limit (" + 
-                               IntegerToString(m_max_file_size_bytes) + " bytes). File will be truncated on write.");
-            }
+            if(m_logger)
+               m_logger.Warning("Metrics file size (" + IntegerToString((long)file_size) + " bytes) exceeds limit (" + 
+                            IntegerToString(m_max_file_size_bytes) + " bytes). File will be truncated on write.");
          }
       }
-      
-      FolderCreate(m_metrics_dir);
-      
-      ResetLastError();
-      m_file_handle = FileOpen(
-         m_metrics_file,
-         FILE_WRITE|FILE_TXT|FILE_ANSI,
-         '\t');
-      
-      if(m_file_handle == INVALID_HANDLE)
-      {
-         int err = GetLastError();
-         if(m_logger)
-            m_logger.Error("Metrics file open failed: " + m_metrics_file + " LastError=" + IntegerToString(err));
-         ResetLastError();
-         return false;
-      }
-      
-      // Write Prometheus format header
-      WriteHeader();
-return true;
-    }
-    
- void WriteHeader()
-    {
-       if(m_file_handle == INVALID_HANDLE)
-          return;
-       
-       // Truncate by seeking to start - MQL5 doesn't have FileTruncate
-       FileSeek(m_file_handle, 0, SEEK_SET);
-       
-       FileWriteString(m_file_handle, "# HELP algo_ticks_processed_total Total number of ticks processed\n");
-      FileWriteString(m_file_handle, "# TYPE algo_ticks_processed_total counter\n");
-      FileWriteString(m_file_handle, "# HELP algo_signals_generated_total Total number of signals generated\n");
-      FileWriteString(m_file_handle, "# TYPE algo_signals_generated_total counter\n");
-      FileWriteString(m_file_handle, "# HELP algo_signals_approved_total Total number of signals approved by risk\n");
-      FileWriteString(m_file_handle, "# TYPE algo_signals_approved_total counter\n");
-      FileWriteString(m_file_handle, "# HELP algo_signals_rejected_total Total number of signals rejected by risk\n");
-      FileWriteString(m_file_handle, "# TYPE algo_signals_rejected_total counter\n");
-      FileWriteString(m_file_handle, "# HELP algo_orders_submitted_total Total number of orders submitted\n");
-      FileWriteString(m_file_handle, "# TYPE algo_orders_submitted_total counter\n");
-      FileWriteString(m_file_handle, "# HELP algo_orders_filled_total Total number of orders filled\n");
-      FileWriteString(m_file_handle, "# TYPE algo_orders_filled_total counter\n");
-      FileWriteString(m_file_handle, "# HELP algo_orders_rejected_total Total number of orders rejected\n");
-      FileWriteString(m_file_handle, "# TYPE algo_orders_rejected_total counter\n");
-      FileWriteString(m_file_handle, "# HELP algo_positions_open_total Total number of positions opened\n");
-      FileWriteString(m_file_handle, "# TYPE algo_positions_open_total counter\n");
-      FileWriteString(m_file_handle, "# HELP algo_positions_closed_total Total number of positions closed\n");
-      FileWriteString(m_file_handle, "# TYPE algo_positions_closed_total counter\n");
-      FileWriteString(m_file_handle, "# HELP algo_errors_total Total number of errors\n");
-      FileWriteString(m_file_handle, "# TYPE algo_errors_total counter\n");
-      FileWriteString(m_file_handle, "# HELP algo_warnings_total Total number of warnings\n");
-      FileWriteString(m_file_handle, "# TYPE algo_warnings_total counter\n");
-      FileWriteString(m_file_handle, "# HELP algo_account_balance Account balance\n");
-      FileWriteString(m_file_handle, "# TYPE algo_account_balance gauge\n");
-      FileWriteString(m_file_handle, "# HELP algo_account_equity Account equity\n");
-      FileWriteString(m_file_handle, "# TYPE algo_account_equity gauge\n");
-      FileWriteString(m_file_handle, "# HELP algo_account_margin Used margin\n");
-      FileWriteString(m_file_handle, "# TYPE algo_account_margin gauge\n");
-      FileWriteString(m_file_handle, "# HELP algo_account_free_margin Free margin\n");
-      FileWriteString(m_file_handle, "# TYPE algo_account_free_margin gauge\n");
-      FileWriteString(m_file_handle, "# HELP algo_account_margin_level Margin level percentage\n");
-      FileWriteString(m_file_handle, "# TYPE algo_account_margin_level gauge\n");
-      FileWriteString(m_file_handle, "# HELP algo_portfolio_exposure_pct Portfolio exposure as percentage of equity\n");
-      FileWriteString(m_file_handle, "# TYPE algo_portfolio_exposure_pct gauge\n");
-      FileWriteString(m_file_handle, "# HELP algo_portfolio_unrealized_pnl Unrealized P&L\n");
-      FileWriteString(m_file_handle, "# TYPE algo_portfolio_unrealized_pnl gauge\n");
-      FileWriteString(m_file_handle, "# HELP algo_portfolio_realized_pnl Realized P&L\n");
-      FileWriteString(m_file_handle, "# TYPE algo_portfolio_realized_pnl gauge\n");
-      FileWriteString(m_file_handle, "# HELP algo_portfolio_active_positions Number of active positions\n");
-      FileWriteString(m_file_handle, "# TYPE algo_portfolio_active_positions gauge\n");
-      FileWriteString(m_file_handle, "# HELP algo_portfolio_pending_orders Number of pending orders\n");
-      FileWriteString(m_file_handle, "# TYPE algo_portfolio_pending_orders gauge\n");
-      FileWriteString(m_file_handle, "# HELP algo_risk_daily_loss_pct Daily loss as percentage of equity\n");
-      FileWriteString(m_file_handle, "# TYPE algo_risk_daily_loss_pct gauge\n");
-      FileWriteString(m_file_handle, "# HELP algo_risk_drawdown_pct Current drawdown percentage\n");
-      FileWriteString(m_file_handle, "# TYPE algo_risk_drawdown_pct gauge\n");
-      FileWriteString(m_file_handle, "# HELP algo_risk_var_95 Value at Risk 95%\n");
-      FileWriteString(m_file_handle, "# TYPE algo_risk_var_95 gauge\n");
-      FileWriteString(m_file_handle, "# HELP algo_engine_uptime_seconds Engine uptime in seconds\n");
-      FileWriteString(m_file_handle, "# TYPE algo_engine_uptime_seconds gauge\n");
-      FileWriteString(m_file_handle, "# HELP algo_engine_avg_tick_latency_ms Average tick processing latency in ms\n");
-      FileWriteString(m_file_handle, "# TYPE algo_engine_avg_tick_latency_ms gauge\n");
-      FileWriteString(m_file_handle, "# HELP algo_engine_active_symbols Number of active symbols being monitored\n");
-      FileWriteString(m_file_handle, "# TYPE algo_engine_active_symbols gauge\n");
-      FileWriteString(m_file_handle, "# HELP algo_news_events_pending Number of pending news events\n");
-      FileWriteString(m_file_handle, "# TYPE algo_news_events_pending gauge\n");
-      FileWriteString(m_file_handle, "# HELP algo_news_blackout_active Whether news blackout is active (1=yes, 0=no)\n");
-      FileWriteString(m_file_handle, "# TYPE algo_news_blackout_active gauge\n");
-      
-      FileFlush(m_file_handle);
    }
    
-void WriteMetrics()
+   FolderCreate(m_metrics_dir);
+   
+   ResetLastError();
+   m_file_handle = FileOpen(
+      m_metrics_file,
+      FILE_WRITE|FILE_TXT|FILE_ANSI,
+      '\t');
+   
+   if(m_file_handle == INVALID_HANDLE)
    {
-      if(m_file_handle == INVALID_HANDLE)
-         return;
-      
-      string instance_label = (m_instance_id != "") ? "{instance=\"" + m_instance_id + "\"}" : "";
-      
-      FileSeek(m_file_handle, 0, SEEK_SET);
-      WriteHeader();
-     
-      FileWriteString(m_file_handle, "algo_ticks_processed_total" + instance_label + " " + IntegerToString(m_total_ticks_processed) + "\n");
-      FileWriteString(m_file_handle, "algo_signals_generated_total" + instance_label + " " + IntegerToString(m_total_signals_generated) + "\n");
-      FileWriteString(m_file_handle, "algo_signals_approved_total" + instance_label + " " + IntegerToString(m_total_signals_approved) + "\n");
-      FileWriteString(m_file_handle, "algo_signals_rejected_total" + instance_label + " " + IntegerToString(m_total_signals_rejected) + "\n");
-      FileWriteString(m_file_handle, "algo_orders_submitted_total" + instance_label + " " + IntegerToString(m_total_orders_submitted) + "\n");
-      FileWriteString(m_file_handle, "algo_orders_filled_total" + instance_label + " " + IntegerToString(m_total_orders_filled) + "\n");
-      FileWriteString(m_file_handle, "algo_orders_rejected_total" + instance_label + " " + IntegerToString(m_total_orders_rejected) + "\n");
-      FileWriteString(m_file_handle, "algo_positions_open_total" + instance_label + " " + IntegerToString(m_total_positions_open) + "\n");
-      FileWriteString(m_file_handle, "algo_positions_closed_total" + instance_label + " " + IntegerToString(m_total_positions_closed) + "\n");
-      FileWriteString(m_file_handle, "algo_errors_total" + instance_label + " " + IntegerToString(m_total_errors) + "\n");
-      FileWriteString(m_file_handle, "algo_warnings_total" + instance_label + " " + IntegerToString(m_total_warnings) + "\n");
-      FileWriteString(m_file_handle, "algo_account_balance" + instance_label + " " + DoubleToString(m_account_balance, 2) + "\n");
-      FileWriteString(m_file_handle, "algo_account_equity" + instance_label + " " + DoubleToString(m_account_equity, 2) + "\n");
-      FileWriteString(m_file_handle, "algo_account_margin" + instance_label + " " + DoubleToString(m_account_margin, 2) + "\n");
-      FileWriteString(m_file_handle, "algo_account_free_margin" + instance_label + " " + DoubleToString(m_account_free_margin, 2) + "\n");
-      FileWriteString(m_file_handle, "algo_account_margin_level" + instance_label + " " + DoubleToString(m_account_margin_level, 2) + "\n");
-      FileWriteString(m_file_handle, "algo_portfolio_exposure_pct" + instance_label + " " + DoubleToString(m_portfolio_exposure_pct, 2) + "\n");
-      FileWriteString(m_file_handle, "algo_portfolio_unrealized_pnl" + instance_label + " " + DoubleToString(m_portfolio_unrealized_pnl, 2) + "\n");
-      FileWriteString(m_file_handle, "algo_portfolio_realized_pnl" + instance_label + " " + DoubleToString(m_portfolio_realized_pnl, 2) + "\n");
-      FileWriteString(m_file_handle, "algo_portfolio_active_positions" + instance_label + " " + IntegerToString(m_portfolio_active_positions) + "\n");
-      FileWriteString(m_file_handle, "algo_portfolio_pending_orders" + instance_label + " " + IntegerToString(m_portfolio_pending_orders) + "\n");
-      FileWriteString(m_file_handle, "algo_risk_daily_loss_pct" + instance_label + " " + DoubleToString(m_risk_daily_loss_pct, 4) + "\n");
-      FileWriteString(m_file_handle, "algo_risk_drawdown_pct" + instance_label + " " + DoubleToString(m_risk_drawdown_pct, 4) + "\n");
-      FileWriteString(m_file_handle, "algo_risk_var_95" + instance_label + " " + DoubleToString(m_risk_var_95, 2) + "\n");
-      FileWriteString(m_file_handle, "algo_engine_uptime_seconds" + instance_label + " " + DoubleToString(m_engine_uptime_seconds, 0) + "\n");
-      FileWriteString(m_file_handle, "algo_engine_avg_tick_latency_ms" + instance_label + " " + DoubleToString(m_engine_avg_tick_latency_ms, 2) + "\n");
-      FileWriteString(m_file_handle, "algo_engine_active_symbols" + instance_label + " " + IntegerToString(m_engine_active_symbols) + "\n");
-      FileWriteString(m_file_handle, "algo_news_events_pending" + instance_label + " " + IntegerToString(m_news_events_pending) + "\n");
-      FileWriteString(m_file_handle, "algo_news_blackout_active" + instance_label + " " + IntegerToString(m_news_blackout_active) + "\n");
-      
-      FileFlush(m_file_handle);
+      int err = GetLastError();
+      if(m_logger)
+         m_logger.Error("Metrics file open failed: " + m_metrics_file + " LastError=" + IntegerToString(err));
+      ResetLastError();
+      return false;
    }
+   
+   // Write Prometheus format header
+   WriteHeader();
+return true;
+}
+   
+void WriteHeader()
+{
+   if(m_file_handle == INVALID_HANDLE)
+      return;
+   
+   // Truncate by seeking to start - MQL5 doesn't have FileTruncate
+   FileSeek(m_file_handle, 0, SEEK_SET);
+   
+   FileWriteString(m_file_handle, "# HELP algo_ticks_processed_total Total number of ticks processed\n");
+   FileWriteString(m_file_handle, "# TYPE algo_ticks_processed_total counter\n");
+   FileWriteString(m_file_handle, "# HELP algo_signals_generated_total Total number of signals generated\n");
+   FileWriteString(m_file_handle, "# TYPE algo_signals_generated_total counter\n");
+   FileWriteString(m_file_handle, "# HELP algo_signals_approved_total Total number of signals approved by risk\n");
+   FileWriteString(m_file_handle, "# TYPE algo_signals_approved_total counter\n");
+   FileWriteString(m_file_handle, "# HELP algo_signals_rejected_total Total number of signals rejected by risk\n");
+   FileWriteString(m_file_handle, "# TYPE algo_signals_rejected_total counter\n");
+   FileWriteString(m_file_handle, "# HELP algo_orders_submitted_total Total number of orders submitted\n");
+   FileWriteString(m_file_handle, "# TYPE algo_orders_submitted_total counter\n");
+   FileWriteString(m_file_handle, "# HELP algo_orders_filled_total Total number of orders filled\n");
+   FileWriteString(m_file_handle, "# TYPE algo_orders_filled_total counter\n");
+   FileWriteString(m_file_handle, "# HELP algo_orders_rejected_total Total number of orders rejected\n");
+   FileWriteString(m_file_handle, "# TYPE algo_orders_rejected_total counter\n");
+   FileWriteString(m_file_handle, "# HELP algo_positions_open_total Total number of positions opened\n");
+   FileWriteString(m_file_handle, "# TYPE algo_positions_open_total counter\n");
+   FileWriteString(m_file_handle, "# HELP algo_positions_closed_total Total number of positions closed\n");
+   FileWriteString(m_file_handle, "# TYPE algo_positions_closed_total counter\n");
+   FileWriteString(m_file_handle, "# HELP algo_errors_total Total number of errors\n");
+   FileWriteString(m_file_handle, "# TYPE algo_errors_total counter\n");
+   FileWriteString(m_file_handle, "# HELP algo_warnings_total Total number of warnings\n");
+   FileWriteString(m_file_handle, "# TYPE algo_warnings_total counter\n");
+   FileWriteString(m_file_handle, "# HELP algo_account_balance Account balance\n");
+   FileWriteString(m_file_handle, "# TYPE algo_account_balance gauge\n");
+   FileWriteString(m_file_handle, "# HELP algo_account_equity Account equity\n");
+   FileWriteString(m_file_handle, "# TYPE algo_account_equity gauge\n");
+   FileWriteString(m_file_handle, "# HELP algo_account_margin Used margin\n");
+   FileWriteString(m_file_handle, "# TYPE algo_account_margin gauge\n");
+   FileWriteString(m_file_handle, "# HELP algo_account_free_margin Free margin\n");
+   FileWriteString(m_file_handle, "# TYPE algo_account_free_margin gauge\n");
+   FileWriteString(m_file_handle, "# HELP algo_account_margin_level Margin level percentage\n");
+   FileWriteString(m_file_handle, "# TYPE algo_account_margin_level gauge\n");
+   FileWriteString(m_file_handle, "# HELP algo_portfolio_exposure_pct Portfolio exposure as percentage of equity\n");
+   FileWriteString(m_file_handle, "# TYPE algo_portfolio_exposure_pct gauge\n");
+   FileWriteString(m_file_handle, "# HELP algo_portfolio_unrealized_pnl Unrealized P&L\n");
+   FileWriteString(m_file_handle, "# TYPE algo_portfolio_unrealized_pnl gauge\n");
+   FileWriteString(m_file_handle, "# HELP algo_portfolio_realized_pnl Realized P&L\n");
+   FileWriteString(m_file_handle, "# TYPE algo_portfolio_realized_pnl gauge\n");
+   FileWriteString(m_file_handle, "# HELP algo_portfolio_active_positions Number of active positions\n");
+   FileWriteString(m_file_handle, "# TYPE algo_portfolio_active_positions gauge\n");
+   FileWriteString(m_file_handle, "# HELP algo_portfolio_pending_orders Number of pending orders\n");
+   FileWriteString(m_file_handle, "# TYPE algo_portfolio_pending_orders gauge\n");
+   FileWriteString(m_file_handle, "# HELP algo_risk_daily_loss_pct Daily loss as percentage of equity\n");
+   FileWriteString(m_file_handle, "# TYPE algo_risk_daily_loss_pct gauge\n");
+   FileWriteString(m_file_handle, "# HELP algo_risk_drawdown_pct Current drawdown percentage\n");
+   FileWriteString(m_file_handle, "# TYPE algo_risk_drawdown_pct gauge\n");
+   FileWriteString(m_file_handle, "# HELP algo_risk_var_95 Value at Risk 95%\n");
+   FileWriteString(m_file_handle, "# TYPE algo_risk_var_95 gauge\n");
+   FileWriteString(m_file_handle, "# HELP algo_engine_uptime_seconds Engine uptime in seconds\n");
+   FileWriteString(m_file_handle, "# TYPE algo_engine_uptime_seconds gauge\n");
+   FileWriteString(m_file_handle, "# HELP algo_engine_avg_tick_latency_ms Average tick processing latency in ms\n");
+   FileWriteString(m_file_handle, "# TYPE algo_engine_avg_tick_latency_ms gauge\n");
+   FileWriteString(m_file_handle, "# HELP algo_engine_active_symbols Number of active symbols being monitored\n");
+   FileWriteString(m_file_handle, "# TYPE algo_engine_active_symbols gauge\n");
+   FileWriteString(m_file_handle, "# HELP algo_news_events_pending Number of pending news events\n");
+   FileWriteString(m_file_handle, "# TYPE algo_news_events_pending gauge\n");
+   FileWriteString(m_file_handle, "# HELP algo_news_blackout_active Whether news blackout is active (1=yes, 0=no)\n");
+   FileWriteString(m_file_handle, "# TYPE algo_news_blackout_active gauge\n");
+
+   // Indicator performance metrics
+   FileWriteString(m_file_handle, "# HELP algo_indicator_handles_created_total Total indicator handles created\n");
+   FileWriteString(m_file_handle, "# TYPE algo_indicator_handles_created_total counter\n");
+   FileWriteString(m_file_handle, "# HELP algo_indicator_handles_released_total Total indicator handles released\n");
+   FileWriteString(m_file_handle, "# TYPE algo_indicator_handles_released_total counter\n");
+   FileWriteString(m_file_handle, "# HELP algo_indicator_handles_reused_total Total indicator handle cache hits (reused)\n");
+   FileWriteString(m_file_handle, "# TYPE algo_indicator_handles_reused_total counter\n");
+   FileWriteString(m_file_handle, "# HELP algo_indicator_active_handles Current number of active indicator handles\n");
+   FileWriteString(m_file_handle, "# TYPE algo_indicator_active_handles gauge\n");
+   FileWriteString(m_file_handle, "# HELP algo_indicator_copybuffer_calls_total Total CopyBuffer calls\n");
+   FileWriteString(m_file_handle, "# TYPE algo_indicator_copybuffer_calls_total counter\n");
+   FileWriteString(m_file_handle, "# HELP algo_indicator_copybuffer_failures_total Total CopyBuffer failures\n");
+   FileWriteString(m_file_handle, "# TYPE algo_indicator_copybuffer_failures_total counter\n");
+   FileWriteString(m_file_handle, "# HELP algo_indicator_copyrates_calls_total Total CopyRates calls\n");
+   FileWriteString(m_file_handle, "# TYPE algo_indicator_copyrates_calls_total counter\n");
+   FileWriteString(m_file_handle, "# HELP algo_indicator_copyrates_failures_total Total CopyRates failures\n");
+   FileWriteString(m_file_handle, "# TYPE algo_indicator_copyrates_failures_total counter\n");
+   
+   FileFlush(m_file_handle);
+}
+   
+void WriteMetrics()
+{
+   if(m_file_handle == INVALID_HANDLE)
+      return;
+   
+   // Sync from global cache
+   m_indicator_handles_created = CFeatureEngine::GetHandlesCreated();
+   m_indicator_handles_released = CFeatureEngine::GetHandlesReleased();
+   m_indicator_handles_reused = CFeatureEngine::GetHandlesReused();
+   m_indicator_copybuffer_calls = CFeatureEngine::GetCopyBufferCalls();
+   m_indicator_copybuffer_failures = CFeatureEngine::GetCopyBufferFailures();
+   m_indicator_copyrates_calls = CFeatureEngine::GetCopyRatesCalls();
+   m_indicator_copyrates_failures = CFeatureEngine::GetCopyRatesFailures();
+   m_indicator_active_handles = CFeatureEngine::GetActiveHandleCount();
+   
+   string instance_label = (m_instance_id != "") ? "{instance=\"" + m_instance_id + "\"}" : "";
+   
+   FileSeek(m_file_handle, 0, SEEK_SET);
+   WriteHeader();
+  
+   FileWriteString(m_file_handle, "algo_ticks_processed_total" + instance_label + " " + IntegerToString(m_total_ticks_processed) + "\n");
+   FileWriteString(m_file_handle, "algo_signals_generated_total" + instance_label + " " + IntegerToString(m_total_signals_generated) + "\n");
+   FileWriteString(m_file_handle, "algo_signals_approved_total" + instance_label + " " + IntegerToString(m_total_signals_approved) + "\n");
+   FileWriteString(m_file_handle, "algo_signals_rejected_total" + instance_label + " " + IntegerToString(m_total_signals_rejected) + "\n");
+   FileWriteString(m_file_handle, "algo_orders_submitted_total" + instance_label + " " + IntegerToString(m_total_orders_submitted) + "\n");
+   FileWriteString(m_file_handle, "algo_orders_filled_total" + instance_label + " " + IntegerToString(m_total_orders_filled) + "\n");
+   FileWriteString(m_file_handle, "algo_orders_rejected_total" + instance_label + " " + IntegerToString(m_total_orders_rejected) + "\n");
+   FileWriteString(m_file_handle, "algo_positions_open_total" + instance_label + " " + IntegerToString(m_total_positions_open) + "\n");
+   FileWriteString(m_file_handle, "algo_positions_closed_total" + instance_label + " " + IntegerToString(m_total_positions_closed) + "\n");
+   FileWriteString(m_file_handle, "algo_errors_total" + instance_label + " " + IntegerToString(m_total_errors) + "\n");
+   FileWriteString(m_file_handle, "algo_warnings_total" + instance_label + " " + IntegerToString(m_total_warnings) + "\n");
+   FileWriteString(m_file_handle, "algo_account_balance" + instance_label + " " + DoubleToString(m_account_balance, 2) + "\n");
+   FileWriteString(m_file_handle, "algo_account_equity" + instance_label + " " + DoubleToString(m_account_equity, 2) + "\n");
+   FileWriteString(m_file_handle, "algo_account_margin" + instance_label + " " + DoubleToString(m_account_margin, 2) + "\n");
+   FileWriteString(m_file_handle, "algo_account_free_margin" + instance_label + " " + DoubleToString(m_account_free_margin, 2) + "\n");
+   FileWriteString(m_file_handle, "algo_account_margin_level" + instance_label + " " + DoubleToString(m_account_margin_level, 2) + "\n");
+   FileWriteString(m_file_handle, "algo_portfolio_exposure_pct" + instance_label + " " + DoubleToString(m_portfolio_exposure_pct, 2) + "\n");
+   FileWriteString(m_file_handle, "algo_portfolio_unrealized_pnl" + instance_label + " " + DoubleToString(m_portfolio_unrealized_pnl, 2) + "\n");
+   FileWriteString(m_file_handle, "algo_portfolio_realized_pnl" + instance_label + " " + DoubleToString(m_portfolio_realized_pnl, 2) + "\n");
+   FileWriteString(m_file_handle, "algo_portfolio_active_positions" + instance_label + " " + IntegerToString(m_portfolio_active_positions) + "\n");
+   FileWriteString(m_file_handle, "algo_portfolio_pending_orders" + instance_label + " " + IntegerToString(m_portfolio_pending_orders) + "\n");
+   FileWriteString(m_file_handle, "algo_risk_daily_loss_pct" + instance_label + " " + DoubleToString(m_risk_daily_loss_pct, 4) + "\n");
+   FileWriteString(m_file_handle, "algo_risk_drawdown_pct" + instance_label + " " + DoubleToString(m_risk_drawdown_pct, 4) + "\n");
+   FileWriteString(m_file_handle, "algo_risk_var_95" + instance_label + " " + DoubleToString(m_risk_var_95, 2) + "\n");
+   FileWriteString(m_file_handle, "algo_engine_uptime_seconds" + instance_label + " " + DoubleToString(m_engine_uptime_seconds, 0) + "\n");
+   FileWriteString(m_file_handle, "algo_engine_avg_tick_latency_ms" + instance_label + " " + DoubleToString(m_engine_avg_tick_latency_ms, 2) + "\n");
+   FileWriteString(m_file_handle, "algo_engine_active_symbols" + instance_label + " " + IntegerToString(m_engine_active_symbols) + "\n");
+   FileWriteString(m_file_handle, "algo_news_events_pending" + instance_label + " " + IntegerToString(m_news_events_pending) + "\n");
+   FileWriteString(m_file_handle, "algo_news_blackout_active" + instance_label + " " + IntegerToString(m_news_blackout_active) + "\n");
+
+   // Indicator performance metrics
+   FileWriteString(m_file_handle, "algo_indicator_handles_created_total" + instance_label + " " + IntegerToString(m_indicator_handles_created) + "\n");
+   FileWriteString(m_file_handle, "algo_indicator_handles_released_total" + instance_label + " " + IntegerToString(m_indicator_handles_released) + "\n");
+   FileWriteString(m_file_handle, "algo_indicator_handles_reused_total" + instance_label + " " + IntegerToString(m_indicator_handles_reused) + "\n");
+   FileWriteString(m_file_handle, "algo_indicator_active_handles" + instance_label + " " + IntegerToString(m_indicator_active_handles) + "\n");
+   FileWriteString(m_file_handle, "algo_indicator_copybuffer_calls_total" + instance_label + " " + IntegerToString(m_indicator_copybuffer_calls) + "\n");
+   FileWriteString(m_file_handle, "algo_indicator_copybuffer_failures_total" + instance_label + " " + IntegerToString(m_indicator_copybuffer_failures) + "\n");
+   FileWriteString(m_file_handle, "algo_indicator_copyrates_calls_total" + instance_label + " " + IntegerToString(m_indicator_copyrates_calls) + "\n");
+   FileWriteString(m_file_handle, "algo_indicator_copyrates_failures_total" + instance_label + " " + IntegerToString(m_indicator_copyrates_failures) + "\n");
+   
+   FileFlush(m_file_handle);
+}
 
 public:
    CMetricsExporter() : m_logger(NULL), m_metrics_dir("AlgoSystem/Metrics"), m_instance_id(""), 
@@ -231,9 +280,13 @@ public:
                          m_account_margin_level(0),
                          m_portfolio_exposure_pct(0), m_portfolio_unrealized_pnl(0), m_portfolio_realized_pnl(0),
                          m_portfolio_active_positions(0), m_portfolio_pending_orders(0),
-                        m_risk_daily_loss_pct(0), m_risk_drawdown_pct(0), m_risk_var_95(0),
-                        m_engine_uptime_seconds(0), m_engine_avg_tick_latency_ms(0), m_engine_active_symbols(0),
-                        m_news_events_pending(0), m_news_blackout_active(0) {}
+                         m_risk_daily_loss_pct(0), m_risk_drawdown_pct(0), m_risk_var_95(0),
+                         m_engine_uptime_seconds(0), m_engine_avg_tick_latency_ms(0), m_engine_active_symbols(0),
+                         m_news_events_pending(0), m_news_blackout_active(0),
+                         m_indicator_handles_created(0), m_indicator_handles_released(0), m_indicator_handles_reused(0),
+                         m_indicator_copybuffer_calls(0), m_indicator_copybuffer_failures(0),
+                         m_indicator_copyrates_calls(0), m_indicator_copyrates_failures(0),
+                         m_indicator_active_handles(0) {}
    
    ~CMetricsExporter()
    {
@@ -244,16 +297,16 @@ public:
       }
    }
    
-void Initialize(CAlgoLogger* logger, const string instance_id = "", const int write_interval_seconds = 10,
-                  const long max_file_size_bytes = 10 * 1024 * 1024)
-    {
-       m_logger = logger;
-       m_instance_id = instance_id;
-       m_write_interval_seconds = write_interval_seconds;
-       m_max_file_size_bytes = max_file_size_bytes;
-       m_metrics_file = m_metrics_dir + "/metrics" + (m_instance_id != "" ? "_" + m_instance_id : "") + ".prom";
-       InitializeFile();
-    }
+   void Initialize(CAlgoLogger* logger, const string instance_id = "", const int write_interval_seconds = 10,
+                   const long max_file_size_bytes = 10 * 1024 * 1024)
+   {
+      m_logger = logger;
+      m_instance_id = instance_id;
+      m_write_interval_seconds = write_interval_seconds;
+      m_max_file_size_bytes = max_file_size_bytes;
+      m_metrics_file = m_metrics_dir + "/metrics" + (m_instance_id != "" ? "_" + m_instance_id : "") + ".prom";
+      InitializeFile();
+   }
    
    void SetLogger(CAlgoLogger* logger) { m_logger = logger; }
    
@@ -406,25 +459,25 @@ private:
    }
    
 void LogAlert(const AlertRecord& alert)
-    {
-       if(!m_logger)
-          return;
-       
-       ENUM_LOG_LEVEL level = LOG_INFO;
-       if(alert.severity == ALERT_WARNING)
-          level = LOG_WARNING;
-       else if(alert.severity == ALERT_CRITICAL)
-          level = LOG_ERROR;
-       
-m_logger.Event(level, "ALERT", "ALERT_RAISED", alert.symbol, "", "", "", 
-                      "", alert.category,                          // reason_code
-                      alert.message,                               // reason
-                      0,                                           // last_error
-                      0,                                           // trade_retcode (uint)
-                      alert.value,                                 // value1
-                      alert.threshold,                             // value2
-                      0.0);                                        // value3
-    }
+{
+   if(!m_logger)
+      return;
+   
+   ENUM_LOG_LEVEL level = LOG_INFO;
+   if(alert.severity == ALERT_WARNING)
+      level = LOG_WARNING;
+   else if(alert.severity == ALERT_CRITICAL)
+      level = LOG_ERROR;
+   
+   m_logger.Event(level, "ALERT", "ALERT_RAISED", alert.symbol, "", "", "", 
+                  "", alert.category,                          // reason_code
+                  alert.message,                               // reason
+                  0,                                           // last_error
+                  0,                                           // trade_retcode (uint)
+                  alert.value,                                 // value1
+                  alert.threshold,                             // value2
+                  0.0);                                        // value3
+}
    
    void ShowOnChart(const AlertRecord& alert)
    {
@@ -459,11 +512,11 @@ m_logger.Event(level, "ALERT", "ALERT_RAISED", alert.symbol, "", "", "",
 
 public:
    CAlertManager() : m_logger(NULL), m_metrics(NULL), m_alert_count(0), m_max_alerts(256),
-                     m_margin_level_critical(150), m_margin_level_warning(200),
-                     m_daily_loss_critical(5.0), m_daily_loss_warning(3.0),
-                     m_drawdown_critical(10.0), m_drawdown_warning(5.0),
-                     m_spread_warning_multiplier(3.0), m_max_positions_warning(8), m_max_positions_critical(10),
-                     m_alert_cooldown_seconds(60) {}
+                      m_margin_level_critical(150), m_margin_level_warning(200),
+                      m_daily_loss_critical(5.0), m_daily_loss_warning(3.0),
+                      m_drawdown_critical(10.0), m_drawdown_warning(5.0),
+                      m_spread_warning_multiplier(3.0), m_max_positions_warning(8), m_max_positions_critical(10),
+                      m_alert_cooldown_seconds(60) {}
    
    ~CAlertManager() {}
    

@@ -5,6 +5,7 @@
 #include "TradeExecutor.mqh"
 #include "ExecutionLedger.mqh"
 #include "Utilities.mqh"
+#include "Indicators.mqh"
 
 //+------------------------------------------------------------------+
 //| Position Manager                                                 |
@@ -46,8 +47,7 @@ private:
 
     bool   m_emergency_close;
 
-    // F5: cached ATR indicator handle (created once per symbol/config, reused across ticks).
-    int    m_atr_handle;
+    // F5: cached ATR indicator handle key for shared cache (created once per symbol/config, reused across ticks).
     string m_atr_handle_symbol;
     ENUM_TIMEFRAMES m_atr_handle_timeframe;
     int    m_atr_handle_period;
@@ -459,35 +459,43 @@ private:
       if(current_price<=0.0)
          return false;
 
-       // F5: reuse the ATR handle for the same symbol/config instead of create+release per tick.
-       if(m_atr_handle==INVALID_HANDLE ||
-          m_atr_handle_symbol!=symbol ||
-          m_atr_handle_timeframe!=m_trailing_timeframe ||
-          m_atr_handle_period!=m_atr_period)
+// F5: reuse the ATR handle for the same symbol/config via shared cache.
+      if(m_atr_handle_symbol!=symbol ||
+         m_atr_handle_timeframe!=m_trailing_timeframe ||
+         m_atr_handle_period!=m_atr_period)
+      {
+         // Release old handle via cache if configuration changed
+         if(m_atr_handle_period > 0)
          {
-          if(m_atr_handle!=INVALID_HANDLE)
-             IndicatorRelease(m_atr_handle);
-          m_atr_handle=iATR(symbol, m_trailing_timeframe, m_atr_period);
-          m_atr_handle_symbol=symbol;
-          m_atr_handle_timeframe=m_trailing_timeframe;
-          m_atr_handle_period=m_atr_period;
+            g_indicator_cache.ReleaseHandle(m_atr_handle_symbol, m_atr_handle_timeframe, 2, m_atr_handle_period);
          }
+         // New handle will be created by cache on first CopyBuffer call
+         m_atr_handle_symbol=symbol;
+         m_atr_handle_timeframe=m_trailing_timeframe;
+         m_atr_handle_period=m_atr_period;
+      }
 
-       if(m_atr_handle==INVALID_HANDLE)
-          return false;
+      // Get ATR handle from shared cache (type 2 = ATR)
+      int atr_handle = g_indicator_cache.GetOrCreateHandle(symbol, m_trailing_timeframe, 2, m_atr_period);
+      if(atr_handle == INVALID_HANDLE)
+         return false;
 
-       double buffer[1];
+double buffer[1];
 
-       int copied=
-          CopyBuffer(
-             m_atr_handle,
-             0,
-             1,
-             1,
-             buffer);
+      CIndicatorHandleCache::IncCopyBufferCalls();
+      int copied=
+         CopyBuffer(
+            atr_handle,
+            0,
+            1,
+            1,
+            buffer);
 
-       if(copied!=1)
-          return false;
+      if(copied!=1)
+      {
+         CIndicatorHandleCache::IncCopyBufferFailures();
+         return false;
+      }
 
       if(!MathIsValidNumber(buffer[0]) ||
          buffer[0]<=0.0)
@@ -649,21 +657,22 @@ public:
 
        m_emergency_close=false;
 
-       m_atr_handle=INVALID_HANDLE;
-       m_atr_handle_symbol="";
-       m_atr_handle_timeframe=PERIOD_CURRENT;
-       m_atr_handle_period=0;
+m_atr_handle_symbol="";
+      m_atr_handle_timeframe=PERIOD_CURRENT;
+      m_atr_handle_period=0;
       }
 
-    //+----------------------------------------------------------------+
-    //| Destructor: release cached indicator handle                   |
+//+----------------------------------------------------------------+
+    //| Destructor: release cached indicator handle via cache       |
     //+----------------------------------------------------------------+
     ~CPositionManager()
+    {
+      if(m_atr_handle_period > 0)
       {
-       if(m_atr_handle!=INVALID_HANDLE)
-          IndicatorRelease(m_atr_handle);
-       m_atr_handle=INVALID_HANDLE;
+         g_indicator_cache.ReleaseHandle(m_atr_handle_symbol, m_atr_handle_timeframe, 2, m_atr_handle_period);
       }
+      m_atr_handle_period = 0;
+    }
 
 //+----------------------------------------------------------------+
     //| Attach executor                                                |
