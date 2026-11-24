@@ -1786,6 +1786,96 @@ Run-TestSuite 'P2.2 S03-S14 Scheduler Acceptance' {
         $schedIdx = $onTickBody.IndexOf('RunMultiAssetScheduler')
         Assert-True ($posIdx -ge 0 -and $schedIdx -gt $posIdx)
     }
+
+    # SP-01R.2: Signal lifecycle, snapshot efficiency & diagnostics
+    Run-Test 'SP-01R2-01: MarkPlanConsumed exists in HybridEngine' {
+        $he = Get-Content -LiteralPath (Join-Path $script:ProjectRoot 'Include\AlgoSystem\HybridEngine.mqh') -Raw
+        Assert-Match $he 'void\s+MarkPlanConsumed'
+    }
+    Run-Test 'SP-01R2-02: IsPlanConsumed exists in HybridEngine' {
+        $he = Get-Content -LiteralPath (Join-Path $script:ProjectRoot 'Include\AlgoSystem\HybridEngine.mqh') -Raw
+        Assert-Match $he 'bool\s+IsPlanConsumed'
+    }
+    Run-Test 'SP-01R2-03: m_last_signal_consumed field exists' {
+        $he = Get-Content -LiteralPath (Join-Path $script:ProjectRoot 'Include\AlgoSystem\HybridEngine.mqh') -Raw
+        Assert-Match $he 'm_last_signal_consumed'
+    }
+    Run-Test 'SP-01R2-04: Evaluate reports actual failure reason from ctx.reason' {
+        $he = Get-Content -LiteralPath (Join-Path $script:ProjectRoot 'Include\AlgoSystem\HybridEngine.mqh') -Raw
+        Assert-Match $he 'decision\.main_reason=ctx\.reason'
+    }
+    Run-Test 'SP-01R2-05: IsSetupFresh exists for freshness checks' {
+        $he = Get-Content -LiteralPath (Join-Path $script:ProjectRoot 'Include\AlgoSystem\HybridEngine.mqh') -Raw
+        Assert-Match $he 'IsSetupFresh'
+    }
+    Run-Test 'SP-01R2-06: IsPlanExpired exists for expiry checks' {
+        $he = Get-Content -LiteralPath (Join-Path $script:ProjectRoot 'Include\AlgoSystem\HybridEngine.mqh') -Raw
+        Assert-Match $he 'IsPlanExpired'
+    }
+    Run-Test 'SP-01R2-07: HybridEngine has role-specific market snapshots' {
+        $he = Get-Content -LiteralPath (Join-Path $script:ProjectRoot 'Include\AlgoSystem\HybridEngine.mqh') -Raw
+        Assert-Match $he 'context_market'
+        Assert-Match $he 'structure_market'
+        Assert-Match $he 'setup_market'
+        Assert-Match $he 'entry_market'
+    }
+    Run-Test 'SP-01R2-08: HybridEngine has role-specific features' {
+        $he = Get-Content -LiteralPath (Join-Path $script:ProjectRoot 'Include\AlgoSystem\HybridEngine.mqh') -Raw
+        Assert-Match $he 'context_features'
+        Assert-Match $he 'structure_features'
+        Assert-Match $he 'setup_features'
+        Assert-Match $he 'entry_features'
+    }
+    Run-Test 'SP-01R2-09: Duplicate signal detection uses m_last_signal_consumed' {
+        $he = Get-Content -LiteralPath (Join-Path $script:ProjectRoot 'Include\AlgoSystem\HybridEngine.mqh') -Raw
+        Assert-Match $he 'm_last_signal_consumed'
+        Assert-Match $he 'DUPLICATE_SIGNAL'
+    }
+    Run-Test 'SP-01R2-10: ProcessDataFetch exists in EA' {
+        $eaPath = Join-Path $script:ProjectRoot 'Experts\AlgoMultiAssetEA.mq5'
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'ProcessDataFetch'
+    }
+    Run-Test 'SP-01R2-11: ProcessFeatureCalculation exists in EA' {
+        $eaPath = Join-Path $script:ProjectRoot 'Experts\AlgoMultiAssetEA.mq5'
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'ProcessFeatureCalculation'
+    }
+    Run-Test 'SP-01R2-12: ProcessSignalBarWait exists in EA' {
+        $eaPath = Join-Path $script:ProjectRoot 'Experts\AlgoMultiAssetEA.mq5'
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'ProcessSignalBarWait'
+    }
+    Run-Test 'SP-01R2-13: ProcessEvaluation exists in EA' {
+        $eaPath = Join-Path $script:ProjectRoot 'Experts\AlgoMultiAssetEA.mq5'
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'ProcessEvaluation'
+    }
+    Run-Test 'SP-01R2-14: CheckReadiness exists in CSymbolRuntime' {
+        $eaPath = Join-Path $script:ProjectRoot 'Experts\AlgoMultiAssetEA.mq5'
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'CheckReadiness'
+    }
+    Run-Test 'SP-01R2-15: GetSnapshot exists in CMarketDataManager' {
+        $eaPath = Join-Path $script:ProjectRoot 'Experts\AlgoMultiAssetEA.mq5'
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'GetSnapshot'
+    }
+    Run-Test 'SP-01R2-16: CreateSetupClaimAndIntent exists in EA' {
+        $eaPath = Join-Path $script:ProjectRoot 'Experts\AlgoMultiAssetEA.mq5'
+        $ea = Get-Content -LiteralPath $eaPath -Raw
+        Assert-Match $ea 'CreateSetupClaimAndIntent'
+    }
+    Run-Test 'SP-01R2-19: SaveDuplicateState exists for probe safety' {
+        $he = Get-Content -LiteralPath (Join-Path $script:ProjectRoot 'Include\AlgoSystem\HybridEngine.mqh') -Raw
+        Assert-Match $he 'SaveDuplicateState'
+        Assert-Match $he 'RestoreDuplicateState'
+    }
+    Run-Test 'SP-01R2-20: BuildFeatureContext exists in HybridEngine' {
+        $he = Get-Content -LiteralPath (Join-Path $script:ProjectRoot 'Include\AlgoSystem\HybridEngine.mqh') -Raw
+        Assert-Match $he 'BuildFeatureContext'
+    }
+
 }
 # Summary
 # ----------------------------------------------------------------------------

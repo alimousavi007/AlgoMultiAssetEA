@@ -4445,10 +4445,10 @@ HybridDecision decision = runtime.hybrid_engine.Evaluate(
       {
        g_logger.Event(LOG_WARNING, "HYBRID", "EVALUATE_FAILED",
                       runtime.symbol, "", "", "", "WARN", "EVALUATE_FAIL",
-                      "HybridEngine.Evaluate returned false; reason=" + ctx.reason);
+                       "HybridEngine.Evaluate returned false; reason=" + decision.main_reason);
        runtime.TransitionTo(RUNTIME_BLOCKED_FEATURES, REASON_EVALUATION_FAILED);
        ShowRuntimeGateStatus(runtime, "BLOCKED: EVALUATE FAILED");
-       LogRuntimeGate(runtime, "HYBRID_EVAL", "EVALUATE", "FAIL", ctx.reason);
+        LogRuntimeGate(runtime, "HYBRID_EVAL", "EVALUATE", "FAIL", decision.main_reason);
        return;
       }
 
