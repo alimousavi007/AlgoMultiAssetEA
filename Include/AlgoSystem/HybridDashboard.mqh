@@ -793,6 +793,11 @@ m_object_prefix = "";
          int age_seconds = (int)(now - success_time);
          if(age_seconds > 300) stale = true;
         }
+      else
+        {
+         // No timestamp evidence -> treat as stale/unknown (fail closed)
+         stale = true;
+        }
 
       m_state.style = MakeFieldState((style == "" ? "NOT EVALUATED" : style), "Snapshot", now, valid, stale, "");
       m_state.regime = MakeFieldState((regime == "" ? "NOT EVALUATED" : regime), "Snapshot", now, valid, stale, "");

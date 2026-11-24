@@ -10,9 +10,10 @@
 //| Classifies market regime using ADX, volatility ratio,          |
 //| directional efficiency, and structural persistence.            |
 //| Implements hysteresis to avoid excessive state switching.       |
+//| Uses shared indicator handle cache to prevent duplicates.       |
 //+------------------------------------------------------------------+
 class CHybridRegimeEngine
-  {
+{
 private:
    string             m_symbol;
    ENUM_TIMEFRAMES    m_timeframe;
@@ -34,16 +35,46 @@ private:
    int                m_regime_stable_count;
    datetime           m_last_bar_time;
 
-   int m_adx_handle;
-   int m_atr_handle;
+   // Handle keys for cache release
+   struct HandleKey
+   {
+      int indicator_type;
+      int period1;
+   };
+   HandleKey m_handle_keys[2];
+   int m_handle_key_count;
 
-   double m_adx_buf[];
-   double m_atr_buf[];
-   double m_ema_buf[];
+   //+----------------------------------------------------------------+
+   //| Register a handle key for later release                        |
+   //+----------------------------------------------------------------+
+   void RegisterHandleKey(int indicator_type, int period1)
+   {
+      if(m_handle_key_count < 2)
+      {
+         m_handle_keys[m_handle_key_count].indicator_type = indicator_type;
+         m_handle_keys[m_handle_key_count].period1 = period1;
+         m_handle_key_count++;
+      }
+   }
+
+   //+----------------------------------------------------------------+
+   //| Release all handles via cache                                  |
+   //+----------------------------------------------------------------+
+   void ReleaseHandles()
+   {
+      for(int i=0; i<m_handle_key_count; i++)
+      {
+         g_indicator_cache.ReleaseHandle(m_symbol,
+                                         m_timeframe,
+                                         m_handle_keys[i].indicator_type,
+                                         m_handle_keys[i].period1);
+      }
+      m_handle_key_count = 0;
+   }
 
 public:
    CHybridRegimeEngine()
-     {
+   {
       m_symbol="";
       m_timeframe=PERIOD_H1;
       m_adx_period=14;
@@ -59,14 +90,13 @@ public:
       m_current_regime=HYBRID_REGIME_INSUFFICIENT_DATA;
       m_regime_stable_count=0;
       m_last_bar_time=0;
-      m_adx_handle=INVALID_HANDLE;
-      m_atr_handle=INVALID_HANDLE;
-     }
+      m_handle_key_count=0;
+   }
 
    ~CHybridRegimeEngine()
-     {
+   {
       ReleaseHandles();
-     }
+   }
 
    void SetParameters(int adx_period,
                       double trend_threshold,
@@ -74,35 +104,38 @@ public:
                       double low_vol_ratio,
                       int range_lookback,
                       int hysteresis_bars)
-     {
+   {
       m_adx_period=adx_period;
       m_trend_threshold=trend_threshold;
       m_high_vol_ratio=high_vol_ratio;
       m_low_vol_ratio=low_vol_ratio;
       m_range_lookback=range_lookback;
       m_hysteresis_bars=hysteresis_bars;
-     }
+   }
 
    bool Initialize(const string symbol,
                    ENUM_TIMEFRAMES timeframe)
-     {
+   {
       m_symbol=symbol;
       m_timeframe=timeframe;
       m_initialized=true;
 
       ReleaseHandles();
 
-      ResetLastError();
-      m_adx_handle=iADX(symbol, timeframe, m_adx_period);
-      if(m_adx_handle==INVALID_HANDLE)
+      // Get ADX handle from shared cache (type 1 = ADX)
+      int adx_handle = g_indicator_cache.GetOrCreateHandle(m_symbol, m_timeframe, 1, m_adx_period);
+      if(adx_handle == INVALID_HANDLE)
          return false;
+      RegisterHandleKey(1, m_adx_period);
 
-      m_atr_handle=iATR(symbol, timeframe, m_adx_period);
-      if(m_atr_handle==INVALID_HANDLE)
-         {
-          ReleaseHandles();
-          return false;
-         }
+      // Get ATR handle from shared cache (type 2 = ATR)
+      int atr_handle = g_indicator_cache.GetOrCreateHandle(m_symbol, m_timeframe, 2, m_adx_period);
+      if(atr_handle == INVALID_HANDLE)
+      {
+         ReleaseHandles();
+         return false;
+      }
+      RegisterHandleKey(2, m_adx_period);
 
       ResetLastError();
       m_tick_size=SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
@@ -114,56 +147,56 @@ public:
       m_digits=(int)digits;
 
       return m_tick_size > 0;
-     }
+   }
 
    double GetTickSize() const { return m_tick_size; }
    double GetPoint() const { return m_point; }
    int    GetDigits() const { return m_digits; }
 
-private:
-   void ReleaseHandles()
-     {
-      if(m_adx_handle!=INVALID_HANDLE)
-         IndicatorRelease(m_adx_handle);
-      if(m_atr_handle!=INVALID_HANDLE)
-         IndicatorRelease(m_atr_handle);
-
-      m_adx_handle=INVALID_HANDLE;
-      m_atr_handle=INVALID_HANDLE;
-     }
-
    double GetADXValue() const
-     {
-      if(m_adx_handle==INVALID_HANDLE)
+   {
+      // Get handle from cache
+      int handle = g_indicator_cache.GetOrCreateHandle(m_symbol, m_timeframe, 1, m_adx_period);
+      if(handle == INVALID_HANDLE)
          return 0;
 
       double adx[];
       ResetLastError();
-      int copied=CopyBuffer(m_adx_handle, 0, 0, 3, adx);
+      CIndicatorHandleCache::IncCopyBufferCalls();
+      int copied=CopyBuffer(handle, 0, 0, 3, adx);
       if(copied<=0 || ArraySize(adx)==0)
+      {
+         CIndicatorHandleCache::IncCopyBufferFailures();
          return 0;
+      }
 
       ArraySetAsSeries(adx, true);
       return adx[0];
-     }
+   }
 
    double GetATRValue() const
-     {
-      if(m_atr_handle==INVALID_HANDLE)
+   {
+      // Get handle from cache
+      int handle = g_indicator_cache.GetOrCreateHandle(m_symbol, m_timeframe, 2, m_adx_period);
+      if(handle == INVALID_HANDLE)
          return 0;
 
       double atr[];
       ResetLastError();
-      int copied=CopyBuffer(m_atr_handle, 0, 0, 3, atr);
+      CIndicatorHandleCache::IncCopyBufferCalls();
+      int copied=CopyBuffer(handle, 0, 0, 3, atr);
       if(copied<=0 || ArraySize(atr)==0)
+      {
+         CIndicatorHandleCache::IncCopyBufferFailures();
          return 0;
+      }
 
       ArraySetAsSeries(atr, true);
       return atr[0];
-     }
+   }
 
-    double CalculateEfficiency(const MqlRates& rates[], int lookback) const
-     {
+   double CalculateEfficiency(const MqlRates& rates[], int lookback) const
+   {
       int size=ArraySize(rates);
       if(size < lookback+1 || lookback<=0)
          return 0;
@@ -172,33 +205,33 @@ private:
       double total_distance=0;
 
       for(int i=0; i<lookback; i++)
-        {
+      {
          total_distance += MathAbs(rates[i].close - rates[i+1].close);
-        }
+      }
 
       if(total_distance<=0)
          return 0;
 
       return net_distance / total_distance;
-     }
+   }
 
-    double CalculateVolatilityRatio(const MqlRates& rates[],
-                                   double current_atr,
-                                   int lookback) const
-     {
+   double CalculateVolatilityRatio(const MqlRates& rates[],
+                                  double current_atr,
+                                  int lookback) const
+   {
       int size=ArraySize(rates);
       if(size < lookback+1 || lookback<=0 || current_atr<=0)
          return 1.0;
 
       double lookback_atr=0;
       for(int i=0; i<lookback && i<size-1; i++)
-        {
+      {
          double tr1=rates[i].high - rates[i].low;
          double tr2=MathAbs(rates[i].high - rates[i+1].close);
          double tr3=MathAbs(rates[i].low - rates[i+1].close);
          double tr=MathMax(tr1, MathMax(tr2, tr3));
          lookback_atr += tr;
-        }
+      }
 
       lookback_atr /= (double)lookback;
 
@@ -206,36 +239,36 @@ private:
          return 1.0;
 
       return current_atr / lookback_atr;
-     }
+   }
 
    ENUM_HYBRID_REGIME ClassifyRegime(double adx,
                                     double vol_ratio,
                                     double efficiency) const
-     {
+   {
       if(adx > m_trend_threshold)
-        {
+      {
          if(vol_ratio > m_high_vol_ratio && efficiency < 0.33)
             return HYBRID_REGIME_VOLATILITY_EXPANSION;
          return HYBRID_REGIME_TRENDING;
-        }
+      }
 
       if(efficiency < 0.25)
-        {
+      {
          if(vol_ratio < m_low_vol_ratio)
             return HYBRID_REGIME_COMPRESSION;
          return HYBRID_REGIME_RANGING;
-        }
+      }
 
       if(vol_ratio < m_low_vol_ratio)
          return HYBRID_REGIME_TRANSITION;
 
       return HYBRID_REGIME_RANGING;
-     }
+   }
 
 public:
    RegimeFeatures Calculate(const MarketSnapshot& market,
                             const FeatureSet& features)
-     {
+   {
       RegimeFeatures result;
       result.valid=false;
       result.regime=HYBRID_REGIME_INSUFFICIENT_DATA;
@@ -250,36 +283,38 @@ public:
       result.reason="";
 
       if(!m_initialized)
-        {
+      {
          result.reason="Regime engine not initialized";
          return result;
-        }
+      }
 
       if(market.closed_bar_time != m_last_bar_time)
-        {
+      {
          m_last_bar_time=market.closed_bar_time;
          m_regime_stable_count=0;
-        }
+      }
 
       double adx=GetADXValue();
       double atr=GetATRValue();
 
       if(adx<=0 || atr<=0)
-        {
+      {
          result.reason="ADX or ATR unavailable";
          return result;
-        }
+      }
 
       MqlRates rates[];
       ResetLastError();
-       int copied=CopyRates(market.symbol, market.timeframe, 0, m_range_lookback+5, rates);
-       if(copied<=0 || ArraySize(rates)<m_range_lookback+1)
-         {
-          result.reason="Insufficient bars for regime efficiency calculation";
-          return result;
-         }
+      CIndicatorHandleCache::IncCopyRatesCalls();
+      int copied=CopyRates(market.symbol, market.timeframe, 0, m_range_lookback+5, rates);
+      if(copied<=0 || ArraySize(rates)<m_range_lookback+1)
+      {
+         CIndicatorHandleCache::IncCopyRatesFailures();
+         result.reason="Insufficient bars for regime efficiency calculation";
+         return result;
+      }
 
-       ArraySetAsSeries(rates, true);
+      ArraySetAsSeries(rates, true);
 
       double efficiency=CalculateEfficiency(rates, m_range_lookback);
       double vol_ratio=CalculateVolatilityRatio(rates, atr, m_range_lookback);
@@ -287,14 +322,14 @@ public:
       ENUM_HYBRID_REGIME new_regime=ClassifyRegime(adx, vol_ratio, efficiency);
 
       if(new_regime == m_current_regime)
-        {
+      {
          m_regime_stable_count++;
-        }
+      }
       else
-        {
+      {
          m_current_regime=new_regime;
          m_regime_stable_count=0;
-        }
+      }
 
       bool regime_confirmed = m_regime_stable_count >= m_hysteresis_bars ||
                               m_regime_stable_count == 0;
@@ -315,17 +350,17 @@ public:
       result.reason="OK";
 
       return result;
-     }
+   }
 
    ENUM_HYBRID_REGIME GetCurrentRegime() const
-     {
+   {
       return m_current_regime;
-     }
+   }
 
    void OnBarUpdate()
-     {
+   {
       m_regime_stable_count++;
-     }
-  };
+   }
+};
 
 #endif

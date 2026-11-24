@@ -5,6 +5,7 @@
 #include "TradeExecutor.mqh"
 #include "ExecutionLedger.mqh"
 #include "Utilities.mqh"
+#include "Indicators.mqh"
 
 //+------------------------------------------------------------------+
 //| Position Manager                                                 |
@@ -46,8 +47,7 @@ private:
 
     bool   m_emergency_close;
 
-    // F5: cached ATR indicator handle (created once per symbol/config, reused across ticks).
-    int    m_atr_handle;
+    // F5: cached ATR indicator handle key for shared cache (created once per symbol/config, reused across ticks).
     string m_atr_handle_symbol;
     ENUM_TIMEFRAMES m_atr_handle_timeframe;
     int    m_atr_handle_period;
@@ -137,6 +137,55 @@ bool IsManagedMagic(const long magic) const
 
       return PositionSelectByTicket(ticket);
      }
+
+   //+----------------------------------------------------------------+
+   //| Pure tick-usability decision (testable without broker/position)|
+   //| Public so the standalone test can exercise it; no side effects.  |
+   //| Requires a provable quote timestamp (time_msc preferred, else  |
+   //| time) and a usable price on the side we act on. An unprovenable |
+   //| timestamp is treated as stale/unverified (fail safe: no SL      |
+   //| mutation), matching the entry-path convention in HybridEngine.  |
+   //| Note: an old-but-provable timestamp still passes; no approved  |
+   //| tick-age threshold exists, so age is intentionally not gated.  |
+   //+----------------------------------------------------------------+
+public:
+   static bool TickUsable(
+      const long time_msc,
+      const long time,
+      const double bid,
+      const double ask,
+      const ENUM_POSITION_TYPE type)
+     {
+      datetime src=0;
+      if(time_msc>0)
+         src=(datetime)(time_msc/1000);
+      else if(time>0)
+         src=(datetime)time;
+
+      if(src<=0)
+         return false;
+
+      if(type==POSITION_TYPE_BUY)
+         return bid>0.0;
+
+      return ask>0.0;
+     }
+
+   //+----------------------------------------------------------------+
+   //| Fetch a tick and validate provenance/price side for management|
+   //+----------------------------------------------------------------+
+   bool GetManagedTick(
+      const string symbol,
+      const ENUM_POSITION_TYPE type,
+      MqlTick &tick) const
+     {
+      if(!SymbolInfoTick(symbol,tick))
+         return false;
+
+      return TickUsable(tick.time_msc,tick.time,tick.bid,tick.ask,type);
+     }
+
+private:
 
    //+----------------------------------------------------------------+
    //| Calculate current R                                            |
@@ -295,7 +344,7 @@ bool IsManagedMagic(const long magic) const
 
       MqlTick tick;
 
-      if(!SymbolInfoTick(symbol,tick))
+      if(!GetManagedTick(symbol,type,tick))
          return false;
 
       double current_price;
@@ -304,6 +353,9 @@ bool IsManagedMagic(const long magic) const
          current_price=tick.bid;
       else
          current_price=tick.ask;
+
+      if(current_price<=0.0)
+         return false;
 
       double r=
          CurrentR(
@@ -394,7 +446,7 @@ bool IsManagedMagic(const long magic) const
 
       MqlTick tick;
 
-      if(!SymbolInfoTick(symbol,tick))
+      if(!GetManagedTick(symbol,type,tick))
          return false;
 
       double current_price;
@@ -407,35 +459,43 @@ bool IsManagedMagic(const long magic) const
       if(current_price<=0.0)
          return false;
 
-       // F5: reuse the ATR handle for the same symbol/config instead of create+release per tick.
-       if(m_atr_handle==INVALID_HANDLE ||
-          m_atr_handle_symbol!=symbol ||
-          m_atr_handle_timeframe!=m_trailing_timeframe ||
-          m_atr_handle_period!=m_atr_period)
+// F5: reuse the ATR handle for the same symbol/config via shared cache.
+      if(m_atr_handle_symbol!=symbol ||
+         m_atr_handle_timeframe!=m_trailing_timeframe ||
+         m_atr_handle_period!=m_atr_period)
+      {
+         // Release old handle via cache if configuration changed
+         if(m_atr_handle_period > 0)
          {
-          if(m_atr_handle!=INVALID_HANDLE)
-             IndicatorRelease(m_atr_handle);
-          m_atr_handle=iATR(symbol, m_trailing_timeframe, m_atr_period);
-          m_atr_handle_symbol=symbol;
-          m_atr_handle_timeframe=m_trailing_timeframe;
-          m_atr_handle_period=m_atr_period;
+            g_indicator_cache.ReleaseHandle(m_atr_handle_symbol, m_atr_handle_timeframe, 2, m_atr_handle_period);
          }
+         // New handle will be created by cache on first CopyBuffer call
+         m_atr_handle_symbol=symbol;
+         m_atr_handle_timeframe=m_trailing_timeframe;
+         m_atr_handle_period=m_atr_period;
+      }
 
-       if(m_atr_handle==INVALID_HANDLE)
-          return false;
+      // Get ATR handle from shared cache (type 2 = ATR)
+      int atr_handle = g_indicator_cache.GetOrCreateHandle(symbol, m_trailing_timeframe, 2, m_atr_period);
+      if(atr_handle == INVALID_HANDLE)
+         return false;
 
-       double buffer[1];
+double buffer[1];
 
-       int copied=
-          CopyBuffer(
-             m_atr_handle,
-             0,
-             1,
-             1,
-             buffer);
+      CIndicatorHandleCache::IncCopyBufferCalls();
+      int copied=
+         CopyBuffer(
+            atr_handle,
+            0,
+            1,
+            1,
+            buffer);
 
-       if(copied!=1)
-          return false;
+      if(copied!=1)
+      {
+         CIndicatorHandleCache::IncCopyBufferFailures();
+         return false;
+      }
 
       if(!MathIsValidNumber(buffer[0]) ||
          buffer[0]<=0.0)
@@ -597,21 +657,22 @@ public:
 
        m_emergency_close=false;
 
-       m_atr_handle=INVALID_HANDLE;
-       m_atr_handle_symbol="";
-       m_atr_handle_timeframe=PERIOD_CURRENT;
-       m_atr_handle_period=0;
+m_atr_handle_symbol="";
+      m_atr_handle_timeframe=PERIOD_CURRENT;
+      m_atr_handle_period=0;
       }
 
-    //+----------------------------------------------------------------+
-    //| Destructor: release cached indicator handle                   |
+//+----------------------------------------------------------------+
+    //| Destructor: release cached indicator handle via cache       |
     //+----------------------------------------------------------------+
     ~CPositionManager()
+    {
+      if(m_atr_handle_period > 0)
       {
-       if(m_atr_handle!=INVALID_HANDLE)
-          IndicatorRelease(m_atr_handle);
-       m_atr_handle=INVALID_HANDLE;
+         g_indicator_cache.ReleaseHandle(m_atr_handle_symbol, m_atr_handle_timeframe, 2, m_atr_handle_period);
       }
+      m_atr_handle_period = 0;
+    }
 
 //+----------------------------------------------------------------+
     //| Attach executor                                                |

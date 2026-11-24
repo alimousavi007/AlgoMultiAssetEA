@@ -1983,7 +1983,34 @@ int CExecutionLedger::RecoverUnresolved(int &out_count)
       DatabaseFinalize(qh);
       for(int i = 0; i < oc; i++)
         {
-         // Reconcile/quarantine each; failures are visible via state/history and blocking queries.
+         // Alternative A (D-09/D-10/D-11): a recoverable INTENT_DURABLE_NOT_SUBMITTED
+         // (submission_allowed=0 and no broker evidence) MUST NOT be quarantined to
+         // RECONCILIATION_REQUIRED by OnInit; it remains eligible for controlled recovery
+         // with full revalidation and operator re-consent. Only bound-but-not-marked
+         // (submission_allowed=1, crash between Bound and MayHaveOccurred) or rows with
+         // broker ticket evidence are fail-closed to RECONCILIATION_REQUIRED (no auto-resubmit).
+         ExecutionAttemptRecord rec;
+         if(GetAttempt(orphan_ids[i], rec))
+           {
+            if(rec.state == EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED &&
+               rec.submission_allowed == false &&
+               rec.broker_order_ticket == 0 &&
+               rec.broker_deal_ticket == 0 &&
+               rec.broker_position_ticket == 0)
+              {
+               // Leave intact: recoverable intent preserved for Alternative A recovery path.
+               continue;
+              }
+           }
+         else
+           {
+            // GetAttempt read failure (DB unavailable / prepare / not found): recoverability is
+            // uncertain. Do NOT auto-quarantine a potentially recoverable intent; preserve it
+            // for controlled recovery with full revalidation + operator re-consent (D-10).
+            continue;
+           }
+         // Not recoverable: submission_allowed=1 (bound but not marked) or broker evidence
+         // present -> quarantine to RECONCILIATION_REQUIRED (fail-closed, no auto-resubmit).
          ReconcileAttempt(orphan_ids[i]);
         }
      }
@@ -3736,6 +3763,18 @@ CExecutionLedger::ENUM_CLAIM_RESULT CExecutionLedger::CreateSetupClaim(
 //| On any failure, neither durable claim nor intent is committed.    |
 //| No nested transactions. Uses existing tx-safe helpers.            |
 //| Existing claim-only records remain visible/blocked (fail-closed).  |
+//+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| RS01-CLAIMINTENT-ATOMIC: Claim + initial Intent atomicity        |
+//| Creates a setup_claim row bound to attempt_id and inserts the    |
+//| initial execution_attempt intent (EXEC_STATE_INTENT_DURABLE_NOT_SUBMITTED)|
+//| inside ONE database transaction (no nested transaction).         |
+//| Atomicity contract: claim and intent are committed together or   |
+//| neither persists. On ANY failure (claim insert, affected-rows    |
+//| check, intent insert, or commit) the transaction is rolled back  |
+//| and CLAIM_ERROR is returned — nothing is left partially persisted.|
+//| Commit failure is treated as uncertain (fail-closed), not success.|
+//| Supported creation path (with ApproveAndCreateRetry for retry).  |
 //+------------------------------------------------------------------+
 CExecutionLedger::ENUM_CLAIM_RESULT CExecutionLedger::CreateSetupClaimAndIntent(
     const string strategy_group_key,

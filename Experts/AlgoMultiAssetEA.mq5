@@ -300,8 +300,11 @@ bool ParseSymbolUniverse(const string universe_str,
     if(n == 0)
         return false;
 
-    // Track normalized names for duplicate detection
-    string normalized[];
+    // Track configured names for duplicate detection.
+    // Comparison is exact after trim + case folding ONLY: no suffix/prefix collapsing.
+    // "EURUSD" and "EURUSD.pro" are distinct configured symbols and must NOT be merged here;
+    // broker resolution happens explicitly (and fail-closed) in ResolveBrokerSymbol.
+    string seen[];
     for(int i = 0; i < n; i++)
     {
         string s = parts[i];
@@ -310,19 +313,20 @@ bool ParseSymbolUniverse(const string universe_str,
         if(s == "")
             return false; // empty entry -> malformed
 
-        string s_norm = NormalizeSymbolForComparison(s);
-        // Check for duplicates in normalized form
-        for(int j = 0; j < ArraySize(normalized); j++)
+        string s_key = s;
+        StringToUpper(s_key); // case-insensitive duplicate detection only; no suffix/prefix collapsing
+
+        for(int j = 0; j < ArraySize(seen); j++)
         {
-            if(normalized[j] == s_norm)
-                return false; // duplicate after normalization
+            if(seen[j] == s_key)
+                return false; // duplicate configured symbol
         }
 
         int sz = ArraySize(symbols_out);
         ArrayResize(symbols_out, sz + 1);
         symbols_out[sz] = s; // store original configured form
-        ArrayResize(normalized, sz + 1);
-        normalized[sz] = s_norm;
+        ArrayResize(seen, sz + 1);
+        seen[sz] = s_key;
     }
     return true;
 }
@@ -2922,14 +2926,15 @@ else
     bool chart_symbol_in_universe=false;
     string discovered_symbols[];
     DiscoverTradableSymbols(discovered_symbols);
-    string chart_norm = NormalizeSymbolForComparison(chart_symbol);
+    // discovered_symbols[] holds resolved broker symbols; compare exactly (no heuristic
+    // normalization) so broker suffix/prefix variants are never incorrectly matched.
     for(int di=0; di<ArraySize(discovered_symbols); di++)
       {
-       if(NormalizeSymbolForComparison(discovered_symbols[di]) == chart_norm)
-         {
-          chart_symbol_in_universe=true;
-          break;
-         }
+      if(discovered_symbols[di] == chart_symbol)
+        {
+        chart_symbol_in_universe=true;
+        break;
+        }
       }
 
 if(g_coordinator_mode == COORD_MODE_CHART_CONTEXT)
@@ -3333,7 +3338,7 @@ RiskDecision risk;
        risk.decision = RISK_REJECTED;
        risk.rejection_reason = REJECT_PORTFOLIO_RISK;
        g_logger.Risk(risk);
-       runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+       // TEMPORARY BLOCK: portfolio state unavailable - do not consume
        return;
       }
 
@@ -3346,7 +3351,7 @@ RiskDecision risk;
        risk.decision = RISK_REJECTED;
        risk.rejection_reason = REJECT_PORTFOLIO_RISK;
        g_logger.Risk(risk);
-       runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+       // TEMPORARY BLOCK: trading locked - do not consume
        return;
       }
 
@@ -3532,7 +3537,7 @@ attempt_rec.serialization_version = 2;
         g_logger.Event(LOG_WARNING, "RISK", "RISK_STATE_UNAVAILABLE_ADMISSION", runtime.symbol, "", "",
                        decision.plan.setup_id, "REJECT", "RISK_UNAVAILABLE",
                        "Portfolio state unavailable; admission blocked");
-        runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+        // TEMPORARY BLOCK: portfolio state unavailable - do not consume
         return;
        }
 
@@ -3541,7 +3546,7 @@ attempt_rec.serialization_version = 2;
         g_logger.Event(LOG_WARNING, "RISK", "RISK_LOCK_ADMISSION", runtime.symbol, "", "",
                        decision.plan.setup_id, "REJECT", "RISK_LOCKED",
                        "Trading locked; admission blocked");
-        runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+        // TEMPORARY BLOCK: trading locked - do not consume
         return;
        }
 
@@ -3564,7 +3569,7 @@ attempt_rec.serialization_version = 2;
            g_logger.Event(LOG_WARNING, "AUTHORITY", "AUTHORITY_BLOCK_BEFORE_CLAIM", runtime.symbol, "", "",
                           decision.plan.setup_id, "REJECT", "AUTHORITY_INVALID",
                           "Authority invalid before durable claim; no intent created");
-           runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+           // TEMPORARY BLOCK: authority invalid - do not consume
            return;
           }
        }
@@ -3574,34 +3579,63 @@ attempt_rec.serialization_version = 2;
      string claim_intent_err = "";
      CExecutionLedger::ENUM_CLAIM_RESULT claim_res = g_execution_ledger.CreateSetupClaimAndIntent(
          g_strategy_group_key, normalized_plan.logical_setup_key, attempt_rec.canonical_identity, 2, attempt_rec, claim_intent_err);
-     if(claim_res != CExecutionLedger::CLAIM_CREATED)
-       {
-        string cmsg = (claim_res == CExecutionLedger::CLAIM_ALREADY_EXISTS) ? "Durable claim already exists for logical setup (restart-safe duplicate prevention)" :
-                      (claim_res == CExecutionLedger::CLAIM_IDENTITY_COLLISION) ? "Claim identity collision for logical setup key (stable components differ or unsafe legacy)" :
-                      "Atomic claim+intent acquisition failed (DB/error) - fail closed, no partial commit";
-        g_logger.Event((claim_res == CExecutionLedger::CLAIM_ERROR ? LOG_ERROR : LOG_WARNING), "EXECUTION", "SETUP_CLAIM_BLOCKED", request.symbol, "", "", request.signal_id,
-                       "REJECT", "CLAIM_BLOCKED", cmsg + " lsk=" + normalized_plan.logical_setup_key + " err=" + claim_intent_err);
+     if(claim_res == CExecutionLedger::CLAIM_ALREADY_EXISTS)
+        {
+        // DUPLICATE: durable claim already exists (restart-safe duplicate prevention).
+        // Verify existing claim & attempt status (Action 9); do not create a new attempt.
+        g_logger.Event(LOG_WARNING, "EXECUTION", "SETUP_CLAIM_ALREADY_EXISTS", request.symbol, "", "", request.signal_id,
+                       "REJECT", "CLAIM_ALREADY_EXISTS", "Durable claim already exists for logical setup; duplicate suppressed, no new attempt. lsk=" + normalized_plan.logical_setup_key + " err=" + claim_intent_err);
         runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
         return;
-       }
+        }
+     if(claim_res == CExecutionLedger::CLAIM_IDENTITY_COLLISION)
+        {
+        // AMBIGUOUS identity collision: stable components differ; no auto-resubmit, reconciliation required.
+        g_logger.Event(LOG_ERROR, "EXECUTION", "SETUP_CLAIM_IDENTITY_COLLISION", request.symbol, "", "", request.signal_id,
+                       "FAIL", "CLAIM_IDENTITY_COLLISION", "Claim identity collision for logical setup key; reconciliation required, no auto-resubmit. lsk=" + normalized_plan.logical_setup_key + " err=" + claim_intent_err);
+        g_execution_ledger.MarkReconciliationRequired(request.attempt_id, "Claim identity collision");
+        runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+        return;
+        }
+     if(claim_res == CExecutionLedger::CLAIM_ERROR)
+        {
+        // LEDGER ERROR: atomic claim+intent failed (DB/error); fail-closed, temporary block, recovery via scheduler/freshness.
+        // No durable intent was committed; nothing to reconcile yet. Do not MarkPlanConsumed terminally.
+        g_logger.Event(LOG_ERROR, "EXECUTION", "SETUP_CLAIM_ERROR", request.symbol, "", "", request.signal_id,
+                       "FAIL", "CLAIM_ERROR", "Atomic claim+intent acquisition failed (DB/error) - fail closed, no partial commit. lsk=" + normalized_plan.logical_setup_key + " err=" + claim_intent_err);
+        return;
+        }
 }
 
      // F-005.2: Ledger allocates attempt_magic atomically with Intent.
      // Copy to request so TradeExecutor uses it for broker-visible Magic.
      request.attempt_magic = attempt_rec.attempt_magic;
 
-     // Check ledger for blocking unresolved attempts
-    string ledger_block = "";
-    if(!g_execution_ledger.IsAvailable() ||g_execution_ledger.HasBlockingUnresolved(ledger_block))
-      {
-       g_logger.Event(
-          LOG_WARNING, "EXECUTION", "EXECUTION_BLOCKED_LEDGER",
-          request.symbol, "", "",
-          request.signal_id,
-          "REJECT", "LEDGER_BLOCK", ledger_block);
-       runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
-       return;
-      }
+      // Check ledger for blocking unresolved attempts
+     string ledger_block = "";
+     if(!g_execution_ledger.IsAvailable())
+       {
+        // Ledger unavailable: temporary block; recoverable when ledger returns.
+        // Do not MarkPlanConsumed terminally — keep setup recoverable for Temporary Recovery (Scheduler + Freshness).
+        g_logger.Event(
+           LOG_WARNING, "EXECUTION", "EXECUTION_BLOCKED_LEDGER_UNAVAILABLE",
+           request.symbol, "", "",
+           request.signal_id,
+           "REJECT", "LEDGER_UNAVAILABLE", "Execution ledger unavailable; temporary block, recovery via scheduler/freshness");
+        return;
+       }
+     if(g_execution_ledger.HasBlockingUnresolved(ledger_block))
+       {
+        // Blocking unresolved attempt: reconciliation required, fail-closed, no auto-resubmit.
+        g_logger.Event(
+           LOG_WARNING, "EXECUTION", "EXECUTION_BLOCKED_UNRESOLVED",
+           request.symbol, "", "",
+           request.signal_id,
+           "REJECT", "UNRESOLVED_ATTEMPT", "Blocking unresolved attempt; reconciliation required, no auto-resubmit");
+        g_execution_ledger.MarkReconciliationRequired(request.attempt_id, "Blocking unresolved attempt before submit");
+        runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+        return;
+       }
 
     if(g_execution_ledger.HasUnresolvedForSymbol(request.symbol, true))
       {
@@ -4115,8 +4149,6 @@ else
           legacy_signal.signal_id,
           "FAIL", "HISTORY_OR_ACCOUNT_STATE",
           "Post-trade state reconstruction failed; new entries blocked");
-
-    runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
    }
 
 
@@ -4244,9 +4276,12 @@ void ProcessDataFetch(CSymbolRuntime& runtime)
    ResetLastError();
    if(!runtime.market_context.GetSnapshot(runtime.symbol, runtime.context_tf, context_market))
      {
+      int err=GetLastError();
       g_logger.Event(LOG_ERROR, "MARKET", "MARKET_SNAPSHOT_FAILED",
-                     runtime.symbol, "", "", "", "FAIL", "SIGNAL_SNAPSHOT",
-                     "Market signal snapshot failed", GetLastError());
+                     runtime.symbol, EnumToString(runtime.context_tf), "", "", "FAIL", "SIGNAL_SNAPSHOT",
+                     "Context snapshot failed: "+runtime.market_context.LastValidationDetail()+
+                     " (result="+IntegerToString((int)runtime.market_context.LastValidationResult())+
+                     ", LastError="+IntegerToString(err)+")", err);
       ResetLastError();
       runtime.TransitionTo(RUNTIME_BLOCKED_DATA, REASON_DATA_FETCH_FAILED);
       ShowRuntimeGateStatus(runtime, "BLOCKED: SIGNAL DATA");
@@ -4257,9 +4292,12 @@ void ProcessDataFetch(CSymbolRuntime& runtime)
    ResetLastError();
    if(!runtime.market_structure.GetSnapshot(runtime.symbol, runtime.structure_tf, structure_market))
      {
+      int err=GetLastError();
       g_logger.Event(LOG_ERROR, "MARKET", "MARKET_SNAPSHOT_FAILED",
-                     runtime.symbol, "", "", "", "FAIL", "STRUCTURE_SNAPSHOT",
-                     "Market structure snapshot failed", GetLastError());
+                     runtime.symbol, EnumToString(runtime.structure_tf), "", "", "FAIL", "STRUCTURE_SNAPSHOT",
+                     "Structure snapshot failed: "+runtime.market_structure.LastValidationDetail()+
+                     " (result="+IntegerToString((int)runtime.market_structure.LastValidationResult())+
+                     ", LastError="+IntegerToString(err)+")", err);
       ResetLastError();
       runtime.TransitionTo(RUNTIME_BLOCKED_DATA, REASON_DATA_FETCH_FAILED);
       ShowRuntimeGateStatus(runtime, "BLOCKED: STRUCTURE DATA");
@@ -4270,9 +4308,12 @@ void ProcessDataFetch(CSymbolRuntime& runtime)
    ResetLastError();
    if(!runtime.market_setup.GetSnapshot(runtime.symbol, runtime.setup_tf, setup_market))
      {
+      int err=GetLastError();
       g_logger.Event(LOG_ERROR, "MARKET", "MARKET_SNAPSHOT_FAILED",
-                     runtime.symbol, "", "", "", "FAIL", "SETUP_SNAPSHOT",
-                     "Market setup snapshot failed", GetLastError());
+                     runtime.symbol, EnumToString(runtime.setup_tf), "", "", "FAIL", "SETUP_SNAPSHOT",
+                     "Setup snapshot failed: "+runtime.market_setup.LastValidationDetail()+
+                     " (result="+IntegerToString((int)runtime.market_setup.LastValidationResult())+
+                     ", LastError="+IntegerToString(err)+")", err);
       ResetLastError();
       runtime.TransitionTo(RUNTIME_BLOCKED_DATA, REASON_DATA_FETCH_FAILED);
       ShowRuntimeGateStatus(runtime, "BLOCKED: SETUP DATA");
@@ -4282,9 +4323,12 @@ void ProcessDataFetch(CSymbolRuntime& runtime)
 
    if(!runtime.market_entry.GetSnapshot(runtime.symbol, runtime.entry_tf, entry_market))
      {
+      int err=GetLastError();
       g_logger.Event(LOG_ERROR, "MARKET", "MARKET_SNAPSHOT_FAILED",
-                     runtime.symbol, "", "", "", "FAIL", "ENTRY_SNAPSHOT",
-                     "Market entry snapshot failed", GetLastError());
+                     runtime.symbol, EnumToString(runtime.entry_tf), "", "", "FAIL", "ENTRY_SNAPSHOT",
+                     "Entry snapshot failed: "+runtime.market_entry.LastValidationDetail()+
+                     " (result="+IntegerToString((int)runtime.market_entry.LastValidationResult())+
+                     ", LastError="+IntegerToString(err)+")", err);
       ResetLastError();
       runtime.TransitionTo(RUNTIME_BLOCKED_DATA, REASON_DATA_FETCH_FAILED);
       ShowRuntimeGateStatus(runtime, "BLOCKED: ENTRY DATA");
