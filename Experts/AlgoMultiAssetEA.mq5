@@ -3574,34 +3574,63 @@ attempt_rec.serialization_version = 2;
      string claim_intent_err = "";
      CExecutionLedger::ENUM_CLAIM_RESULT claim_res = g_execution_ledger.CreateSetupClaimAndIntent(
          g_strategy_group_key, normalized_plan.logical_setup_key, attempt_rec.canonical_identity, 2, attempt_rec, claim_intent_err);
-     if(claim_res != CExecutionLedger::CLAIM_CREATED)
-       {
-        string cmsg = (claim_res == CExecutionLedger::CLAIM_ALREADY_EXISTS) ? "Durable claim already exists for logical setup (restart-safe duplicate prevention)" :
-                      (claim_res == CExecutionLedger::CLAIM_IDENTITY_COLLISION) ? "Claim identity collision for logical setup key (stable components differ or unsafe legacy)" :
-                      "Atomic claim+intent acquisition failed (DB/error) - fail closed, no partial commit";
-        g_logger.Event((claim_res == CExecutionLedger::CLAIM_ERROR ? LOG_ERROR : LOG_WARNING), "EXECUTION", "SETUP_CLAIM_BLOCKED", request.symbol, "", "", request.signal_id,
-                       "REJECT", "CLAIM_BLOCKED", cmsg + " lsk=" + normalized_plan.logical_setup_key + " err=" + claim_intent_err);
+     if(claim_res == CExecutionLedger::CLAIM_ALREADY_EXISTS)
+        {
+        // DUPLICATE: durable claim already exists (restart-safe duplicate prevention).
+        // Verify existing claim & attempt status (Action 9); do not create a new attempt.
+        g_logger.Event(LOG_WARNING, "EXECUTION", "SETUP_CLAIM_ALREADY_EXISTS", request.symbol, "", "", request.signal_id,
+                       "REJECT", "CLAIM_ALREADY_EXISTS", "Durable claim already exists for logical setup; duplicate suppressed, no new attempt. lsk=" + normalized_plan.logical_setup_key + " err=" + claim_intent_err);
         runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
         return;
-       }
+        }
+     if(claim_res == CExecutionLedger::CLAIM_IDENTITY_COLLISION)
+        {
+        // AMBIGUOUS identity collision: stable components differ; no auto-resubmit, reconciliation required.
+        g_logger.Event(LOG_ERROR, "EXECUTION", "SETUP_CLAIM_IDENTITY_COLLISION", request.symbol, "", "", request.signal_id,
+                       "FAIL", "CLAIM_IDENTITY_COLLISION", "Claim identity collision for logical setup key; reconciliation required, no auto-resubmit. lsk=" + normalized_plan.logical_setup_key + " err=" + claim_intent_err);
+        g_execution_ledger.MarkReconciliationRequired(request.attempt_id, "Claim identity collision");
+        runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+        return;
+        }
+     if(claim_res == CExecutionLedger::CLAIM_ERROR)
+        {
+        // LEDGER ERROR: atomic claim+intent failed (DB/error); fail-closed, temporary block, recovery via scheduler/freshness.
+        // No durable intent was committed; nothing to reconcile yet. Do not MarkPlanConsumed terminally.
+        g_logger.Event(LOG_ERROR, "EXECUTION", "SETUP_CLAIM_ERROR", request.symbol, "", "", request.signal_id,
+                       "FAIL", "CLAIM_ERROR", "Atomic claim+intent acquisition failed (DB/error) - fail closed, no partial commit. lsk=" + normalized_plan.logical_setup_key + " err=" + claim_intent_err);
+        return;
+        }
 }
 
      // F-005.2: Ledger allocates attempt_magic atomically with Intent.
      // Copy to request so TradeExecutor uses it for broker-visible Magic.
      request.attempt_magic = attempt_rec.attempt_magic;
 
-     // Check ledger for blocking unresolved attempts
-    string ledger_block = "";
-    if(!g_execution_ledger.IsAvailable() ||g_execution_ledger.HasBlockingUnresolved(ledger_block))
-      {
-       g_logger.Event(
-          LOG_WARNING, "EXECUTION", "EXECUTION_BLOCKED_LEDGER",
-          request.symbol, "", "",
-          request.signal_id,
-          "REJECT", "LEDGER_BLOCK", ledger_block);
-       runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
-       return;
-      }
+      // Check ledger for blocking unresolved attempts
+     string ledger_block = "";
+     if(!g_execution_ledger.IsAvailable())
+       {
+        // Ledger unavailable: temporary block; recoverable when ledger returns.
+        // Do not MarkPlanConsumed terminally — keep setup recoverable for Temporary Recovery (Scheduler + Freshness).
+        g_logger.Event(
+           LOG_WARNING, "EXECUTION", "EXECUTION_BLOCKED_LEDGER_UNAVAILABLE",
+           request.symbol, "", "",
+           request.signal_id,
+           "REJECT", "LEDGER_UNAVAILABLE", "Execution ledger unavailable; temporary block, recovery via scheduler/freshness");
+        return;
+       }
+     if(g_execution_ledger.HasBlockingUnresolved(ledger_block))
+       {
+        // Blocking unresolved attempt: reconciliation required, fail-closed, no auto-resubmit.
+        g_logger.Event(
+           LOG_WARNING, "EXECUTION", "EXECUTION_BLOCKED_UNRESOLVED",
+           request.symbol, "", "",
+           request.signal_id,
+           "REJECT", "UNRESOLVED_ATTEMPT", "Blocking unresolved attempt; reconciliation required, no auto-resubmit");
+        g_execution_ledger.MarkReconciliationRequired(request.attempt_id, "Blocking unresolved attempt before submit");
+        runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+        return;
+       }
 
     if(g_execution_ledger.HasUnresolvedForSymbol(request.symbol, true))
       {
@@ -4115,8 +4144,6 @@ else
           legacy_signal.signal_id,
           "FAIL", "HISTORY_OR_ACCOUNT_STATE",
           "Post-trade state reconstruction failed; new entries blocked");
-
-    runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
    }
 
 
