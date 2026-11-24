@@ -22,13 +22,34 @@
 //+------------------------------------------------------------------+
 class CMarketDataEngine : public IMarketDataProvider
   {
+public:
+   //+------------------------------------------------------------------+
+   //| Symbol validation result codes                                   |
+   //| Precise diagnostics for disabled / missing / stale / inaccessible  |
+   //| symbols (WP-02 item 7).                                            |
+   //+------------------------------------------------------------------+
+   enum EMarketDataValidateResult
+     {
+      MARKET_DATA_VALID_OK                = 0,  // Symbol fully valid for data access
+      MARKET_DATA_VALID_EMPTY_SYMBOL      = 1,  // Symbol string is empty
+      MARKET_DATA_VALID_NOT_EXIST         = 2,  // SymbolExist returned false (missing symbol)
+      MARKET_DATA_VALID_NOT_SELECTABLE    = 3,  // SymbolSelect failed (inaccessible / not in Market Watch)
+      MARKET_DATA_VALID_NOT_SYNCHRONIZED  = 4,  // SymbolIsSynchronized returned false (stale / history not ready)
+      MARKET_DATA_VALID_TRADE_DISABLED    = 5,  // SYMBOL_TRADE_MODE_DISABLED (data accessible, trading blocked)
+      MARKET_DATA_VALID_INVALID_TIMEFRAME = 6,  // PERIOD_CURRENT or invalid timeframe
+      MARKET_DATA_VALID_LOOKUP_ERROR      = 7   // Underlying API/lookup error (tick/bar read failed)
+     };
+
 private:
 
-   string            m_symbols[];
-   ENUM_TIMEFRAMES   m_timeframes[];
-    datetime          m_last_closed_bar[];
+   string                              m_symbols[];
+   ENUM_TIMEFRAMES                     m_timeframes[];
+   datetime                            m_last_closed_bar[];
 
-    int FindRegistration(const string symbol,
+   EMarketDataValidateResult           m_last_validation_result;
+   string                              m_last_validation_detail;
+
+   int FindRegistration(const string symbol,
                         const ENUM_TIMEFRAMES timeframe) const
      {
       int count=ArraySize(m_symbols);
@@ -43,32 +64,93 @@ private:
       return -1;
      }
 
+   //+------------------------------------------------------------------+
+   //| Detailed symbol validation.                                      |
+   //| Returns true only when the symbol is usable for data access.     |
+   //| The detailed result/detail are always populated so callers can   |
+   //| report exactly WHY a symbol is disabled / missing / stale /      |
+   //| inaccessible instead of a generic "invalid symbol".              |
+   //+------------------------------------------------------------------+
    bool ValidateSymbol(const string symbol)
      {
+      m_last_validation_result = MARKET_DATA_VALID_LOOKUP_ERROR;
+      m_last_validation_detail = "";
+
       if(StringLen(symbol)==0)
+        {
+         m_last_validation_result = MARKET_DATA_VALID_EMPTY_SYMBOL;
+         m_last_validation_detail = "Symbol string is empty";
          return false;
+        }
 
       bool is_custom=false;
-
+      ResetLastError();
       if(!SymbolExist(symbol,is_custom))
+        {
+         int err=GetLastError();
+         m_last_validation_result = MARKET_DATA_VALID_NOT_EXIST;
+         m_last_validation_detail = "Symbol does not exist"+(err>0 ? " error="+IntegerToString(err) : "");
          return false;
+        }
 
+      ResetLastError();
       if(!SymbolSelect(symbol,true))
+        {
+         int err=GetLastError();
+         m_last_validation_result = MARKET_DATA_VALID_NOT_SELECTABLE;
+         m_last_validation_detail = "SymbolSelect failed (inaccessible / not in Market Watch)"+(err>0 ? " error="+IntegerToString(err) : "");
          return false;
+        }
 
+      ResetLastError();
       if(!SymbolIsSynchronized(symbol))
+        {
+         int err=GetLastError();
+         m_last_validation_result = MARKET_DATA_VALID_NOT_SYNCHRONIZED;
+         m_last_validation_detail = "Symbol not synchronized (stale / history not ready)"+(err>0 ? " error="+IntegerToString(err) : "");
          return false;
+        }
 
+      // Trade mode is reported for diagnostics but does NOT block data access:
+      // a symbol can be present and synchronized yet not tradable (e.g. close-only).
+      long trade_mode=0;
+      if(SymbolInfoInteger(symbol,SYMBOL_TRADE_MODE,trade_mode) && trade_mode==SYMBOL_TRADE_MODE_DISABLED)
+        {
+         m_last_validation_result = MARKET_DATA_VALID_TRADE_DISABLED;
+         m_last_validation_detail = "Symbol trade mode disabled (data accessible, trading blocked)";
+         return true;
+        }
+
+      m_last_validation_result = MARKET_DATA_VALID_OK;
+      m_last_validation_detail = "Symbol valid";
       return true;
      }
+
+   //+------------------------------------------------------------------+
+   //| Timeframe validation                                             |
+   //+------------------------------------------------------------------+
 
    bool ValidateTimeframe(const ENUM_TIMEFRAMES timeframe)
      {
-      if(timeframe==PERIOD_CURRENT)
-         return false;
+     if(timeframe==PERIOD_CURRENT)
+       {
+       m_last_validation_result = MARKET_DATA_VALID_INVALID_TIMEFRAME;
+       m_last_validation_detail = "Invalid timeframe (PERIOD_CURRENT)";
+       return false;
+       }
 
-      return true;
+     m_last_validation_result = MARKET_DATA_VALID_OK;
+     m_last_validation_detail = "Timeframe valid";
+     return true;
      }
+
+   //+------------------------------------------------------------------+
+   //| Last validation result accessors (for caller-side diagnostics)   |
+   //+------------------------------------------------------------------+
+
+   EMarketDataValidateResult LastValidationResult() const { return m_last_validation_result; }
+
+   string LastValidationDetail() const { return m_last_validation_detail; }
 
    bool LoadBar(const string symbol,
                 const ENUM_TIMEFRAMES timeframe,
@@ -188,8 +270,10 @@ public:
      {
       ArrayResize(m_symbols,0);
       ArrayResize(m_timeframes,0);
-       ArrayResize(m_last_closed_bar,0);
-      }
+      ArrayResize(m_last_closed_bar,0);
+      m_last_validation_result=MARKET_DATA_VALID_OK;
+      m_last_validation_detail="";
+     }
 
    //+---------------------------------------------------------------+
    //| IMarketDataProvider                                           |
@@ -200,6 +284,8 @@ public:
       ArrayResize(m_symbols,0);
       ArrayResize(m_timeframes,0);
       ArrayResize(m_last_closed_bar,0);
+      m_last_validation_result=MARKET_DATA_VALID_OK;
+      m_last_validation_detail="";
 
       return true;
      }
@@ -237,13 +323,23 @@ public:
       ResetLastError();
 
       if(!SymbolInfoTick(symbol,tick))
+        {
+         int err=GetLastError();
+         m_last_validation_result = MARKET_DATA_VALID_LOOKUP_ERROR;
+         m_last_validation_detail = "SymbolInfoTick failed"+(err>0 ? " error="+IntegerToString(err) : "");
          return false;
+        }
 
       SymbolProperties properties;
 
       if(!LoadSymbolProperties(symbol,
                                properties))
+        {
+         int err=GetLastError();
+         m_last_validation_result = MARKET_DATA_VALID_LOOKUP_ERROR;
+         m_last_validation_detail = "LoadSymbolProperties failed"+(err>0 ? " error="+IntegerToString(err) : "");
          return false;
+        }
 
       BarData current_bar;
       BarData closed_bar;
@@ -253,14 +349,24 @@ public:
                   timeframe,
                   0,
                   current_bar))
+        {
+         int err=GetLastError();
+         m_last_validation_result = MARKET_DATA_VALID_LOOKUP_ERROR;
+         m_last_validation_detail = "LoadBar(shift=0/current) failed"+(err>0 ? " error="+IntegerToString(err) : "");
          return false;
+        }
 
       // shift 1 = latest completed/closed bar
       if(!LoadBar(symbol,
                   timeframe,
                   1,
                   closed_bar))
+        {
+         int err=GetLastError();
+         m_last_validation_result = MARKET_DATA_VALID_LOOKUP_ERROR;
+         m_last_validation_detail = "LoadBar(shift=1/closed) failed"+(err>0 ? " error="+IntegerToString(err) : "");
          return false;
+        }
 
       snapshot.symbol=symbol;
       snapshot.timeframe=timeframe;

@@ -300,8 +300,11 @@ bool ParseSymbolUniverse(const string universe_str,
     if(n == 0)
         return false;
 
-    // Track normalized names for duplicate detection
-    string normalized[];
+    // Track configured names for duplicate detection.
+    // Comparison is exact after trim + case folding ONLY: no suffix/prefix collapsing.
+    // "EURUSD" and "EURUSD.pro" are distinct configured symbols and must NOT be merged here;
+    // broker resolution happens explicitly (and fail-closed) in ResolveBrokerSymbol.
+    string seen[];
     for(int i = 0; i < n; i++)
     {
         string s = parts[i];
@@ -310,19 +313,20 @@ bool ParseSymbolUniverse(const string universe_str,
         if(s == "")
             return false; // empty entry -> malformed
 
-        string s_norm = NormalizeSymbolForComparison(s);
-        // Check for duplicates in normalized form
-        for(int j = 0; j < ArraySize(normalized); j++)
+        string s_key = s;
+        StringToUpper(s_key); // case-insensitive duplicate detection only; no suffix/prefix collapsing
+
+        for(int j = 0; j < ArraySize(seen); j++)
         {
-            if(normalized[j] == s_norm)
-                return false; // duplicate after normalization
+            if(seen[j] == s_key)
+                return false; // duplicate configured symbol
         }
 
         int sz = ArraySize(symbols_out);
         ArrayResize(symbols_out, sz + 1);
         symbols_out[sz] = s; // store original configured form
-        ArrayResize(normalized, sz + 1);
-        normalized[sz] = s_norm;
+        ArrayResize(seen, sz + 1);
+        seen[sz] = s_key;
     }
     return true;
 }
@@ -2922,14 +2926,15 @@ else
     bool chart_symbol_in_universe=false;
     string discovered_symbols[];
     DiscoverTradableSymbols(discovered_symbols);
-    string chart_norm = NormalizeSymbolForComparison(chart_symbol);
+    // discovered_symbols[] holds resolved broker symbols; compare exactly (no heuristic
+    // normalization) so broker suffix/prefix variants are never incorrectly matched.
     for(int di=0; di<ArraySize(discovered_symbols); di++)
       {
-       if(NormalizeSymbolForComparison(discovered_symbols[di]) == chart_norm)
-         {
-          chart_symbol_in_universe=true;
-          break;
-         }
+      if(discovered_symbols[di] == chart_symbol)
+        {
+        chart_symbol_in_universe=true;
+        break;
+        }
       }
 
 if(g_coordinator_mode == COORD_MODE_CHART_CONTEXT)
@@ -4271,9 +4276,12 @@ void ProcessDataFetch(CSymbolRuntime& runtime)
    ResetLastError();
    if(!runtime.market_context.GetSnapshot(runtime.symbol, runtime.context_tf, context_market))
      {
+      int err=GetLastError();
       g_logger.Event(LOG_ERROR, "MARKET", "MARKET_SNAPSHOT_FAILED",
-                     runtime.symbol, "", "", "", "FAIL", "SIGNAL_SNAPSHOT",
-                     "Market signal snapshot failed", GetLastError());
+                     runtime.symbol, EnumToString(runtime.context_tf), "", "", "FAIL", "SIGNAL_SNAPSHOT",
+                     "Context snapshot failed: "+runtime.market_context.LastValidationDetail()+
+                     " (result="+IntegerToString((int)runtime.market_context.LastValidationResult())+
+                     ", LastError="+IntegerToString(err)+")", err);
       ResetLastError();
       runtime.TransitionTo(RUNTIME_BLOCKED_DATA, REASON_DATA_FETCH_FAILED);
       ShowRuntimeGateStatus(runtime, "BLOCKED: SIGNAL DATA");
@@ -4284,9 +4292,12 @@ void ProcessDataFetch(CSymbolRuntime& runtime)
    ResetLastError();
    if(!runtime.market_structure.GetSnapshot(runtime.symbol, runtime.structure_tf, structure_market))
      {
+      int err=GetLastError();
       g_logger.Event(LOG_ERROR, "MARKET", "MARKET_SNAPSHOT_FAILED",
-                     runtime.symbol, "", "", "", "FAIL", "STRUCTURE_SNAPSHOT",
-                     "Market structure snapshot failed", GetLastError());
+                     runtime.symbol, EnumToString(runtime.structure_tf), "", "", "FAIL", "STRUCTURE_SNAPSHOT",
+                     "Structure snapshot failed: "+runtime.market_structure.LastValidationDetail()+
+                     " (result="+IntegerToString((int)runtime.market_structure.LastValidationResult())+
+                     ", LastError="+IntegerToString(err)+")", err);
       ResetLastError();
       runtime.TransitionTo(RUNTIME_BLOCKED_DATA, REASON_DATA_FETCH_FAILED);
       ShowRuntimeGateStatus(runtime, "BLOCKED: STRUCTURE DATA");
@@ -4297,9 +4308,12 @@ void ProcessDataFetch(CSymbolRuntime& runtime)
    ResetLastError();
    if(!runtime.market_setup.GetSnapshot(runtime.symbol, runtime.setup_tf, setup_market))
      {
+      int err=GetLastError();
       g_logger.Event(LOG_ERROR, "MARKET", "MARKET_SNAPSHOT_FAILED",
-                     runtime.symbol, "", "", "", "FAIL", "SETUP_SNAPSHOT",
-                     "Market setup snapshot failed", GetLastError());
+                     runtime.symbol, EnumToString(runtime.setup_tf), "", "", "FAIL", "SETUP_SNAPSHOT",
+                     "Setup snapshot failed: "+runtime.market_setup.LastValidationDetail()+
+                     " (result="+IntegerToString((int)runtime.market_setup.LastValidationResult())+
+                     ", LastError="+IntegerToString(err)+")", err);
       ResetLastError();
       runtime.TransitionTo(RUNTIME_BLOCKED_DATA, REASON_DATA_FETCH_FAILED);
       ShowRuntimeGateStatus(runtime, "BLOCKED: SETUP DATA");
@@ -4309,9 +4323,12 @@ void ProcessDataFetch(CSymbolRuntime& runtime)
 
    if(!runtime.market_entry.GetSnapshot(runtime.symbol, runtime.entry_tf, entry_market))
      {
+      int err=GetLastError();
       g_logger.Event(LOG_ERROR, "MARKET", "MARKET_SNAPSHOT_FAILED",
-                     runtime.symbol, "", "", "", "FAIL", "ENTRY_SNAPSHOT",
-                     "Market entry snapshot failed", GetLastError());
+                     runtime.symbol, EnumToString(runtime.entry_tf), "", "", "FAIL", "ENTRY_SNAPSHOT",
+                     "Entry snapshot failed: "+runtime.market_entry.LastValidationDetail()+
+                     " (result="+IntegerToString((int)runtime.market_entry.LastValidationResult())+
+                     ", LastError="+IntegerToString(err)+")", err);
       ResetLastError();
       runtime.TransitionTo(RUNTIME_BLOCKED_DATA, REASON_DATA_FETCH_FAILED);
       ShowRuntimeGateStatus(runtime, "BLOCKED: ENTRY DATA");
