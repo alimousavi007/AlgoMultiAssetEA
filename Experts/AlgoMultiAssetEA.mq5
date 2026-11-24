@@ -3333,7 +3333,7 @@ RiskDecision risk;
        risk.decision = RISK_REJECTED;
        risk.rejection_reason = REJECT_PORTFOLIO_RISK;
        g_logger.Risk(risk);
-       runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+       // TEMPORARY BLOCK: portfolio state unavailable - do not consume
        return;
       }
 
@@ -3346,7 +3346,7 @@ RiskDecision risk;
        risk.decision = RISK_REJECTED;
        risk.rejection_reason = REJECT_PORTFOLIO_RISK;
        g_logger.Risk(risk);
-       runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+       // TEMPORARY BLOCK: trading locked - do not consume
        return;
       }
 
@@ -3532,7 +3532,7 @@ attempt_rec.serialization_version = 2;
         g_logger.Event(LOG_WARNING, "RISK", "RISK_STATE_UNAVAILABLE_ADMISSION", runtime.symbol, "", "",
                        decision.plan.setup_id, "REJECT", "RISK_UNAVAILABLE",
                        "Portfolio state unavailable; admission blocked");
-        runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+        // TEMPORARY BLOCK: portfolio state unavailable - do not consume
         return;
        }
 
@@ -3541,7 +3541,7 @@ attempt_rec.serialization_version = 2;
         g_logger.Event(LOG_WARNING, "RISK", "RISK_LOCK_ADMISSION", runtime.symbol, "", "",
                        decision.plan.setup_id, "REJECT", "RISK_LOCKED",
                        "Trading locked; admission blocked");
-        runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+        // TEMPORARY BLOCK: trading locked - do not consume
         return;
        }
 
@@ -3564,7 +3564,7 @@ attempt_rec.serialization_version = 2;
            g_logger.Event(LOG_WARNING, "AUTHORITY", "AUTHORITY_BLOCK_BEFORE_CLAIM", runtime.symbol, "", "",
                           decision.plan.setup_id, "REJECT", "AUTHORITY_INVALID",
                           "Authority invalid before durable claim; no intent created");
-           runtime.hybrid_engine.MarkPlanConsumed(normalized_plan);
+           // TEMPORARY BLOCK: authority invalid - do not consume
            return;
           }
        }
